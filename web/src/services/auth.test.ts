@@ -9,12 +9,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  RETURN_TO_STORAGE_KEY,
   STATE_STORAGE_KEY,
   TOKENS_STORAGE_KEY,
   VERIFIER_STORAGE_KEY,
   __resetAuthForTests,
   __setRedirectForTests,
   clearAccessToken,
+  consumeReturnTo,
   deriveCodeChallenge,
   getAccessToken,
   handleRedirectCallback,
@@ -163,6 +165,54 @@ describe('auth (OIDC Authorization Code + PKCE)', () => {
       // Y el segundo state es el que viaja en la segunda redirección.
       const url2 = new URL(redirectMock.mock.calls[1][0] as string)
       expect(url2.searchParams.get('state')).toBe(state2)
+    })
+  })
+
+  describe('returnTo (login() / consumeReturnTo())', () => {
+    it('guarda una ruta interna válida y la consume una sola vez', async () => {
+      await login('/settings/profile')
+
+      expect(window.sessionStorage.getItem(RETURN_TO_STORAGE_KEY)).toBe('/settings/profile')
+      expect(consumeReturnTo()).toBe('/settings/profile')
+      // Single-use: la clave se elimina siempre al consumirla.
+      expect(window.sessionStorage.getItem(RETURN_TO_STORAGE_KEY)).toBeNull()
+      expect(consumeReturnTo()).toBeNull()
+    })
+
+    it.each([
+      '//evil.com',
+      'https://evil.com',
+      '/login',
+      '/login?from=x',
+      '/callback',
+      '/callback?code=1',
+      'relative/path',
+      '',
+      '/\\evil.com',
+      '/\\\\evil.com',
+      '/settings\\',
+      // Control chars are stripped by the URL parser: `/\t/evil.com` would be
+      // rebound to the protocol-relative (external) `//evil.com`.
+      '/\t/evil.com',
+      '/\n/evil.com',
+      // React Router matches case-insensitively and ignores a trailing slash.
+      '/LOGIN',
+      '/Login',
+      '/login/',
+      '/callback/',
+    ])('rechaza y no guarda la ruta insegura %j', async (bad) => {
+      await login(bad)
+      expect(window.sessionStorage.getItem(RETURN_TO_STORAGE_KEY)).toBeNull()
+      expect(consumeReturnTo()).toBeNull()
+    })
+
+    it('borra un returnTo previo cuando login() recibe algo inválido', async () => {
+      await login('/calendar')
+      expect(consumeReturnTo()).toBe('/calendar')
+
+      await login('/calendar')
+      await login('https://evil.com')
+      expect(window.sessionStorage.getItem(RETURN_TO_STORAGE_KEY)).toBeNull()
     })
   })
 
@@ -366,12 +416,15 @@ describe('auth (OIDC Authorization Code + PKCE)', () => {
         }),
       )
       window.sessionStorage.setItem(VERIFIER_STORAGE_KEY, 'v')
+      window.sessionStorage.setItem(RETURN_TO_STORAGE_KEY, '/calendar')
       fetchMock.mockResolvedValueOnce(jsonResponse(ENDPOINTS))
 
       await logout()
 
       expect(window.sessionStorage.getItem(TOKENS_STORAGE_KEY)).toBeNull()
       expect(window.sessionStorage.getItem(VERIFIER_STORAGE_KEY)).toBeNull()
+      // El returnTo no debe sobrevivir a un logout.
+      expect(window.sessionStorage.getItem(RETURN_TO_STORAGE_KEY)).toBeNull()
       expect(isAuthenticated()).toBe(false)
 
       const url = new URL(redirectMock.mock.calls[0][0] as string)

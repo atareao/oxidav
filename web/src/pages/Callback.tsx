@@ -9,7 +9,7 @@
 import { Result, Spin } from 'antd'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { handleRedirectCallback } from '../services/auth'
+import { handleRedirectCallback, consumeReturnTo } from '../services/auth'
 
 export function Callback() {
   const navigate = useNavigate()
@@ -20,7 +20,7 @@ export function Callback() {
     handleRedirectCallback()
       .then(() => {
         if (active) {
-          navigate('/calendar', { replace: true })
+          navigate(consumeReturnTo() ?? '/calendar', { replace: true })
         }
       })
       .catch((cause: unknown) => {

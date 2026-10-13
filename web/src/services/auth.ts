@@ -24,6 +24,12 @@
 export const TOKENS_STORAGE_KEY = 'oxidav.oidc.tokens'
 export const VERIFIER_STORAGE_KEY = 'oxidav.oidc.code_verifier'
 export const STATE_STORAGE_KEY = 'oxidav.oidc.state'
+/**
+ * `sessionStorage` key holding the in-app route the user wanted before being
+ * bounced to `/login`. Survives the full-page OIDC round-trip (React Router
+ * location state does not) and is single-use.
+ */
+export const RETURN_TO_STORAGE_KEY = 'oxidav.oidc.return_to'
 
 /** `sessionStorage` key for a manually-provisioned dev token. */
 export const ACCESS_TOKEN_STORAGE_KEY = 'oxidav.access_token'
@@ -245,12 +251,60 @@ export function __setRedirectForTests(fn: ((url: string) => void) | null): void 
 // ---------------------------------------------------------------------------
 
 /**
+ * Accept only safe, internal return routes.
+ *
+ * Rejects external and protocol-relative URLs (`//evil.com` would be read as
+ * `https://evil.com` by `window.location.assign`), as well as the auth routes
+ * themselves (`/login`, `/callback` and their query/hash subroutes), which would
+ * loop back into the OIDC flow. Anything else yields `null`.
+ *
+ * Backslashes and control characters are also rejected: the URL parser strips
+ * control chars (`\t`, `\n`, `\r`) and normalizes `\` to `/` for special
+ * schemes, so `/\evil.com` or `/\t/evil.com` could otherwise be read as the
+ * protocol-relative `//evil.com` (external).
+ *
+ * The auth-route check is case-insensitive and ignores a trailing slash, to
+ * match how React Router resolves `/LOGIN`, `/Login/`, `/callback/`, etc.
+ */
+function sanitizeReturnTo(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) {
+    return null
+  }
+  // Control chars (which the URL parser strips, rebinding the path) and
+  // backslashes (normalized to `/`) would let e.g. `/\t/evil.com` resolve to
+  // the external `//evil.com`.
+  for (const char of value) {
+    const code = char.charCodeAt(0)
+    if (code <= 0x1f || code === 0x7f || char === '\\') {
+      return null
+    }
+  }
+  const path = value.split(/[?#]/, 1)[0].toLowerCase().replace(/\/+$/, '')
+  if (path === '/login' || path === '/callback') {
+    return null
+  }
+  return value
+}
+
+/**
  * Start the Authorization Code + PKCE dance.
  *
  * Generates and stores the `code_verifier` + `state`, then redirects the
  * browser to Pocket ID's `authorization_endpoint`. No-op in dev mode.
+ *
+ * When `returnTo` is a safe internal route it is remembered in
+ * `sessionStorage` so the callback can send the user back there; otherwise any
+ * previously stored route is dropped.
  */
-export async function login(): Promise<void> {
+export async function login(returnTo?: string): Promise<void> {
+  const sanitized = sanitizeReturnTo(returnTo)
+  const storage = safeSessionStorage()
+  if (sanitized === null) {
+    storage?.removeItem(RETURN_TO_STORAGE_KEY)
+  } else {
+    storage?.setItem(RETURN_TO_STORAGE_KEY, sanitized)
+  }
+
   const config = getConfig()
   if (config === null) {
     return
@@ -261,7 +315,6 @@ export async function login(): Promise<void> {
   const challenge = await deriveCodeChallenge(verifier)
   const state = generateCodeVerifier(16)
 
-  const storage = safeSessionStorage()
   storage?.setItem(VERIFIER_STORAGE_KEY, verifier)
   storage?.setItem(STATE_STORAGE_KEY, state)
 
@@ -397,6 +450,19 @@ export async function handleRedirectCallback(url = window.location.href): Promis
   }
 }
 
+/**
+ * Read and clear the pending post-login route (single-use).
+ *
+ * Returns the sanitized route stored by {@link login} or `null` when there is
+ * none — the key is always removed so a reload cannot replay the redirect.
+ */
+export function consumeReturnTo(): string | null {
+  const storage = safeSessionStorage()
+  const raw = storage?.getItem(RETURN_TO_STORAGE_KEY) ?? null
+  storage?.removeItem(RETURN_TO_STORAGE_KEY)
+  return sanitizeReturnTo(raw)
+}
+
 /** In-flight refresh promise, so concurrent callers share one round-trip. */
 let refreshPromise: Promise<void> | null = null
 
@@ -516,6 +582,7 @@ export async function logout(): Promise<void> {
   const storage = safeSessionStorage()
   storage?.removeItem(VERIFIER_STORAGE_KEY)
   storage?.removeItem(STATE_STORAGE_KEY)
+  storage?.removeItem(RETURN_TO_STORAGE_KEY)
 
   const config = getConfig()
   if (config === null) {
@@ -564,4 +631,5 @@ export function __resetAuthForTests(): void {
   refreshPromise = null
   discoveryCache.clear()
   redirectFn = defaultRedirect
+  safeSessionStorage()?.removeItem(RETURN_TO_STORAGE_KEY)
 }
