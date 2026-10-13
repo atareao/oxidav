@@ -62,8 +62,9 @@ jobs:
         run: npm run build
 
       # Ship web/dist to the backend job so rust-embed embeds the REAL bundle.
-      # Uploading the `web/dist` directory keeps the `dist/` folder inside the
-      # artifact; the backend downloads it into `web/` -> `web/dist`.
+      # upload-artifact uploads the *contents* of `web/dist` (index.html,
+      # assets/…), not the `dist/` folder itself. The backend restores it into
+      # `web/dist` so the file lands at `web/dist/index.html`.
       - name: Upload web/dist artifact
         uses: actions/upload-artifact@v4
         with:
@@ -98,7 +99,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: web-dist
-          path: web
+          path: web/dist
 
       - name: Verify web/dist is present
         run: test -f web/dist/index.html
