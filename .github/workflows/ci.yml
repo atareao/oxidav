@@ -37,10 +37,10 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node 22 (npm cache)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -66,7 +66,7 @@ jobs:
       # assets/…), not the `dist/` folder itself. The backend restores it into
       # `web/dist` so the file lands at `web/dist/index.html`.
       - name: Upload web/dist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: web-dist
           path: web/dist
@@ -83,7 +83,7 @@ jobs:
     needs: frontend
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust (rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable
@@ -96,7 +96,7 @@ jobs:
       # Materialize the real SPA at web/dist before cargo touches web/dist,
       # so rust-embed embeds it and asset tests are not skipped.
       - name: Download web/dist artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
