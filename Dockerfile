@@ -73,6 +73,13 @@ COPY Cargo.toml Cargo.lock build.rs ./
 RUN mkdir -p src \
  && : > src/lib.rs \
  && printf 'fn main() {}\n' > src/main.rs
+# The dummy dependency-cache build runs in *release*, and `build.rs` aborts in
+# release when `web/dist/index.html` is missing (or is its own development
+# placeholder). Seed a *different* stub so the dummy build succeeds; the real
+# SPA is copied below and `cargo:rerun-if-changed=web/dist` forces `build.rs`
+# to re-run and embed the real bundle. This stub never reaches the runtime
+# image (stage 3 copies only the binary).
+RUN mkdir -p web/dist && printf '<!doctype html>\n' > web/dist/index.html
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked
 
@@ -81,8 +88,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # so it must be present now (it is not needed at runtime).
 COPY src ./src
 COPY migrations ./migrations
-# The real SPA from stage 1. Overwrites the placeholder that `build.rs` may have
-# created during the dummy build.
+# The real SPA from stage 1. Overwrites the stub seeded before the dummy build.
 COPY --from=web /app/web/dist ./web/dist
 
 # Recompile: only the oxidav crate is rebuilt; all dependencies stay cached.
