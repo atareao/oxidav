@@ -1,0 +1,35 @@
+# Docker build context exclusions (F15 packaging).
+#
+# Keep the context small AND avoid clobbering in-container build output:
+#   - `web/dist` is produced by the `web` stage (`npm run build`); the host copy
+#     must never be copied in.
+#   - `web/node_modules` is installed in the `web` stage (`npm ci`); copying the
+#     host copy would clobber the correct, lockfile-pinned tree.
+#   - `target/` is produced by the `builder` stage.
+# The `web/` *source* (package.json, package-lock.json, src, configs) IS kept.
+
+# Rust build artifacts
+target/
+
+# Frontend build artifacts & dependencies (built inside their stages)
+web/node_modules/
+web/dist/
+web/coverage/
+
+# VCS / local state / secrets
+.git/
+.gitignore
+data/
+.env
+.env.*
+
+# Docs, plans and packaging files not needed inside the image
+plans/
+docs/
+*.md
+Dockerfile
+Containerfile
+compose.yaml
+docker-compose.yml
+docker-compose.yaml
+.dockerignore

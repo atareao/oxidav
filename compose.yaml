@@ -1,0 +1,54 @@
+# OxiDav — example Compose deployment (F15).
+#
+# Build & run:
+#   docker compose up -d --build          # or: podman-compose up -d --build
+#
+# The image is built by the multi-stage `Dockerfile`; `web/dist` is produced
+# inside the `web` stage, so no local frontend build is required beforehand.
+#
+# The SQLite database lives on a named volume mounted at /app/data, which is
+# where `OXIDAV_DATABASE_URL=sqlite://data/oxidav.db` resolves to.
+services:
+  oxidav:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: oxidav:latest
+    container_name: oxidav
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Listen address. Keep 0.0.0.0 inside the container.
+      OXIDAV_BIND_ADDR: "0.0.0.0:8080"
+      # SQLite file, relative to WORKDIR (/app) -> /app/data/oxidav.db
+      OXIDAV_DATABASE_URL: "sqlite://data/oxidav.db"
+      # --- Replace with your real Pocket ID values (placeholders, no secrets) ---
+      OXIDAV_POCKET_ID_ISSUER: "https://pocket-id.example.com"
+      # Optional: set to your SPA client id to enforce strict `aud` validation.
+      OXIDAV_OIDC_AUDIENCE: "oxidav-spa"
+      # tracing filter / level
+      RUST_LOG: "info"
+    volumes:
+      - oxidav-data:/app/data
+    networks:
+      - oxidav
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200' <&3",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  oxidav-data:
+
+networks:
+  oxidav:
+    driver: bridge

@@ -1,0 +1,88 @@
+[package]
+name = "oxidav"
+version = "0.1.0"
+edition = "2024"
+# Guarantees `web/dist` exists at compile time for `rust-embed` (F15).
+build = "build.rs"
+
+[lib]
+name = "oxidav"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxidav"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "sync"] }
+# TODO(F06): enable the "cors" feature when the REST API lands.
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# F04: `derive` is required for the OIDC `Claims` struct (and later F06 DTOs).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# F15: embeds `web/dist` into the binary so the SPA ships with the API and DAV
+# surface in a single distributable executable. `web/dist` must be built before
+# `cargo build`; `build.rs` guarantees the folder exists.
+rust-embed = "8"
+# F03: async SQLite driver. The `sqlite` feature pulls `libsqlite3-sys` with
+# `bundled`, guaranteeing a build with FTS5 + the `trigram` tokenizer.
+sqlx = { version = "0.8", default-features = false, features = [
+    "sqlite",
+    "runtime-tokio",
+    "macros",
+    "migrate",
+] }
+# F04: OIDC (Pocket ID) RS256 verification. `rust_crypto` selects the pure-Rust
+# backend (RSA + SHA-256), preserving the "no OpenSSL" property of the binary.
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
+# F04: JWKS + OIDC discovery download. `default-features = false` drops the
+# native-tls/system-proxy stack; `rustls` (with aws-lc-rs, so not OpenSSL) and
+# `json` are the only things needed to fetch `openid-configuration`/JWKS.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "rustls",
+] }
+# F05: app-token secret hashing (SHA-256, or HMAC-SHA256 with an optional pepper).
+sha2 = "0.10"
+hmac = "0.12"
+# F05: constant-time comparison (`ConstantTimeEq`) of secret digests.
+subtle = "2"
+# F05: CSPRNG (`OsRng`) for token ids and secrets. Also used by the F04 tests to
+# generate an in-memory RSA key pair.
+rand = "0.8"
+# F05: decode `Authorization: Basic <base64>` credentials (also used by F04
+# tests to hand-roll the `alg=none` token).
+base64 = "0.22"
+# F07: DAV XML reading/writing (`207 Multi-Status`, PROPFIND/REPORT bodies).
+# quick-xml never parses DTDs nor resolves external/general entities, which
+# structurally rules out XXE and billion-laughs; on top of that we reject
+# `Event::DocType` outright (see `src/dav/xml.rs`). Default features only pull
+# `memchr`; no TLS/encoding/serde stack is added.
+quick-xml = "0.42"
+# F07: iCalendar (.ics) parsing. `default-features = false` drops `chrono-tz`
+# (TZID/VTIMEZONE), `recurrence` (RRULE expansion) and `serde`, none of which
+# F07 needs; the `parser` feature keeps `FromStr for Calendar`.
+icalendar = { version = "0.17", default-features = false, features = ["parser"] }
+# F08: percent-encode/decode DAV `href` path segments. A `UID` is opaque text
+# (may carry `@`, `#`, `?`, spaces or non-ASCII), so it must be escaped when
+# emitted as a URL segment and unescaped when a client-supplied `href` is
+# resolved back to a stored `UID`.
+percent-encoding = "2"
+# F08: vCard (.vcf) parsing. `default-features = false` drops `zeroize` (we keep
+# the raw payload ourselves and never need at-rest zeroing) and the optional
+# `serde`/`language-tags`/`mime` integrations; only the RFC 6350 parser core is
+# pulled. `parse_loose` tolerates cards whose individual properties are invalid.
+vcard4 = { version = "0.7", default-features = false }
+
+[dev-dependencies]
+# `tower::ServiceExt::oneshot` is only needed by the router integration tests.
+tower = { version = "0.5", features = ["util"] }
+# `tokio::time::timeout` is only needed by the shutdown-signal unit tests.
+tokio = { version = "1", features = ["time"] }
+# F04: generate an RS256 key pair in-memory so the OIDC tests never touch the
+# network (no dependency on a real Pocket ID deployment).
+rsa = "0.9"
