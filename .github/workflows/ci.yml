@@ -112,3 +112,93 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  # ---------------------------------------------------------------------------
+  # 3. Docker: build the production image and smoke-test it end to end.
+  #    Deliberately independent of `frontend`: the multi-stage Dockerfile builds
+  #    its own SPA in the `node:22` stage and embeds it at compile time, so it
+  #    does NOT consume the `web-dist` artifact.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker (build + smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: true
+          tags: oxidav:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Runtime facts baked into the image (Dockerfile + src/config.rs):
+      #   * EXPOSE / default bind address .... port 8080
+      #   * non-root user ................... 10001:10001
+      #   * SQLite default path ............. /app/data/oxidav.db (owned by oxidav)
+      #   * OXIDAV_POCKET_ID_ISSUER ......... MANDATORY (no default)
+      #   * OXIDAV_BIND_ADDR ................ default 0.0.0.0:8080
+      #   * OXIDAV_DATABASE_URL ............. default sqlite://data/oxidav.db
+      #     (OXIDAV_OIDC_AUDIENCE and RUST_LOG are optional; all have defaults
+      #      except the issuer.)
+      #
+      # The container points the issuer at a placeholder domain with no real
+      # Pocket ID. OIDC discovery fails, but the server keeps running "offline"
+      # (main.rs -> AppState::offline_oidc) and /healthz still answers, so the
+      # smoke test can exercise the HTTP surface without an IdP.
+      - name: Smoke test (healthz + SPA + auth)
+        run: |
+          set -euo pipefail
+
+          docker run -d --name oxidav-ci \
+            -p 8080:8080 \
+            -e OXIDAV_BIND_ADDR=0.0.0.0:8080 \
+            -e OXIDAV_POCKET_ID_ISSUER=https://id.example.com \
+            -e OXIDAV_DATABASE_URL='sqlite://data/oxidav.db' \
+            -e RUST_LOG=info \
+            oxidav:ci
+
+          echo "== Waiting for /healthz (active poll, up to 30 x 2s) =="
+          healthy=0
+          for attempt in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/healthz || true)
+            if [ "$code" = "200" ]; then
+              echo "healthz is up after $attempt attempt(s)"
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$healthy" != "1" ]; then
+            echo "::error::server did not become healthy within 60s"
+            exit 1
+          fi
+
+          echo "== /healthz returns {\"status\":\"ok\"} =="
+          curl -fsS http://localhost:8080/healthz | grep -q '"status":"ok"'
+
+          echo "== / serves the SPA as HTML =="
+          content_type=$(curl -s -o /dev/null -w '%{content_type}' http://localhost:8080/)
+          echo "Content-Type: $content_type"
+          echo "$content_type" | grep -qi 'text/html'
+
+          echo "== /api/v1/me without a token is 401 (JSON, not the SPA) =="
+          api_code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/v1/me)
+          echo "GET /api/v1/me -> $api_code"
+          [ "$api_code" = "401" ]
+
+      - name: Dump container logs
+        if: failure()
+        run: docker logs oxidav-ci || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f oxidav-ci || true
