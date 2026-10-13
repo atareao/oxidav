@@ -49,6 +49,7 @@ Todo lo listado aquí es **posterior al MVP** y queda explícitamente fuera de e
 | F13 | Vista Sincronización y Dispositivos SPA (URLs DAV, gestor app tokens) | frontend | PLAN-014 | Completado |
 | F14 | Vista Ajustes y Perfil SPA (perfil Pocket ID, tema claro/oscuro, gestión colecciones) | frontend | PLAN-015 | Completado |
 | F15 | Empaquetado y despliegue (rust-embed, orden de build, Dockerfile multi-stage, verificación) | infra | PLAN-016 | Completado |
+| F16 | Pulido de entrega (publicación en GHCR, code-splitting, licencia MIT, redirect post-login) | infra/frontend | PLAN-017 | Completado |
 
 ## Orden de ejecución y dependencias
 
@@ -63,6 +64,7 @@ El grafo de dependencias es el siguiente:
 - **F07, F08 y F09** son paralelizables entre sí tras F03 + F05. F09 (sync-collection) reutiliza la base de F07/F08, por lo que conviene cerrarlo después de F07 y F08.
 - **F11–F15** dependen de que el backend exponga los contratos correspondientes: F11↔F06/F07/F10, F12↔F06/F08/F10, F13↔F05, F14↔F06/F04.
 - **F15** es el cierre: depende de F02 (build de `web/dist`) y de todo el backend, por el orden de build de `rust-embed`.
+- **F16** es pulido posterior al MVP (publicación en GHCR, code-splitting, licencia MIT y redirect post-login): no forma parte del cierre funcional del MVP.
 
 **Candidate a paralelizar:** F01 ∥ F02; F04 ∥ F05; F07 ∥ F08; F11 ∥ F12 ∥ F13 ∥ F14 (una vez listos sus contratos de backend).
 
