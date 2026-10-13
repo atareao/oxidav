@@ -1,8 +1,10 @@
 import { Button, Layout, Menu, Space, Typography } from 'antd'
 import type { MenuProps } from 'antd'
+import { Suspense } from 'react'
 import type { ReactNode } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useTheme } from '../contexts/ThemeContext'
+import { RouteFallback } from './RouteFallback'
 
 const { Header, Sider, Content } = Layout
 
@@ -80,7 +82,9 @@ export function AppLayout({ children }: AppLayoutProps) {
           </Space>
         </Header>
         <Content style={{ margin: 16, padding: 24, background: 'transparent' }}>
-          {children}
+          {/* Local boundary so a lazy page chunk keeps the Sider/Header shell
+              on screen instead of unmounting the whole layout. */}
+          <Suspense fallback={<RouteFallback />}>{children}</Suspense>
         </Content>
       </Layout>
     </Layout>

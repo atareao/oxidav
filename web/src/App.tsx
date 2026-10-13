@@ -1,15 +1,20 @@
 import { App as AntdApp, ConfigProvider, theme } from 'antd'
 import esES from 'antd/locale/es_ES'
+import { lazy, Suspense } from 'react'
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom'
 import { AppLayout } from './components/AppLayout'
 import { RequireAuth } from './components/RequireAuth'
+import { RouteFallback } from './components/RouteFallback'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
-import { Calendar } from './pages/Calendar'
-import { Callback } from './pages/Callback'
-import { Contacts } from './pages/Contacts'
-import { Login } from './pages/Login'
-import { Settings } from './pages/Settings'
-import { Sync } from './pages/Sync'
+
+// Pages are lazy-loaded so each route ships in its own chunk. They use named
+// exports, hence the `.then(m => ({ default: m.X }))` mapping.
+const Calendar = lazy(() => import('./pages/Calendar').then((m) => ({ default: m.Calendar })))
+const Callback = lazy(() => import('./pages/Callback').then((m) => ({ default: m.Callback })))
+const Contacts = lazy(() => import('./pages/Contacts').then((m) => ({ default: m.Contacts })))
+const Login = lazy(() => import('./pages/Login').then((m) => ({ default: m.Login })))
+const Settings = lazy(() => import('./pages/Settings').then((m) => ({ default: m.Settings })))
+const Sync = lazy(() => import('./pages/Sync').then((m) => ({ default: m.Sync })))
 
 function ThemedApp() {
   const { mode } = useTheme()
@@ -23,8 +28,24 @@ function ThemedApp() {
     >
       <AntdApp>
         <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/callback" element={<Callback />} />
+          {/* Layout-less routes get their own boundary; layout routes suspend
+              locally inside AppLayout so the shell never unmounts. */}
+          <Route
+            path="/login"
+            element={
+              <Suspense fallback={<RouteFallback />}>
+                <Login />
+              </Suspense>
+            }
+          />
+          <Route
+            path="/callback"
+            element={
+              <Suspense fallback={<RouteFallback />}>
+                <Callback />
+              </Suspense>
+            }
+          />
           <Route
             element={
               <RequireAuth>
