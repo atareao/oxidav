@@ -98,4 +98,4 @@ Todas las features **F01–F15 están completadas**: scaffolding (backend/fronte
 
 ## Licencia
 
-No se ha especificado licencia. Pendiente de definir.
+Este proyecto se distribuye bajo la licencia **MIT**. Consulta el fichero [LICENSE](LICENSE).
