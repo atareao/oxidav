@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::response::Response;
 use oxidav::auth::session::{
-    AuthConfig, Claims, SESSION_COOKIE_NAME, emit_flow_token, emit_session,
+    AuthConfig, Claims, SESSION_COOKIE_NAME, clear_caches, emit_flow_token, emit_session,
 };
 use oxidav::config::Config;
 use oxidav::router::{AppState, build_router, offline_pool};
@@ -237,6 +237,12 @@ fn sign_id_token(issuer: &str, audience: &str, nonce: &str, exp: usize) -> Strin
 /// the mock's origin, as RFC 8414 requires; `with_end_session` additionally
 /// advertises an `end_session_endpoint`.
 async fn mount_discovery(server: &MockServer, with_end_session: bool) {
+    // Discovery is memoized in a process-wide, URL-keyed cache. Every test here
+    // mounts a fresh mock IdP on an ephemeral port; a recycled port could serve
+    // a stale document from a sibling test. Clear before mounting so no test can
+    // observe another's cache entry.
+    clear_caches().await;
+
     let base = server.uri();
     let body = if with_end_session {
         format!(
@@ -378,6 +384,7 @@ async fn login_is_404_when_auth_is_disabled() {
 #[tokio::test]
 async fn login_redirects_and_sets_the_flow_cookie_when_enabled() {
     let server = MockServer::start().await;
+    clear_caches().await;
     let discovery = format!(
         r#"{{"authorization_endpoint":"{}/authorize","token_endpoint":"{}/token","jwks_uri":"{}/jwks"}}"#,
         server.uri(),

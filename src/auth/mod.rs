@@ -36,7 +36,7 @@ pub use basic::AuthError as BasicAuthError;
 pub use middleware::{SessionUser, session_middleware};
 pub use session::{
     AuthConfig, AuthError, Claims, FlowClaims, OidcDiscovery, SESSION_COOKIE_NAME,
-    SESSION_TTL_SECS, StateStore, TokenResponse, UserIdentity, build_end_session_url, discover,
-    emit_flow_token, emit_session, exchange_code, fetch_jwks, generate_state_and_nonce,
+    SESSION_TTL_SECS, StateStore, TokenResponse, UserIdentity, build_end_session_url, clear_caches,
+    discover, emit_flow_token, emit_session, exchange_code, fetch_jwks, generate_state_and_nonce,
     http_client, validate_flow_token, validate_id_token, validate_session,
 };

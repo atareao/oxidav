@@ -476,6 +476,28 @@ fn oidc_cache() -> &'static OidcCache {
     CACHE.get_or_init(OidcCache::default)
 }
 
+/// Empty the process-wide discovery and JWKS caches.
+///
+/// Why this exists: [`discover`] and [`fetch_jwks`] memoize their documents in
+/// a cache that is **global to the process**, keyed by URL, with a
+/// [`DISCOVERY_TTL`]/[`JWKS_TTL`] time-to-live. In production the URL comes from
+/// the configuration and does not repeat, so a fresh-looking entry can only be
+/// the one just fetched. A test, however, spins up an ephemeral `wiremock`
+/// server: the OS may hand it a port a previous test already used in the same
+/// process, and the stale, still-fresh entry then shadows the new mock. The test
+/// never reaches the `fetch` and the hardening it means to exercise is skipped —
+/// an order- and port-dependent flake. Clearing between tests removes that
+/// dependence. An operator who reconfigures the issuer at runtime may call this
+/// too, to drop documents belonging to the previous issuer immediately instead
+/// of waiting out the TTL.
+///
+/// This only empties the caches; the caching behaviour itself (key, TTL) is
+/// unchanged.
+pub async fn clear_caches() {
+    oidc_cache().discovery.write().await.clear();
+    oidc_cache().jwks.write().await.clear();
+}
+
 /// Read a JSON body while refusing to buffer more than [`MAX_BODY_BYTES`].
 async fn read_limited_json<T, F>(response: reqwest::Response, error: F) -> Result<T, AuthError>
 where
@@ -1356,6 +1378,12 @@ SestSfOxhvIiYxMrOAHQ3iRF
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        // The discovery/JWKS caches are process-wide and keyed by URL. A test
+        // that receives a recycled ephemeral port could otherwise read a stale
+        // document and skip the fetch this helper is meant to drive. Clearing
+        // here covers every `validate_id_token` test that mounts a server.
+        clear_caches().await;
+
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/jwks"))
@@ -1703,6 +1731,7 @@ SestSfOxhvIiYxMrOAHQ3iRF
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        clear_caches().await;
         let server = MockServer::start().await;
         let document = json!({
             "authorization_endpoint": format!("{}/authorize", server.uri()),
@@ -1735,6 +1764,7 @@ SestSfOxhvIiYxMrOAHQ3iRF
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        clear_caches().await;
         let server = MockServer::start().await;
         let document = json!({
             "authorization_endpoint": "https://evil.example/authorize",
@@ -1769,6 +1799,7 @@ SestSfOxhvIiYxMrOAHQ3iRF
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        clear_caches().await;
         let server = MockServer::start().await;
         let padded = json!({
             "authorization_endpoint": format!("{}/authorize", server.uri()),
@@ -1805,6 +1836,7 @@ SestSfOxhvIiYxMrOAHQ3iRF
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        clear_caches().await;
         let server = MockServer::start().await;
         let padded = json!({
             "authorization_endpoint": format!("{}/authorize", server.uri()),
@@ -1858,6 +1890,7 @@ SestSfOxhvIiYxMrOAHQ3iRF
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        clear_caches().await;
         let server = MockServer::start().await;
         let document = json!({
             "authorization_endpoint": format!("{}/authorize", server.uri()),
@@ -1895,6 +1928,7 @@ SestSfOxhvIiYxMrOAHQ3iRF
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        clear_caches().await;
         let server = MockServer::start().await;
         let document = json!({
             "authorization_endpoint": format!("{}/authorize", server.uri()),
