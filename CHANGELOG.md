@@ -1,18 +1,22 @@
 # Changelog
 ## [unreleased]
 
+### Documentation
+
+- Add generated CHANGELOG.md
+
 ### Miscellaneous Tasks
 
 - Adopt gitflow with valet parity
 ## [0.1.1] - 2026-10-14
 
+### Build
+
+- Switch the Docker image to musl/Alpine 3.23
+
 ### Miscellaneous Tasks
 
 - Pin the runners to ubuntu-26.04
-
-### Other
-
-- Switch the Docker image to musl/Alpine 3.23
 ## [0.1.0] - 2026-10-13
 
 ### Bug Fixes
