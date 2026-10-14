@@ -63,7 +63,7 @@ docker build -t oxidav .
 docker run --rm -p 8080:8080 -v oxidav-data:/app/data --env-file .env oxidav
 ```
 
-La imagen es multi-stage: `node:22` construye la SPA → `rust` compila → runtime `debian-slim` con **usuario no-root**. Hay un `compose.yaml` de ejemplo.
+La imagen es multi-stage: `node:22-alpine3.23` construye la SPA → `rust:1.98.1-alpine3.23` compila el binario estático **musl** → runtime mínimo `alpine:3.23` con **usuario no-root** `10001`. Hay un `compose.yaml` de ejemplo.
 
 ## Tests
 

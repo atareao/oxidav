@@ -20,13 +20,15 @@
 #   cargo build --release --locked      # embeds web/dist
 #
 # ---------------------------------------------------------------------------
-# WHY glibc (debian) instead of musl for the builder
+# WHY musl (Alpine) for both builder and runtime
 # ---------------------------------------------------------------------------
 # `libsqlite3-sys` is built with the `bundled` feature (compiles SQLite C from
 # source) and `rustls` uses the `aws-lc-rs` provider (`aws-lc-sys`, also C).
-# Both compile reliably against glibc with a normal C toolchain + cmake; a
-# musl-static target would need extra cross toolchains. We keep the *runtime*
-# image minimal (debian-slim, ca-certificates only) while staying on glibc.
+# The `rust:1.98.1-alpine3.23` image targets `x86_64-unknown-linux-musl` by
+# default, so a normal `apk` C toolchain is enough: `aws-lc-sys` builds through
+# the `cc` path and does **not** need a separate build-system generator. A fully
+# static musl binary drops straight into `alpine:3.23`, and no glibc runtime
+# shims are required.
 # No OpenSSL anywhere: `jsonwebtoken` uses `rust_crypto` and `reqwest` uses
 # `rustls`, so the TLS stack is pure-Rust/aws-lc and statically linked.
 # ---------------------------------------------------------------------------
@@ -34,7 +36,7 @@
 # ===========================================================================
 # Stage 1 — build the React SPA (Vite) -> web/dist
 # ===========================================================================
-FROM node:22-slim AS web
+FROM node:22-alpine3.23 AS web
 
 WORKDIR /app/web
 
@@ -53,14 +55,13 @@ RUN npm run build   # `tsc -b && vite build` -> /app/web/dist
 # ===========================================================================
 # Stage 2 — compile the Rust server, embedding web/dist
 # ===========================================================================
-FROM rust:1.97.0-bookworm AS builder
+FROM rust:1.98.1-alpine3.23 AS builder
 
-# `cmake` + a C toolchain are needed to build `aws-lc-sys` (rustls provider);
-# the base rust image already provides gcc/make. SQLite's bundled C build uses
-# the same toolchain.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends cmake \
- && rm -rf /var/lib/apt/lists/*
+# `build-base` (gcc + make + strip) and `musl-dev` provide the C toolchain used
+# by `aws-lc-sys` (rustls provider) and by SQLite's bundled C build;
+# `pkgconfig` lets `libsqlite3-sys` probe system libs. No extra build-system
+# generator is required: `aws-lc-sys` compiles via the `cc` path on musl.
+RUN apk add --no-cache build-base musl-dev pkgconfig
 
 WORKDIR /app
 
@@ -93,23 +94,26 @@ COPY --from=web /app/web/dist ./web/dist
 
 # Recompile: only the oxidav crate is rebuilt; all dependencies stay cached.
 # A leading `touch` guarantees cargo sees the sources as newer than the dummy.
+# `strip` (from build-base) trims the shipped binary.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     touch src/lib.rs src/main.rs \
- && cargo build --release --locked
+ && cargo build --release --locked \
+ && strip /app/target/release/oxidav
 
 # ===========================================================================
 # Stage 3 — minimal runtime, non-root
 # ===========================================================================
-FROM debian:bookworm-slim AS runtime
+FROM alpine:3.23 AS runtime
 
 # ca-certificates: needed for HTTPS to Pocket ID (OIDC discovery + JWKS).
-# No curl/wget: the healthcheck below uses bash's /dev/tcp, keeping the image
-# minimal. SQLite and the TLS stack are statically linked into the binary.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
- && rm -rf /var/lib/apt/lists/* \
- && groupadd --gid 10001 oxidav \
- && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin oxidav
+# SQLite and the TLS stack are statically linked into the musl binary.
+# The non-root account uses busybox `addgroup`/`adduser` (Alpine ships neither
+# the coreutils account tools nor an interactive shell); `-H` skips the home dir
+# and `-s /sbin/nologin` locks interactive login. The healthcheck below relies
+# on busybox `wget`.
+RUN apk add --no-cache ca-certificates \
+ && addgroup -g 10001 oxidav \
+ && adduser -D -u 10001 -G oxidav -H -s /sbin/nologin oxidav
 
 WORKDIR /app
 
@@ -131,15 +135,17 @@ EXPOSE 8080
 # Drop privileges: never run as root.
 USER 10001:10001
 
-# Readiness probe against `/healthz`. Uses bash's /dev/tcp (no curl in the
-# image); assumes the documented default port 8080. Override the healthcheck in
-# your orchestrator if you change OXIDAV_BIND_ADDR.
+# Readiness probe against `/healthz`. Uses the busybox `wget` shipped with
+# `alpine:3.23` (there is no shell beyond busybox, and no curl in the image);
+# `--spider` exits non-zero when the service does not answer, which is exactly
+# what HEALTHCHECK wants. Assumes the documented default port 8080. Override the
+# healthcheck in your orchestrator if you change OXIDAV_BIND_ADDR.
 #
 # NOTE: `HEALTHCHECK` is a Docker-specific instruction. `docker build` records
 # it; Podman only does so with `--format docker` (its default OCI manifest drops
 # it). The example `compose.yaml` therefore declares an equivalent healthcheck.
 # If the port is customised, adjust both the probe and the published port.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200' <&3"]
+  CMD ["wget","-q","--spider","http://127.0.0.1:8080/healthz"]
 
 ENTRYPOINT ["/usr/local/bin/oxidav"]

@@ -41,10 +41,13 @@ prioridad para `/healthz`, `/api/v1/*` y `/dav/*`. Reglas:
 
 ## Dockerfile multi-stage
 
-Tres stages: **`web`** (`node:22-slim`, construye `web/dist`) → **`builder`**
-(`rust:1.97-bookworm`, compila con `web/dist` embebido, `--locked`) → **runtime**
-(`debian:bookworm-slim`, **usuario no-root** `10001`, solo `ca-certificates`). Sin OpenSSL
-(`jsonwebtoken`/`rust_crypto`, `reqwest`/`rustls`). `.dockerignore` excluye `target/`,
+Tres stages: **`web`** (`node:22-alpine3.23`, construye `web/dist`) → **`builder`**
+(`rust:1.98.1-alpine3.23`, compila con `web/dist` embebido, `--locked`) → **runtime**
+(`alpine:3.23`, **usuario no-root** `10001`, solo `ca-certificates`). El binario se enlaza
+**estáticamente contra musl**, sin libc dinámica. Sin OpenSSL
+(`jsonwebtoken`/`rust_crypto`, `reqwest`/`rustls`). El runtime **no incluye bash** (Alpine solo
+trae el shell de busybox), por eso el healthcheck de `compose.yaml` usa `wget` de busybox en vez
+de `bash`/`curl`. `.dockerignore` excluye `target/`,
 `web/node_modules/`, `web/dist/`. `web/dist` se copia **desde el stage `web`**, nunca del host.
 Incluye `.env` de ejemplo vía `compose.yaml` con volumen para la base SQLite y las envs `OXIDAV_*`.
 
@@ -58,8 +61,9 @@ Incluye `.env` de ejemplo vía `compose.yaml` con volumen para la base SQLite y 
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (379, incl.
 `tests/assets.rs`: `Content-Type`, `no-cache`/`immutable`/`304`, SPA fallback, `/api`/`/dav` sin
 HTML, traversal 404, métodos, `HEAD`). Frontend: `npx tsc -b`, `npm run lint`, `npx vitest run`
-(72), `npm run build`. Docker: `docker build -t oxidav .` (no verificable en el entorno de
-desarrollo por ausencia de Docker CLI).
+(72), `npm run build`. Contenedor (hay **podman** disponible): `podman build -t oxidav .` y arranque
+local con `podman run -p 8080:8080 -v oxidav-data:/app/data --env-file .env oxidav`, consultando
+`http://127.0.0.1:8080/healthz` para verificar la imagen realmente.
 
 ## Nota
 
