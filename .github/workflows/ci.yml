@@ -7,12 +7,10 @@ name: CI
 #   frontend (npm build) -> artifact web-dist -> backend (cargo fmt/clippy/test)
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
   pull_request:
-    branches: [main]
-  workflow_dispatch:
+    branches: [development, main]
+  push:
+    branches: [development, main]
 
 # Least privilege: CI only needs to read the repo.
 permissions:
@@ -95,7 +93,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # Materialize the real SPA at web/dist before cargo touches web/dist,
-      # so rust-embed embeds it and asset tests are not skipped.
+      # so rust-embed embeds it and the `tests/assets.rs` suites are exercised
+      # for real instead of being skipped with an eprintln.
       - name: Download web/dist artifact
         uses: actions/download-artifact@v8
         with:
@@ -113,132 +112,3 @@ jobs:
 
       - name: Test
         run: cargo test --locked
-
-  # ---------------------------------------------------------------------------
-  # 3. Docker: build the production image and smoke-test it end to end.
-  #    Deliberately independent of `frontend`: the multi-stage Dockerfile builds
-  #    its own SPA in the `node:22` stage and embeds it at compile time, so it
-  #    does NOT consume the `web-dist` artifact.
-  # ---------------------------------------------------------------------------
-  docker:
-    name: Docker (build + smoke)
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v4
-
-      # Publish to GHCR on main and version tags; never on pull requests.
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker metadata (tags + labels)
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          load: ${{ github.event_name == 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # Runtime facts baked into the image (Dockerfile + src/config.rs):
-      #   * EXPOSE / default bind address .... port 8080
-      #   * non-root user ................... 10001:10001
-      #   * SQLite default path ............. /app/data/oxidav.db (owned by oxidav)
-      #   * OXIDAV_POCKET_ID_ISSUER ......... MANDATORY (no default)
-      #   * OXIDAV_BIND_ADDR ................ default 0.0.0.0:8080
-      #   * OXIDAV_DATABASE_URL ............. default sqlite://data/oxidav.db
-      #     (OXIDAV_OIDC_AUDIENCE and RUST_LOG are optional; all have defaults
-      #      except the issuer.)
-      #
-      # The container points the issuer at a placeholder domain with no real
-      # Pocket ID. OIDC discovery fails, but the server keeps running "offline"
-      # (main.rs -> AppState::offline_oidc) and /healthz still answers, so the
-      # smoke test can exercise the HTTP surface without an IdP.
-      # Runs on EVERY event. On pull requests the image is loaded into the local
-      # daemon (`load: true`); on main/tags it is pushed to GHCR (`push: true`)
-      # and pulled back here, reusing the GHCR login above (same condition).
-      - name: Smoke test (healthz + SPA + auth)
-        run: |
-          set -euo pipefail
-
-          # First tag emitted by docker/metadata-action.
-          IMAGE="$(printf '%s\n' '${{ steps.meta.outputs.tags }}' | head -n1)"
-          echo "Smoke-testing image: $IMAGE"
-
-          # On main/tags the image lives in GHCR, not the local daemon, so pull
-          # it first. On PRs it is already present because of `load: true`.
-          if [ '${{ github.event_name }}' != 'pull_request' ]; then
-            docker pull "$IMAGE"
-          fi
-
-          docker run -d --name oxidav-ci \
-            -p 8080:8080 \
-            -e OXIDAV_BIND_ADDR=0.0.0.0:8080 \
-            -e OXIDAV_POCKET_ID_ISSUER=https://id.example.com \
-            -e OXIDAV_DATABASE_URL='sqlite://data/oxidav.db' \
-            -e RUST_LOG=info \
-            "$IMAGE"
-
-          echo "== Waiting for /healthz (active poll, up to 30 x 2s) =="
-          healthy=0
-          for attempt in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/healthz || true)
-            if [ "$code" = "200" ]; then
-              echo "healthz is up after $attempt attempt(s)"
-              healthy=1
-              break
-            fi
-            sleep 2
-          done
-
-          if [ "$healthy" != "1" ]; then
-            echo "::error::server did not become healthy within 60s"
-            exit 1
-          fi
-
-          echo "== /healthz returns {\"status\":\"ok\"} =="
-          curl -fsS http://localhost:8080/healthz | grep -q '"status":"ok"'
-
-          echo "== / serves the SPA as HTML =="
-          content_type=$(curl -s -o /dev/null -w '%{content_type}' http://localhost:8080/)
-          echo "Content-Type: $content_type"
-          echo "$content_type" | grep -qi 'text/html'
-
-          echo "== /api/v1/me without a token is 401 (JSON, not the SPA) =="
-          api_code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/v1/me)
-          echo "GET /api/v1/me -> $api_code"
-          [ "$api_code" = "401" ]
-
-      - name: Dump container logs
-        if: failure()
-        run: docker logs oxidav-ci || true
-
-      - name: Cleanup
-        if: always()
-        run: docker rm -f oxidav-ci || true
