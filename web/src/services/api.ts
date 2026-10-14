@@ -1,20 +1,33 @@
 /**
  * Tiny typed `fetch` client for the OxiDav REST API.
  *
- * Every request carries `Authorization: Bearer <token>` (from the
- * {@link getAccessToken} seam) and maps the backend's uniform error envelope
- * (`{"error":{"code","message"}}`, F06) onto a thrown {@link ApiError}, so the
- * UI never has to render raw JSON.
+ * Since F17 the API authenticates **only** with the server-side session cookie,
+ * so every request carries `credentials: "include"` and none sends an
+ * `Authorization` header. The backend's uniform error envelope
+ * (`{"error":{"code","message"}}`, F06) is mapped onto a thrown
+ * {@link ApiError}, so the UI never has to render raw JSON.
  */
 
 import type { ApiErrorEnvelope } from '../types/api'
-import { getAccessToken, isOidcEnabled, logout, refresh } from './auth'
+import type { AuthUser } from '../contexts/AuthContext'
 
 const envBase = import.meta.env.VITE_API_BASE_URL
 
 /** Base URL of the JSON API. Defaults to the Vite dev proxy prefix `/api`. */
 export const API_BASE_URL: string =
   typeof envBase === 'string' && envBase.length > 0 ? envBase : '/api'
+
+/** Evento global que emite el cliente al recibir un 401 en una ruta no-auth. */
+export const UNAUTHORIZED_EVENT = 'oxidav:unauthorized'
+
+/**
+ * Las rutas de autenticación (`/auth/*`) quedan exentas de la detección global
+ * de 401: un 401 en `me`/`login`/`logout` es parte del propio flujo y no una
+ * sesión caducada, así que no debe disparar el evento global.
+ */
+function isAuthPath(path: string): boolean {
+  return path.startsWith('/auth/')
+}
 
 /** An error carrying the HTTP status and the backend error `code`. */
 export class ApiError extends Error {
@@ -63,13 +76,9 @@ export interface RequestOptions {
   signal?: AbortSignal
 }
 
-/** Build the request `Headers`, injecting the current bearer token. */
+/** Build the request `Headers`. No `Authorization`: auth travels in the cookie. */
 function buildHeaders(options: RequestOptions): Headers {
   const headers = new Headers({ Accept: 'application/json' })
-  const token = getAccessToken()
-  if (token !== null) {
-    headers.set('Authorization', `Bearer ${token}`)
-  }
   if (options.body !== undefined) {
     headers.set('Content-Type', 'application/json')
   }
@@ -84,6 +93,8 @@ async function send(path: string, options: RequestOptions): Promise<Response> {
       headers: buildHeaders(options),
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
       signal: options.signal,
+      // La cookie de sesión `HttpOnly` solo viaja si se incluyen credenciales.
+      credentials: 'include',
     })
   } catch {
     // Network failure / abort: surface a friendly, non-leaky message.
@@ -94,25 +105,17 @@ async function send(path: string, options: RequestOptions): Promise<Response> {
 /**
  * Perform a JSON request and return the parsed body (or `undefined` on 204).
  *
- * Auth policy (F14): a `401` triggers **one** attempt to {@link refresh} the
- * access token and then a single retry of the original request. Concurrent
- * requests share the refresh via the lock in `auth.ts`. If the refresh fails,
- * the local session is dropped and the error is surfaced — never a refresh loop.
+ * Auth policy (F17): there is no token to refresh. A `401` on a non-auth route
+ * emits {@link UNAUTHORIZED_EVENT} so `AuthProvider` can drop the session;
+ * a `401` on `/auth/*` is part of the flow and stays silent.
  */
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  let response = await send(path, options)
-
-  if (response.status === 401 && isOidcEnabled()) {
-    try {
-      await refresh()
-    } catch (error) {
-      void logout()
-      throw error instanceof ApiError ? error : await parseError(response)
-    }
-    response = await send(path, options)
-  }
+  const response = await send(path, options)
 
   if (!response.ok) {
+    if (response.status === 401 && !isAuthPath(path)) {
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+    }
     throw await parseError(response)
   }
   if (response.status === 204) {
@@ -134,12 +137,19 @@ export function toErrorMessage(error: unknown): string {
 
 /** Convenience wrappers for the HTTP verbs used by the app. */
 export const api = {
-  get: <T>(path: string, signal?: AbortSignal): Promise<T> =>
-    request<T>(path, { signal }),
+  get: <T>(path: string, signal?: AbortSignal): Promise<T> => request<T>(path, { signal }),
   post: <T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> =>
     request<T>(path, { method: 'POST', body, signal }),
   patch: <T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> =>
     request<T>(path, { method: 'PATCH', body, signal }),
   delete: (path: string, signal?: AbortSignal): Promise<void> =>
     request<void>(path, { method: 'DELETE', signal }),
+
+  // --- Autenticación (F17) -------------------------------------------------
+  // La sesión se resuelve con la cookie, no con un token. `getMe` devuelve la
+  // identidad o lanza un `401` (parte del flujo, no dispara el evento global).
+  getMe: (signal?: AbortSignal): Promise<AuthUser> => request<AuthUser>('/auth/me', { signal }),
+  // `end_session_url` es `null` cuando solo se cierra la sesión local.
+  logout: (signal?: AbortSignal): Promise<{ end_session_url: string | null }> =>
+    request<{ end_session_url: string | null }>('/auth/logout', { method: 'POST', signal }),
 }

@@ -1,9 +1,9 @@
 //! F06 — REST API (`/api/v1`).
 //!
 //! Builds the JSON API consumed by the React SPA. The router produced here is
-//! mounted under `/api/v1` and wrapped by the F04 `require_auth` middleware in
-//! [`crate::router::build_router`], so every endpoint requires a valid
-//! `Authorization: Bearer <JWT>`.
+//! mounted under `/api/v1` and wrapped by the F17 `session_middleware` in
+//! [`crate::router::build_router`], so every endpoint requires a valid session
+//! cookie (or runs as the dev user when auth is disabled).
 //!
 //! * [`dto`] holds the public request/response shapes (never `raw_payload`).
 //! * [`error`] holds the uniform [`error::ApiError`] envelope.
@@ -21,11 +21,10 @@ pub mod error;
 pub mod events;
 pub mod search;
 
-use axum::extract::Extension;
 use axum::routing::{get, patch};
 use axum::{Json, Router};
 
-use crate::auth::oidc::AuthUser;
+use crate::auth::SessionUser;
 use crate::router::AppState;
 
 use self::dto::MeDto;
@@ -59,8 +58,8 @@ pub(crate) fn parse_optional_i64(raw: Option<&str>, field: &str) -> Result<Optio
 
 /// Build the `/api/v1` router.
 ///
-/// The returned router is intended to be nested under `/api/v1` and wrapped
-/// with `require_auth`, which injects the verified [`AuthUser`] into the request
+/// The returned router is intended to be nested under `/api/v1`; the F17
+/// `session_middleware` injects the verified [`SessionUser`] into the request
 /// extensions that [`me`] reads.
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -111,7 +110,7 @@ pub fn router() -> Router<AppState> {
 /// `GET /api/v1/me` — echo the authenticated subject.
 ///
 /// Demonstrates the authentication middleware end to end: reaching this handler
-/// guarantees a valid bearer token was presented.
-async fn me(Extension(user): Extension<AuthUser>) -> Json<MeDto> {
+/// guarantees a valid session (or the dev user when auth is disabled).
+async fn me(user: SessionUser) -> Json<MeDto> {
     Json(MeDto { sub: user.sub })
 }

@@ -1,5 +1,10 @@
 # F15 — Empaquetado y despliegue
 
+> [!warning] Modelo superado por F17
+> Documento **histórico**: las variables `OXIDAV_POCKET_ID_ISSUER` /
+> `OXIDAV_OIDC_AUDIENCE` fueron retiradas; la configuración vigente está en
+> [`F17 — OIDC con paridad de valet`](./F17-oidc-valet-parity.md).
+
 ## Qué hace
 
 Convierte OxiDav en un **único binario distribuible**: sirve la API REST, DAV, `healthz` **y la

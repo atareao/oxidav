@@ -1,5 +1,10 @@
 # F01 — Scaffolding backend
 
+> [!warning] Modelo superado por F17
+> Documento **histórico**: `OXIDAV_POCKET_ID_ISSUER` fue retirado junto con el
+> resto del modelo `Bearer`; el vigente está en
+> [`F17 — OIDC con paridad de valet`](./F17-oidc-valet-parity.md).
+
 ## Qué hace
 
 Levanta el esqueleto del servidor OxiDav: un binario Axum + Tokio (edition 2024) que carga su

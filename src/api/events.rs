@@ -2,7 +2,7 @@
 //!
 //! The SPA cannot speak CalDAV, so these endpoints expose the `calendar_objects`
 //! of a `calendar` collection as clean JSON DTOs. Every handler is scoped to the
-//! authenticated subject ([`AuthUser::sub`]): a collection owned by another user
+//! authenticated subject ([`SessionUser::sub`]): a collection owned by another user
 //! — or a collection of the wrong kind (an address book) — is treated as
 //! non-existent (`404`), so no endpoint can leak another user's data (IDOR).
 //!
@@ -44,12 +44,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 
-use crate::auth::oidc::AuthUser;
+use crate::auth::SessionUser;
 use crate::dav::common::new_id;
 use crate::dav::ics::{EventFields, build_ics};
 use crate::db::models::{CalendarObjectUpdate, CollectionKind, NewCalendarObject};
@@ -138,7 +138,7 @@ impl EventListQuery {
 /// query fails.
 pub async fn list(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(id): Path<String>,
     Query(query): Query<EventListQuery>,
 ) -> Result<Json<Vec<EventDto>>, ApiError> {
@@ -162,7 +162,7 @@ pub async fn list(
 /// exists in the collection; [`ApiError::Internal`] if the insert fails.
 pub async fn create(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -222,7 +222,7 @@ pub async fn create(
 /// query fails.
 pub async fn get_one(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path((id, uid)): Path<(String, String)>,
 ) -> Result<Json<EventDto>, ApiError> {
     let collection = calendar_collection(&state, &id, &user.sub).await?;
@@ -246,7 +246,7 @@ pub async fn get_one(
 /// update fails.
 pub async fn update(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path((id, uid)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<Json<EventDto>, ApiError> {
@@ -317,7 +317,7 @@ pub async fn update(
 /// delete fails.
 pub async fn delete_one(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path((id, uid)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let collection = calendar_collection(&state, &id, &user.sub).await?;

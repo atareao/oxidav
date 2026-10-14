@@ -1,77 +1,47 @@
-import { App as AntdApp, ConfigProvider, theme } from 'antd'
-import esES from 'antd/locale/es_ES'
+/**
+ * Raíz de la SPA (F17).
+ *
+ * `App` monta el proveedor de sesión y el guard `AuthGate`. Deliberadamente no
+ * importa `antd` ni el router: la app autenticada (antd, router y vistas) se
+ * carga en diferido (`React.lazy`) solo cuando hay sesión, para mantener mínimo
+ * el bundle inicial.
+ */
+
 import { lazy, Suspense } from 'react'
-import { Navigate, Outlet, Route, Routes } from 'react-router-dom'
-import { AppLayout } from './components/AppLayout'
-import { RequireAuth } from './components/RequireAuth'
-import { RouteFallback } from './components/RouteFallback'
-import { ThemeProvider, useTheme } from './contexts/ThemeContext'
+import { AppLoader } from './components/AppLoader'
+import { ErrorBoundary } from './components/ErrorBoundary'
+import { LoginPage } from './components/LoginPage'
+import { AuthProvider } from './contexts/AuthProvider'
+import { useAuth } from './contexts/AuthContext'
 
-// Pages are lazy-loaded so each route ships in its own chunk. They use named
-// exports, hence the `.then(m => ({ default: m.X }))` mapping.
-const Calendar = lazy(() => import('./pages/Calendar').then((m) => ({ default: m.Calendar })))
-const Callback = lazy(() => import('./pages/Callback').then((m) => ({ default: m.Callback })))
-const Contacts = lazy(() => import('./pages/Contacts').then((m) => ({ default: m.Contacts })))
-const Login = lazy(() => import('./pages/Login').then((m) => ({ default: m.Login })))
-const Settings = lazy(() => import('./pages/Settings').then((m) => ({ default: m.Settings })))
-const Sync = lazy(() => import('./pages/Sync').then((m) => ({ default: m.Sync })))
+const AuthenticatedApp = lazy(() => import('./AuthenticatedApp'))
 
-function ThemedApp() {
-  const { mode } = useTheme()
+/**
+ * Guard de sesión: mientras se resuelve `/api/auth/me` muestra carga; sin
+ * sesión, la pantalla de login; con sesión, la aplicación autenticada.
+ */
+function AuthGate() {
+  const { user, loading } = useAuth()
+
+  if (loading) return <AppLoader />
+  if (!user) return <LoginPage />
 
   return (
-    <ConfigProvider
-      locale={esES}
-      theme={{
-        algorithm: mode === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm,
-      }}
-    >
-      <AntdApp>
-        <Routes>
-          {/* Layout-less routes get their own boundary; layout routes suspend
-              locally inside AppLayout so the shell never unmounts. */}
-          <Route
-            path="/login"
-            element={
-              <Suspense fallback={<RouteFallback />}>
-                <Login />
-              </Suspense>
-            }
-          />
-          <Route
-            path="/callback"
-            element={
-              <Suspense fallback={<RouteFallback />}>
-                <Callback />
-              </Suspense>
-            }
-          />
-          <Route
-            element={
-              <RequireAuth>
-                <AppLayout>
-                  <Outlet />
-                </AppLayout>
-              </RequireAuth>
-            }
-          >
-            <Route path="/" element={<Navigate to="/calendar" replace />} />
-            <Route path="/calendar" element={<Calendar />} />
-            <Route path="/contacts" element={<Contacts />} />
-            <Route path="/sync" element={<Sync />} />
-            <Route path="/settings" element={<Settings />} />
-          </Route>
-          <Route path="*" element={<Navigate to="/calendar" replace />} />
-        </Routes>
-      </AntdApp>
-    </ConfigProvider>
+    // `ErrorBoundary` envuelve al `Suspense`: si falla la descarga del chunk de
+    // la app autenticada (`React.lazy` rechaza), se muestra un aviso recuperable
+    // en lugar de dejar la pantalla en blanco.
+    <ErrorBoundary>
+      <Suspense fallback={<AppLoader />}>
+        <AuthenticatedApp />
+      </Suspense>
+    </ErrorBoundary>
   )
 }
 
 export default function App() {
   return (
-    <ThemeProvider>
-      <ThemedApp />
-    </ThemeProvider>
+    <AuthProvider>
+      <AuthGate />
+    </AuthProvider>
   )
 }

@@ -3,7 +3,7 @@
 //! The SPA manages the revocable tokens that native DAV clients (iOS, DAVx⁵,
 //! Thunderbird) present via HTTP Basic Auth. These endpoints expose the token
 //! lifecycle as clean JSON; every operation is scoped to the authenticated
-//! subject ([`AuthUser::sub`]), so a token owned by another user is treated as
+//! subject ([`SessionUser::sub`]), so a token owned by another user is treated as
 //! non-existent (`404`) rather than access-denied (`403`) — the existence of a
 //! foreign token is never leaked (anti-IDOR).
 //!
@@ -23,11 +23,11 @@
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
-use crate::auth::oidc::AuthUser;
+use crate::auth::SessionUser;
 use crate::auth::{
     create_app_token, get_app_token, list_app_tokens, rename_app_token, revoke_app_token,
 };
@@ -51,7 +51,7 @@ const MAX_TOKEN_NAME_LEN: usize = 255;
 /// [`ApiError::Internal`] if the query fails.
 pub async fn list(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
 ) -> Result<Json<Vec<AppTokenMetadata>>, ApiError> {
     let tokens = list_app_tokens(&state.db, &user.sub).await?;
     // Revocation is a logical delete (`revoked_at`): revoked tokens are kept in
@@ -76,7 +76,7 @@ pub async fn list(
 /// payload; [`ApiError::Internal`] if the token cannot be created.
 pub async fn create(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let request: CreateAppTokenRequest = parse_json_body(&body)?;
@@ -109,7 +109,7 @@ pub async fn create(
 /// fails.
 pub async fn rename(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<AppTokenMetadata>, ApiError> {
@@ -132,7 +132,7 @@ pub async fn rename(
 /// user, or is already revoked; [`ApiError::Internal`] if the update fails.
 pub async fn delete_one(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     // Fetch first so an already-revoked token (the F05 `revoke_app_token` is

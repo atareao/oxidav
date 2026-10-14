@@ -1,97 +1,77 @@
-import { theme } from 'antd'
-import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
-import type { ComponentProps } from 'react'
-import { MemoryRouter } from 'react-router-dom'
+/**
+ * Tests del guard de sesión `AuthGate` (F17).
+ *
+ * - mientras se resuelve `/api/auth/me` (`loading`) → indicador de carga;
+ * - sin sesión → pantalla de login;
+ * - con sesión → app autenticada cargada en diferido (`React.lazy`).
+ *
+ * `AuthProvider` y `AuthenticatedApp` se mockean para no arrastrar el proveedor
+ * real ni su chunk diferido (antd) al test del guard.
+ */
+
+import { render, screen } from '@testing-library/react'
+import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { useAuth } from './contexts/AuthContext'
+import type { AuthContextValue, AuthUser } from './contexts/AuthContext'
 
-// Capture every props object Ant Design's ConfigProvider receives so we can
-// assert the *real* algorithm passed by the app (not just the button label).
-const { configProviderSpy } = vi.hoisted(() => ({ configProviderSpy: vi.fn() }))
+vi.mock('./contexts/AuthContext', () => ({
+  useAuth: vi.fn(),
+}))
 
-vi.mock('antd', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('antd')>()
+vi.mock('./contexts/AuthProvider', () => ({
+  AuthProvider: ({ children }: { children: ReactNode }) => children,
+}))
+
+vi.mock('./AuthenticatedApp', () => ({
+  default: () => <div data-testid="app-authenticated">app</div>,
+}))
+
+const mockUseAuth = vi.mocked(useAuth)
+
+const authedUser: AuthUser = { sub: 'u1', email: 'a@b.c', name: 'Lorenzo' }
+
+function authValue(overrides: Partial<AuthContextValue>): AuthContextValue {
   return {
-    ...actual,
-    ConfigProvider: (props: ComponentProps<typeof actual.ConfigProvider>) => {
-      configProviderSpy(props)
-      return <actual.ConfigProvider {...props} />
-    },
+    user: null,
+    loading: false,
+    loggingOut: false,
+    logout: async () => undefined,
+    ...overrides,
   }
-})
-
-function lastAlgorithm() {
-  const calls = configProviderSpy.mock.calls
-  const lastProps = calls.at(-1)?.[0] as ComponentProps<typeof import('antd').ConfigProvider> | undefined
-  return lastProps?.theme?.algorithm
 }
 
-function renderAt(path: string) {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <App />
-    </MemoryRouter>,
-  )
-}
-
-describe('App routing', () => {
+describe('App — guard de sesión', () => {
   beforeEach(() => {
-    configProviderSpy.mockClear()
+    vi.clearAllMocks()
   })
 
-  it('redirects "/" to the calendar view', async () => {
-    renderAt('/')
-    expect(
-      await screen.findByRole('heading', { name: /calendario/i, level: 2 }),
-    ).toBeInTheDocument()
+  it('mientras la sesión se resuelve muestra carga y ni login ni app', () => {
+    mockUseAuth.mockReturnValue(authValue({ loading: true }))
+
+    render(<App />)
+
+    expect(screen.getByTestId('auth-loading')).toBeInTheDocument()
+    expect(screen.queryByTestId('app-authenticated')).toBeNull()
+    expect(screen.queryByRole('button', { name: /iniciar sesión/i })).toBeNull()
   })
 
-  it.each([
-    ['/calendar', /calendario/i],
-    ['/contacts', /contactos/i],
-    ['/sync', /sincronización/i],
-    ['/settings', /ajustes/i],
-  ])('renders the %s route with its title', async (path, heading) => {
-    renderAt(path)
-    expect(await screen.findByRole('heading', { name: heading, level: 2 })).toBeInTheDocument()
+  it('sin sesión muestra la pantalla de login y no la aplicación', () => {
+    mockUseAuth.mockReturnValue(authValue({ user: null, loading: false }))
+
+    render(<App />)
+
+    expect(screen.getByRole('button', { name: /iniciar sesión/i })).toBeInTheDocument()
+    expect(screen.queryByTestId('app-authenticated')).toBeNull()
   })
 
-  it('navigates between sections using the sidebar menu', async () => {
-    const user = userEvent.setup()
-    renderAt('/calendar')
+  it('con sesión muestra la aplicación y no la pantalla de login', async () => {
+    mockUseAuth.mockReturnValue(authValue({ user: authedUser, loading: false }))
 
-    await user.click(await screen.findByRole('menuitem', { name: /contactos/i }))
+    render(<App />)
 
-    expect(
-      await screen.findByRole('heading', { name: /contactos/i, level: 2 }),
-    ).toBeInTheDocument()
-  })
-})
-
-describe('App theme', () => {
-  beforeEach(() => {
-    configProviderSpy.mockClear()
-  })
-
-  it('starts with the light (default) algorithm applied via ConfigProvider', async () => {
-    renderAt('/calendar')
-    await screen.findByRole('heading', { name: /calendario/i, level: 2 })
-
-    expect(lastAlgorithm()).toBe(theme.defaultAlgorithm)
-  })
-
-  it('applies the dark algorithm after toggling the theme', async () => {
-    const user = userEvent.setup()
-    renderAt('/calendar')
-
-    const toggle = await screen.findByRole('button', { name: /cambiar tema/i })
-    expect(toggle).toHaveTextContent('🌙')
-    expect(lastAlgorithm()).not.toBe(theme.darkAlgorithm)
-
-    await user.click(toggle)
-
-    expect(toggle).toHaveTextContent('☀️')
-    await waitFor(() => expect(lastAlgorithm()).toBe(theme.darkAlgorithm))
+    expect(await screen.findByTestId('app-authenticated')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /iniciar sesión/i })).toBeNull()
   })
 })

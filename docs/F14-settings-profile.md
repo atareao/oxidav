@@ -1,5 +1,10 @@
 # F14 — Ajustes y Perfil (SPA) + OIDC PKCE del frontend
 
+> [!warning] Modelo superado por F17
+> Documento **histórico**: el `Authorization: Bearer`, el refresh y `RequireAuth`
+> del SPA fueron retirados; el modelo vigente está en
+> [`F17 — OIDC con paridad de valet`](./F17-oidc-valet-parity.md).
+
 ## Qué hace
 
 Cierra el hueco de autenticación del frontend (el flujo **OIDC Authorization Code + PKCE** contra Pocket ID, pendiente desde F04) y añade la vista **Ajustes y Perfil** de la SPA.

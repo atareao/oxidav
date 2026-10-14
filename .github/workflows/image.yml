@@ -44,21 +44,21 @@ jobs:
       #   * EXPOSE / default bind address .... port 8080
       #   * non-root user ................... 10001:10001
       #   * SQLite default path ............. /app/data/oxidav.db (owned by oxidav)
-      #   * OXIDAV_POCKET_ID_ISSUER ......... MANDATORY (no default)
       #   * OXIDAV_BIND_ADDR ................ default 0.0.0.0:8080
       #   * OXIDAV_DATABASE_URL ............. default sqlite://data/oxidav.db
       #
-      # The container points the issuer at a placeholder domain with no real
-      # Pocket ID. OIDC discovery fails, but the server keeps running "offline"
-      # (main.rs -> AppState::offline_oidc) and /healthz still answers, so the
-      # smoke test can exercise the HTTP surface without an IdP.
+      # Authentication is disabled by default (AUTH_ENABLED=false), so the
+      # container boots with no OIDC IdP and /healthz still answers: the smoke
+      # test exercises the HTTP surface without an IdP. In dev mode
+      # GET /api/auth/login and /api/auth/callback return 404. If authentication
+      # is ever enabled, all seven AUTH_* / JWT_SECRET settings are mandatory and
+      # fail-closed (an empty one aborts startup).
       - name: Smoke test the built image
         run: |
           set -euo pipefail
 
           docker run -d --name oxidav-ci -p 8080:8080 \
             -e OXIDAV_BIND_ADDR=0.0.0.0:8080 \
-            -e OXIDAV_POCKET_ID_ISSUER=https://id.example.com \
             -e OXIDAV_DATABASE_URL='sqlite://data/oxidav.db' \
             -e RUST_LOG=info \
             oxidav:ci

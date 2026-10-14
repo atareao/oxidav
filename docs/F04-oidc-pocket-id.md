@@ -1,5 +1,15 @@
 # F04 — Autenticación OIDC (Pocket ID)
 
+> [!warning] Modelo superado por F17
+> Este documento es **histórico**. El modelo que describe —el SPA hace
+> Authorization Code + PKCE y envía `Authorization: Bearer <JWT>`, que el backend
+> verifica contra el JWKS de Pocket ID— quedó **superado por
+> [`F17 — OIDC con paridad de valet`](./F17-oidc-valet-parity.md)**, donde el
+> backend hace el flujo server-side con cliente confidencial y una cookie de sesión
+> `HttpOnly`. El soporte `Bearer` ya no existe y `OXIDAV_POCKET_ID_ISSUER` /
+> `OXIDAV_OIDC_AUDIENCE` fueron retirados. Se conserva tal cual el resto del
+> documento, como registro.
+
 ## Qué hace
 
 Verifica los JWT **Bearer** que la SPA obtiene de Pocket ID, contra el JWKS del IdP,

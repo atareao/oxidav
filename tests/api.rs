@@ -1,147 +1,84 @@
-//! F06 — REST API integration tests.
+//! F06/F17 — REST API integration tests.
 //!
-//! Tarea 1 covers the `/api/v1` router mounted behind the F04 `require_auth`
-//! middleware and the `GET /api/v1/me` endpoint. The helpers below mirror the
-//! ones in `src/auth/oidc.rs`'s unit tests: an in-memory RS256 key pair and a
-//! loopback JWKS server, so these tests never touch the network.
+//! The `/api/v1` router is mounted behind the F17 session middleware. The
+//! helpers below mint a signed `oxidav_session` cookie with `emit_session`, so
+//! these tests exercise the real cookie authentication path end to end without
+//! an IdP (was: an in-memory RS256 key pair and a loopback JWKS server).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, get_current_timestamp};
-use oxidav::auth::oidc::{JwksCache, OidcConfig};
+use oxidav::auth::session::{AuthConfig, Claims, SESSION_COOKIE_NAME, emit_session};
 use oxidav::auth::{TokenError, verify_app_token};
 use oxidav::config::Config;
 use oxidav::db::init_pool;
 use oxidav::db::models::{NewCalendarObject, NewCardObject};
 use oxidav::db::{insert_calendar_object, insert_card_object};
 use oxidav::router::{AppState, build_router, offline_pool};
-use rsa::pkcs1::EncodeRsaPrivateKey;
-use rsa::traits::PublicKeyParts;
-use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
-use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-const ISSUER: &str = "https://issuer.test";
-const AUDIENCE: &str = "oxidav-spa";
+/// HS256 secret shared by the test session cookies and the enabling config.
+const TEST_JWT_SECRET: &str = "integration-test-jwt-secret";
 
-/// An in-memory RS256 key pair plus its public JWK representation.
-struct TestKey {
-    encoding: EncodingKey,
-    jwk: Value,
-}
-
-/// Generate a fresh RSA-2048 key pair and its public JWK.
-fn generate_key(kid: &str) -> TestKey {
-    let mut rng = rand::thread_rng();
-    let private = RsaPrivateKey::new(&mut rng, 2048).expect("generate RSA key");
-    let public = RsaPublicKey::from(&private);
-
-    let n = URL_SAFE_NO_PAD.encode(public.n().to_bytes_be());
-    let e = URL_SAFE_NO_PAD.encode(public.e().to_bytes_be());
-    let der = private.to_pkcs1_der().expect("encode PKCS#1 DER");
-
-    TestKey {
-        encoding: EncodingKey::from_rsa_der(der.as_bytes()),
-        jwk: json!({
-            "kty": "RSA",
-            "kid": kid,
-            "alg": "RS256",
-            "use": "sig",
-            "n": n,
-            "e": e,
-        }),
-    }
-}
-
-/// Build a JWKS document from the given keys.
-fn jwks(keys: &[&TestKey]) -> Value {
-    let entries: Vec<Value> = keys.iter().map(|key| key.jwk.clone()).collect();
-    json!({ "keys": entries })
-}
-
-/// Build a claim set with the given subject, audience and expiry offset.
-fn claims(sub: &str, audience: &Value, exp_offset: i64) -> Value {
-    let now = get_current_timestamp() as i64;
-    json!({
-        "sub": sub,
-        "iss": ISSUER,
-        "aud": audience,
-        "exp": (now + exp_offset) as u64,
-        "iat": now as u64,
+/// Enabling [`AuthConfig`] used by the tests.
+fn test_auth_config() -> Arc<AuthConfig> {
+    Arc::new(AuthConfig {
+        enabled: true,
+        issuer_url: "https://issuer.test".into(),
+        client_id: "oxidav-spa".into(),
+        client_secret: "client-secret".into(),
+        redirect_url: "http://localhost/api/auth/callback".into(),
+        jwt_secret: TEST_JWT_SECRET.into(),
+        post_logout_redirect_url: String::new(),
     })
 }
 
-/// Sign `claims` with `key`, setting the `kid` header.
-fn sign(key: &TestKey, kid: &str, claims: &Value) -> String {
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some(kid.to_string());
-    encode(&header, claims, &key.encoding).expect("encode JWT")
-}
-
-/// Spawn a loopback-only JWKS server returning `document` at `/jwks`.
-async fn spawn_jwks_server(
-    initial: Value,
-) -> (String, Arc<RwLock<Value>>, tokio::task::JoinHandle<()>) {
-    let document = Arc::new(RwLock::new(initial));
-    let handler = {
-        let document = Arc::clone(&document);
-        move || {
-            let document = Arc::clone(&document);
-            async move {
-                let value = document.read().await.clone();
-                axum::Json(value)
-            }
-        }
-    };
-
-    let app = axum::Router::new().route("/jwks", axum::routing::get(handler));
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback listener");
-    let addr = listener.local_addr().expect("listener address");
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    (format!("http://{addr}/jwks"), document, handle)
-}
-
-/// Build an [`AppState`] whose JWKS cache points at `jwks_uri`.
-fn state_with_jwks(jwks_uri: &str) -> AppState {
-    state_with_jwks_and_db(jwks_uri, offline_pool())
-}
-
-/// Build an [`AppState`] backed by an explicit SQLite pool.
-fn state_with_jwks_and_db(jwks_uri: &str, db: SqlitePool) -> AppState {
-    let config = Config {
+/// [`Config`] matching [`test_auth_config`] (auth enabled).
+fn test_config() -> Config {
+    Config {
         bind_addr: "127.0.0.1:0".parse().expect("valid socket addr"),
         log_level: "info".to_string(),
         database_url: "sqlite::memory:".to_string(),
-        pocket_id_issuer: ISSUER.to_string(),
-        audience: Some(AUDIENCE.to_string()),
+        auth_enabled: true,
+        auth_issuer_url: "https://issuer.test".into(),
+        auth_client_id: "oxidav-spa".into(),
+        auth_client_secret: "client-secret".into(),
+        auth_redirect_url: "http://localhost/api/auth/callback".into(),
+        auth_post_logout_redirect_url: String::new(),
+        jwt_secret: TEST_JWT_SECRET.into(),
+    }
+}
+
+/// Mint a signed session cookie value for `sub`.
+fn session_cookie(auth: &AuthConfig, sub: &str) -> String {
+    let now = unix_now();
+    let claims = Claims {
+        sub: sub.to_string(),
+        email: None,
+        name: None,
+        exp: now + 3600,
+        iat: now,
+        id_token: None,
     };
-    let oidc = Arc::new(OidcConfig::new(
-        ISSUER,
-        Some(AUDIENCE.to_string()),
-        jwks_uri.to_string(),
-    ));
-    let jwks = Arc::new(JwksCache::new(
-        Arc::clone(&oidc),
-        reqwest::Client::new(),
-        Duration::from_secs(300),
-        Duration::from_secs(60),
-    ));
-    AppState::new(config, oidc, jwks, db)
+    emit_session(auth, &claims).expect("emit session")
+}
+
+/// Current UNIX timestamp in seconds.
+fn unix_now() -> usize {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as usize)
+        .unwrap_or(0)
+}
+
+/// Build an [`AppState`] with auth enabled (cookie sessions) backed by `db`.
+fn state_with_auth_and_db(db: SqlitePool) -> AppState {
+    AppState::new(test_config(), Some(test_auth_config()), db)
 }
 
 // ---------------------------------------------------------------------------
@@ -160,28 +97,35 @@ fn temp_db_url(tag: &str) -> String {
     format!("sqlite://{}", path.display())
 }
 
-/// A router plus its database, sharing a fresh RS256 key/JWKS server.
+/// A router plus its database and the enabling auth config (for minting
+/// session cookies).
 struct TestEnv {
     app: axum::Router,
     pool: SqlitePool,
-    key: TestKey,
+    auth: Arc<AuthConfig>,
 }
 
 impl TestEnv {
     async fn new(tag: &str) -> Self {
-        let key = generate_key("k1");
-        let (url, _doc, _server) = spawn_jwks_server(jwks(&[&key])).await;
         let pool = init_pool(&temp_db_url(tag)).await.expect("init_pool");
-        let app = build_router(state_with_jwks_and_db(&url, pool.clone()));
-        Self { app, pool, key }
+        let auth = test_auth_config();
+        let app = build_router(AppState::new(
+            test_config(),
+            Some(Arc::clone(&auth)),
+            pool.clone(),
+        ));
+        Self { app, pool, auth }
     }
 
-    /// Sign a bearer token for `sub`.
+    /// Mint a signed session cookie for `sub`.
     fn token(&self, sub: &str) -> String {
-        sign(&self.key, "k1", &claims(sub, &json!(AUDIENCE), 300))
+        session_cookie(&self.auth, sub)
     }
 
     /// Issue a request and decode the JSON body (or `Null` for an empty body).
+    ///
+    /// `token` is the value of the `oxidav_session` cookie (or `None` for an
+    /// unauthenticated request); it is sent as `Cookie: oxidav_session=…`.
     async fn call(
         &self,
         method: Method,
@@ -191,7 +135,7 @@ impl TestEnv {
     ) -> (StatusCode, Value) {
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(token) = token {
-            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+            builder = builder.header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"));
         }
         let body = match body {
             Some(value) => {
@@ -246,10 +190,8 @@ fn collection_body(name: &str, kind: &str, color: Option<&str>) -> Value {
 }
 
 #[tokio::test]
-async fn me_without_token_returns_401_with_challenge() {
-    let key = generate_key("k1");
-    let (url, _doc, _server) = spawn_jwks_server(jwks(&[&key])).await;
-    let app = build_router(state_with_jwks(&url));
+async fn me_without_cookie_returns_401() {
+    let app = build_router(state_with_auth_and_db(offline_pool()));
 
     let response = app
         .oneshot(
@@ -262,12 +204,10 @@ async fn me_without_token_returns_401_with_challenge() {
         .expect("send request");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::WWW_AUTHENTICATE)
-            .and_then(|v| v.to_str().ok()),
-        Some("Bearer")
+    // F17 authenticates with a cookie: there is no `Bearer` challenge to send.
+    assert!(
+        response.headers().get(header::WWW_AUTHENTICATE).is_none(),
+        "a cookie-authenticated 401 must not advertise a Bearer challenge"
     );
 
     // The 401 must use the same uniform error envelope as every other endpoint.
@@ -280,17 +220,20 @@ async fn me_without_token_returns_401_with_challenge() {
 }
 
 #[tokio::test]
-async fn me_with_valid_token_returns_sub() {
-    let key = generate_key("k1");
-    let (url, _doc, _server) = spawn_jwks_server(jwks(&[&key])).await;
-    let app = build_router(state_with_jwks(&url));
-    let token = sign(&key, "k1", &claims("user-42", &json!(AUDIENCE), 300));
+async fn me_with_valid_session_cookie_returns_sub() {
+    let auth = test_auth_config();
+    let app = build_router(AppState::new(
+        test_config(),
+        Some(Arc::clone(&auth)),
+        offline_pool(),
+    ));
+    let cookie = session_cookie(&auth, "user-42");
 
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/me")
-                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={cookie}"))
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -1473,7 +1416,7 @@ async fn events_require_a_calendar_collection() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// Tarea 6 — no/invalid bearer token → `401` with the uniform envelope.
+/// Tarea 6 — no/invalid session cookie → `401` with the uniform envelope.
 #[tokio::test]
 async fn events_require_authentication() {
     let env = TestEnv::new("events-401").await;
@@ -1969,7 +1912,7 @@ async fn contacts_require_an_addressbook_collection() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
-/// Tarea 6 — no/invalid bearer token → `401` with the uniform envelope.
+/// Tarea 6 — no/invalid session cookie → `401` with the uniform envelope.
 #[tokio::test]
 async fn contacts_require_authentication() {
     let env = TestEnv::new("contacts-401").await;
@@ -2219,8 +2162,8 @@ async fn app_tokens_create_returns_secret_once_and_verifies() {
     );
 }
 
-/// Tarea 4 — invalid payloads are a uniform `400`; a missing/invalid bearer
-/// token is a `401`; the error envelope is `{error:{code,message}}`.
+/// Tarea 4 — invalid payloads are a uniform `400`; a missing/invalid session
+/// cookie is a `401`; the error envelope is `{error:{code,message}}`.
 #[tokio::test]
 async fn app_tokens_validation_and_unauthorized() {
     let env = TestEnv::new("app-tokens-validation").await;
