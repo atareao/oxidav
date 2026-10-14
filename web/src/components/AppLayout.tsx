@@ -1,8 +1,21 @@
+/**
+ * Shell de la aplicación autenticada (F17).
+ *
+ * Sider de navegación + header con el conmutador de tema y el control de cierre
+ * de sesión. El `Suspense` interno mantiene el shell montado mientras se
+ * descarga el chunk de la página activa (`React.lazy`).
+ *
+ * El cierre de sesión se consume vía `useContext(AuthContext)` (no `useAuth()`)
+ * para que el layout siga siendo renderizable sin `<AuthProvider>` —hay tests
+ * de layout que no lo montan— y el botón solo aparezca cuando hay sesión.
+ */
+
 import { Button, Layout, Menu, Space, Typography } from 'antd'
 import type { MenuProps } from 'antd'
-import { Suspense } from 'react'
+import { Suspense, useContext } from 'react'
 import type { ReactNode } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { AuthContext } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
 import { RouteFallback } from './RouteFallback'
 
@@ -28,6 +41,12 @@ export function AppLayout({ children }: AppLayoutProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const { mode, toggle } = useTheme()
+  // Contexto directo para tolerar un render sin `<AuthProvider>` (tests de
+  // layout): si no hay sesión no se muestra el control de cierre.
+  const auth = useContext(AuthContext)
+  const logout = auth?.logout
+  const authenticated = auth?.user != null
+  const loggingOut = auth?.loggingOut ?? false
 
   const selectedKey =
     NAV_ITEMS.find(
@@ -79,6 +98,21 @@ export function AppLayout({ children }: AppLayoutProps) {
             >
               {mode === 'dark' ? '☀️' : '🌙'}
             </Button>
+            {authenticated && logout && (
+              <Button
+                onClick={() => {
+                  void logout()
+                }}
+                // `loading` + `disabled` bloquean una segunda pulsación mientras
+                // el `POST /auth/logout` está en curso y se navega al proveedor.
+                loading={loggingOut}
+                disabled={loggingOut}
+                aria-label="Cerrar sesión"
+                title="Cerrar sesión"
+              >
+                Cerrar sesión
+              </Button>
+            )}
           </Space>
         </Header>
         <Content style={{ margin: 16, padding: 24, background: 'transparent' }}>

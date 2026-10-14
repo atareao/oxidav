@@ -44,8 +44,7 @@
 //!
 //! This module reads no environment variables; it only serves the embedded
 //! build. Server configuration (`OXIDAV_BIND_ADDR`, `OXIDAV_DATABASE_URL`,
-//! `OXIDAV_POCKET_ID_ISSUER`, `OXIDAV_OIDC_AUDIENCE`, `RUST_LOG`) is handled by
-//! [`crate::config`].
+//! `AUTH_*`, `JWT_SECRET`, `RUST_LOG`) is handled by [`crate::config`].
 
 use std::borrow::Cow;
 

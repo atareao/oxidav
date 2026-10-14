@@ -2,7 +2,7 @@
 //!
 //! Read-only endpoints over the F03 FTS5 indexes (`trigram` tokenizer +
 //! `bm25 ASC`). Every handler is scoped to the authenticated subject
-//! ([`AuthUser::sub`]) through the `*_scoped` helpers in [`crate::db::search`],
+//! ([`SessionUser::sub`]) through the `*_scoped` helpers in [`crate::db::search`],
 //! so a search can never surface another user's objects (anti-IDOR).
 //!
 //! Behaviour carried over verbatim from F03:
@@ -18,10 +18,10 @@
 //! [`ApiError`] envelope.
 
 use axum::Json;
-use axum::extract::{Extension, Query, State};
+use axum::extract::{Query, State};
 use serde::Deserialize;
 
-use crate::auth::oidc::AuthUser;
+use crate::auth::SessionUser;
 use crate::db::search::{search_contacts_scoped, search_events_scoped};
 use crate::router::AppState;
 
@@ -78,7 +78,7 @@ impl SearchQuery {
 /// [`ApiError::Internal`] if the database query fails.
 pub async fn events(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<Vec<EventSearchResult>>, ApiError> {
     let limit = query.resolve_limit()?;
@@ -94,7 +94,7 @@ pub async fn events(
 /// [`ApiError::Internal`] if the database query fails.
 pub async fn contacts(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<Vec<ContactSearchResult>>, ApiError> {
     let limit = query.resolve_limit()?;
@@ -113,7 +113,7 @@ pub async fn contacts(
 /// [`ApiError::Internal`] if either database query fails.
 pub async fn aggregate(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchResultsDto>, ApiError> {
     let limit = query.resolve_limit()?;

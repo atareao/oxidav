@@ -1,5 +1,9 @@
 # F06 — API REST `/api/v1`
 
+> [!warning] Modelo superado por F17
+> Documento **histórico**: la API ya no se protege con `require_auth`/`Bearer`; el
+> modelo vigente está en [`F17 — OIDC con paridad de valet`](./F17-oidc-valet-parity.md).
+
 ## Qué hace
 
 API JSON que consume la SPA: CRUD de colecciones, paginación y errores uniformes; protegida con el middleware `require_auth` de F04 (Bearer JWT validado contra Pocket ID).

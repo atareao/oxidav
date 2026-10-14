@@ -228,7 +228,7 @@ pub struct Page<T> {
 /// `GET /api/v1/me` response: the authenticated subject.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MeDto {
-    /// The `sub` claim of the verified bearer token.
+    /// The `sub` claim carried by the verified session cookie.
     pub sub: String,
 }
 

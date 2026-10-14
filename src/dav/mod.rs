@@ -5,10 +5,11 @@
 //! (`MKCALENDAR`, `PROPFIND`, `REPORT`, `PUT`, `DELETE`, `GET`) land in phase B
 //! on top of the [`xml`] and [`ics`] helpers that already live here.
 //!
-//! The whole subtree is protected by F05 Basic Auth: [`crate::router::build_router`]
-//! wraps the router returned by [`router`] with
-//! [`crate::auth::basic::require_basic_auth`], so a request without a valid app
-//! token never reaches these handlers.
+//! The whole subtree is protected by
+//! [`crate::auth::basic::require_basic_auth`], which
+//! [`crate::router::build_router`] wraps around the router returned by [`router`]:
+//! a request must authenticate with a valid session cookie (when auth is enabled)
+//! or with a Basic app token, otherwise it never reaches these handlers.
 
 pub mod caldav;
 pub mod carddav;
@@ -170,7 +171,7 @@ impl IntoResponse for DavError {
 ///
 /// The returned router is expected to be nested under `/dav` and wrapped with
 /// `require_basic_auth` in [`crate::router::build_router`], so every handler can
-/// rely on an [`crate::auth::oidc::AuthUser`] being present in the request
+/// rely on a [`crate::auth::SessionUser`] being present in the request
 /// extensions.
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -197,9 +198,10 @@ pub fn router() -> Router<AppState> {
 
 /// `OPTIONS /dav/` — advertise DAV compliance classes and the allowed methods.
 ///
-/// Reaching this handler already implies a valid Basic app token (the router is
-/// wrapped by `require_basic_auth`); it exists so native clients can discover
-/// the server capabilities before issuing DAV verbs.
+/// Reaching this handler already implies an authenticated DAV principal (a valid
+/// session cookie or a Basic app token, enforced by `require_basic_auth`); it
+/// exists so native clients can discover the server capabilities before issuing
+/// DAV verbs.
 async fn options_handler() -> Response {
     (
         StatusCode::OK,

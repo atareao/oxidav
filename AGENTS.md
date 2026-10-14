@@ -16,10 +16,26 @@ decisiones **vinculantes** que un agente no puede deducir del código actual.
   Se compila a `web/dist/`.
 - **Identidad:** **Pocket ID** (OIDC) es el único IdP. OxiDav **no almacena
   contraseñas principales**.
-  - SPA: Authorization Code + PKCE → `Authorization: Bearer <JWT>`, validado
-    contra el JWKS público de Pocket ID (`/.well-known/openid-configuration`).
+  - SPA: **Authorization Code server-side** con **cliente confidencial**: el backend
+    intercambia el código y establece una **cookie de sesión firmada**
+    (`oxidav_session`, `HttpOnly` + `Secure` + `SameSite=Lax`, 8 h) y una **cookie de
+    flujo** (`oxidav_oauth_flow`, 10 min) que transporta `state`/`nonce`. El SPA **no
+    almacena ni envía tokens** y **nunca ve el `access_token`**; ya **no existe `Bearer`**
+    ni PKCE en el SPA. La única excepción es el `id_token_hint` embebido en el
+    `end_session_url` que devuelve `logout` (el IdP cierra SSO con él): el SPA solo lo usa
+    para navegar a una URL `https:`, nunca lo almacena.
+  - Variables: `AUTH_ENABLED` (default `false`), `AUTH_ISSUER_URL`, `AUTH_CLIENT_ID`,
+    `AUTH_CLIENT_SECRET`, `AUTH_REDIRECT_URL`, `AUTH_POST_LOGOUT_REDIRECT_URL`,
+    `JWT_SECRET`. Sustituyen a `OXIDAV_POCKET_ID_ISSUER` y `OXIDAV_OIDC_AUDIENCE`.
+  - Con `AUTH_ENABLED=true`, `AuthConfig::validate()` es **fail-closed**: exige esas
+    variables no vacías y que `AUTH_ISSUER_URL`/`AUTH_REDIRECT_URL` sean URLs absolutas
+    `https:` (se admite `http` solo en hosts loopback —`localhost`, `127.0.0.1`, `::1`);
+    si no, **aborta el arranque** nombrando la variable.
   - Clientes DAV nativos (iOS, DAVx⁵, Thunderbird): **Basic Auth** con *app tokens*
-    revocables (hash local en SQLite).
+    revocables (hash local en SQLite); el DAV **además** acepta la cookie de sesión. Con
+    la cookie y métodos que mutan estado (`PUT`/`DELETE`/`MKCALENDAR`), exige evidencia de
+    *same-origin* (`Sec-Fetch-Site: same-origin`/`none` o `Origin` propio) o responde
+    **403** (cierra el hueco de un subdominio hermano *same-site*).
   - El `user_id` en BD es el claim `sub` de Pocket ID.
 - **Búsqueda:** **SQLite FTS5 con tokenizer `trigram`** y ranking `bm25`.
   Sin índice externo ni sincronización de índices desde Rust.
@@ -48,8 +64,10 @@ decisiones **vinculantes** que un agente no puede deducir del código actual.
   parsea `.ics` ni `.vcf`.
 
 ## Layout esperado
-- `src/`: `auth/{oidc,app_tokens}`, `db/{mod,search,models}`, `dav/`, `api/`.
-- `web/`: Vite + React; OIDC en `web/src/services/auth.ts`.
+- `src/`: `auth/{session,routes,middleware,basic,app_tokens}`, `db/{mod,search,models}`,
+  `dav/`, `api/`.
+- `web/`: Vite + React; el SPA consume la sesión vía `/api/auth/*` (contexto en
+  `web/src/contexts/AuthContext.ts`).
 
 ## Planes y documentación
 - `plans/` — un fichero por plan. Nombrado `PLAN-XXX-<slug>.md` (XXX = número

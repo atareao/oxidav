@@ -23,10 +23,19 @@ services:
       OXIDAV_BIND_ADDR: "0.0.0.0:8080"
       # SQLite file, relative to WORKDIR (/app) -> /app/data/oxidav.db
       OXIDAV_DATABASE_URL: "sqlite://data/oxidav.db"
-      # --- Replace with your real Pocket ID values (placeholders, no secrets) ---
-      OXIDAV_POCKET_ID_ISSUER: "https://pocket-id.example.com"
-      # Optional: set to your SPA client id to enforce strict `aud` validation.
-      OXIDAV_OIDC_AUDIENCE: "oxidav-spa"
+      # --- Authentication (OIDC / Pocket ID) ---------------------------------
+      # Disabled by default: the container boots with no IdP in dev mode, where
+      # the API acts as the dev user and GET /api/auth/login + /api/auth/callback
+      # return 404. To enable authentication, uncomment and fill in ALL seven
+      # values below. With AUTH_ENABLED=true they are mandatory and fail-closed:
+      # any empty one aborts startup.
+      # AUTH_ENABLED: "true"
+      # AUTH_ISSUER_URL: "https://pocket-id.example.com"
+      # AUTH_CLIENT_ID: "oxidav-spa"
+      # AUTH_CLIENT_SECRET: "<confidential-client-secret>"
+      # AUTH_REDIRECT_URL: "https://oxidav.example.com/api/auth/callback"
+      # AUTH_POST_LOGOUT_REDIRECT_URL: "https://oxidav.example.com/"
+      # JWT_SECRET: "<long-random-hs256-secret>"
       # tracing filter / level
       RUST_LOG: "info"
     volumes:

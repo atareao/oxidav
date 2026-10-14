@@ -48,7 +48,7 @@ use sqlx::SqlitePool;
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 
-use crate::auth::oidc::AuthUser;
+use crate::auth::middleware::SessionUser;
 use crate::db::DbError;
 
 /// Environment variable holding the optional server-side pepper.
@@ -473,7 +473,7 @@ pub fn spawn_touch_last_used(pool: SqlitePool, id: String) {
 ///
 /// [`TokenError::Malformed`], [`TokenError::NotFound`], [`TokenError::Revoked`],
 /// [`TokenError::SecretMismatch`] or [`TokenError::Db`].
-pub async fn verify_app_token(pool: &SqlitePool, token: &str) -> Result<AuthUser, TokenError> {
+pub async fn verify_app_token(pool: &SqlitePool, token: &str) -> Result<SessionUser, TokenError> {
     let (id, secret) = parse_token(token)?;
 
     let row: Option<(String, String, Option<i64>)> =
@@ -504,7 +504,11 @@ pub async fn verify_app_token(pool: &SqlitePool, token: &str) -> Result<AuthUser
         return Err(TokenError::SecretMismatch);
     }
 
-    Ok(AuthUser { sub: user_id })
+    Ok(SessionUser {
+        sub: user_id,
+        email: None,
+        name: None,
+    })
 }
 
 #[cfg(test)]

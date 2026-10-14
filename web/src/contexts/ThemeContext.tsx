@@ -20,9 +20,10 @@ export interface ThemeContextValue {
 /**
  * `localStorage` key holding the last chosen theme.
  *
- * The theme is a non-sensitive UI preference (unlike the OIDC tokens, which are
- * deliberately confined to `sessionStorage`), so persisting it across sessions
- * is safe and expected.
+ * The theme is a non-sensitive UI preference, so persisting it across sessions
+ * is safe and expected. (There are no client-side tokens to guard against since
+ * F17: the backend owns the `HttpOnly` session cookie and the SPA never sees
+ * any credential.)
  */
 const STORAGE_KEY = 'oxidav.theme'
 
