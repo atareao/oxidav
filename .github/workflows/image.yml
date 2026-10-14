@@ -1,0 +1,172 @@
+name: Image
+
+# Build, smoke-test and publish the production image.
+# Docs-only changes never touch the container, so they skip the pipeline.
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - "plans/**"
+      - "docs/**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Read the repo and publish to GHCR (packages).
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    name: Build, verify and publish image
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image without publishing
+        uses: docker/build-push-action@v7
+        with:
+          push: false
+          load: true
+          tags: oxidav:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Runtime facts baked into the image (Dockerfile + src/config.rs):
+      #   * EXPOSE / default bind address .... port 8080
+      #   * non-root user ................... 10001:10001
+      #   * SQLite default path ............. /app/data/oxidav.db (owned by oxidav)
+      #   * OXIDAV_POCKET_ID_ISSUER ......... MANDATORY (no default)
+      #   * OXIDAV_BIND_ADDR ................ default 0.0.0.0:8080
+      #   * OXIDAV_DATABASE_URL ............. default sqlite://data/oxidav.db
+      #
+      # The container points the issuer at a placeholder domain with no real
+      # Pocket ID. OIDC discovery fails, but the server keeps running "offline"
+      # (main.rs -> AppState::offline_oidc) and /healthz still answers, so the
+      # smoke test can exercise the HTTP surface without an IdP.
+      - name: Smoke test the built image
+        run: |
+          set -euo pipefail
+
+          docker run -d --name oxidav-ci -p 8080:8080 \
+            -e OXIDAV_BIND_ADDR=0.0.0.0:8080 \
+            -e OXIDAV_POCKET_ID_ISSUER=https://id.example.com \
+            -e OXIDAV_DATABASE_URL='sqlite://data/oxidav.db' \
+            -e RUST_LOG=info \
+            oxidav:ci
+
+          echo "== Waiting for /healthz (active poll, up to 30 x 2s) =="
+          healthy=0
+          for attempt in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz || true)"
+            if [ "${code}" = "200" ]; then
+              echo "healthz is up after ${attempt} attempt(s)"
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "${healthy}" != "1" ]; then
+            echo "::error::server did not become healthy within 60s"
+            docker logs oxidav-ci || true
+            exit 1
+          fi
+
+          echo "== GET / serves the SPA (200) =="
+          root_code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ || true)"
+          echo "GET / -> ${root_code}"
+          if [ "${root_code}" != "200" ]; then
+            echo "::error::GET / expected 200, got ${root_code}"
+            docker logs oxidav-ci || true
+            exit 1
+          fi
+
+          echo "== GET /api/v1/nope is 404 JSON (not the SPA fallback) =="
+          api_status="$(curl -s -o /dev/null -w '%{http_code} %{content_type}' http://127.0.0.1:8080/api/v1/nope || true)"
+          api_code="$(printf '%s' "${api_status}" | awk '{print $1}')"
+          api_type="$(printf '%s' "${api_status}" | awk '{print $2}')"
+          echo "GET /api/v1/nope -> ${api_code} (${api_type})"
+          if [ "${api_code}" != "404" ] || ! printf '%s' "${api_type}" | grep -qi 'application/json'; then
+            echo "::error::GET /api/v1/nope expected 404 application/json, got ${api_code} ${api_type}"
+            docker logs oxidav-ci || true
+            exit 1
+          fi
+
+          echo "== PROPFIND /dav/ without credentials is 401 =="
+          dav_code="$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND http://127.0.0.1:8080/dav/ || true)"
+          echo "PROPFIND /dav/ -> ${dav_code}"
+          if [ "${dav_code}" != "401" ]; then
+            echo "::error::PROPFIND /dav/ expected 401, got ${dav_code}"
+            docker logs oxidav-ci || true
+            exit 1
+          fi
+
+          echo "Smoke test passed: healthz, SPA, JSON API 404 and DAV 401 all verified."
+
+      - name: Dump container logs
+        if: failure()
+        run: docker logs oxidav-ci || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f oxidav-ci || true
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag and publish the verified image
+        env:
+          IMAGE: ghcr.io/atareao/oxidav
+        run: |
+          set -euo pipefail
+
+          short_sha="$(printf '%s' "${GITHUB_SHA}" | cut -c1-7)"
+          tags=()
+
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_dispatch)
+              # A manual run may be triggered on any branch: publish only the
+              # immutable sha tag and never move `latest`.
+              tags=("sha-${short_sha}")
+              ;;
+            push)
+              if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+                # Release tag vX.Y.Z -> vX.Y.Z, X.Y and latest.
+                version="${GITHUB_REF_NAME}"
+                if [[ ! "${version}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                  echo "::error::Unexpected release tag format: ${version}"
+                  exit 1
+                fi
+                minor="${version%.*}"
+                tags=("${version}" "${minor#v}" "latest")
+              else
+                # Push to main -> latest and the short-sha tag.
+                tags=("latest" "sha-${short_sha}")
+              fi
+              ;;
+            *)
+              echo "::error::Unsupported event: ${GITHUB_EVENT_NAME}"
+              exit 1
+              ;;
+          esac
+
+          for tag in "${tags[@]}"; do
+            docker tag oxidav:ci "${IMAGE}:${tag}"
+          done
+
+          for tag in "${tags[@]}"; do
+            docker push "${IMAGE}:${tag}"
+          done

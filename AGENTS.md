@@ -61,6 +61,94 @@ decisiones **vinculantes** que un agente no puede deducir del código actual.
   OpenSpec/TDD). Al cerrar la feature, el plan pasa a `-COMPLETED.md` y su
   documentación se consolida en `docs/`.
 
+## Git Flow
+Gitflow con paridad respecto a `valet`. `main` es producción; `development` es la
+base de integración. **Nunca se commitea directamente a `main`: todo entra por PR.**
+
+### Ramas
+
+| Rama | Origen | Destino | Propósito |
+|:---|:---|:---|:---|
+| `main` | — | — | Producción. Al mergear, publica la imagen en GHCR. |
+| `development` | `main` | — | Integración. Base de toda feature. |
+| `feature/<nombre>` | `development` | `development` | Nueva funcionalidad o cambio. |
+| `hotfix/<nombre>` | `main` | `main` | Arreglo urgente en producción. |
+| `release/<versión>` | `development` | `main` | (si aplica) Preparación de una release. |
+
+### Flujo diario
+
+Feature:
+
+```bash
+git checkout development && git pull origin development
+git checkout -b feature/<nombre>
+# ... cambios + commit ...
+git push -u origin feature/<nombre>
+# PR: feature/<nombre> -> development
+```
+
+Hotfix (desde `main`; después hay que sincronizar `development`):
+
+```bash
+git checkout main && git pull origin main
+git checkout -b hotfix/<nombre>
+# ... cambios + commit ...
+git push -u origin hotfix/<nombre>
+# PR: hotfix/<nombre> -> main
+# tras mergear:
+git checkout development && git merge main && git push origin development
+```
+
+Release: PR de `development` → `main`. Al mergear, la imagen se publica en GHCR.
+
+### Antes de commitear
+Deja el árbol formateado o la CI falla:
+- Backend: `cargo fmt --all`.
+- Frontend (desde `web/`): `npm run lint`.
+
+### Conventional Commits con gitmoji
+
+| Tipo | Emoji | Tipo | Emoji |
+|:---|:---:|:---|:---:|
+| `feat` | ✨ | `ci` | 👷 |
+| `fix` | 🐛 | `revert` | ⏪️ |
+| `hotfix` | 🚑️ | `deps` | ⬆️ |
+| `docs` | 📝 | `breaking` | 💥 |
+| `refactor` | ♻️ | | |
+| `perf` | ⚡ | | |
+| `style` | 💄 | | |
+| `test` | ✅ | | |
+| `chore` | 🔧 | | |
+
+Ejemplo de mensaje: `✨ feat: add dark mode toggle`.
+
+### Versionado
+- `.vampus.yml` — gestión de versión: `vampus upgrade --major|--minor|--patch`.
+- `cliff.toml` — config de `git-cliff`, genera `CHANGELOG.md`.
+
+Reglas de bump:
+- `feat` → **minor**.
+- `feat!` / `BREAKING CHANGE` → **major**.
+- el resto → **patch**.
+
+### CI
+
+| Workflow | Disparadores | Qué hace |
+|:---|:---|:---|
+| `ci.yml` | PR y push a `development`/`main` | frontend + backend: fmt, clippy, test. |
+| `image.yml` | push a `main` (ignora cambios solo de docs), tags `v*` y `workflow_dispatch` | construye la imagen, smoke test y publica en `ghcr.io/atareao/oxidav`. |
+
+Etiquetas de imagen que publica `image.yml`:
+
+| Evento | Tags |
+|:---|:---|
+| tag `v*` | `vX.Y.Z`, `X.Y`, `latest` |
+| push a `main` | `latest`, `sha-<sha7>` |
+| `workflow_dispatch` | `sha-<sha7>` |
+
+Los secretos/tokens de registro **no** hacen falta más allá del `GITHUB_TOKEN`,
+que ya usa `image.yml`.
+
 ## Comandos
 El workflow OpenSpec (SDD) + TDD y los comandos base por stack están definidos en
 `~/.config/opencode/AGENTS.md` (auto-cargado). Específico de este repo:
