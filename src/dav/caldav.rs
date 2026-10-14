@@ -84,12 +84,12 @@
 //! smuggled through `PROPFIND` / `MKCALENDAR`.
 
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use percent_encoding::utf8_percent_encode;
 
-use crate::auth::oidc::AuthUser;
+use crate::auth::SessionUser;
 use crate::db::models::{CalendarObjectUpdate, CollectionKind, NewCalendarObject, NewCollection};
 use crate::db::{
     CalendarObject, Collection, DbError, MAX_COLLECTION_LIMIT, ResourceKind, create_collection,
@@ -140,7 +140,7 @@ const CALENDAR_CONTENT_TYPE: &str = "text/calendar; charset=utf-8";
 /// [`DavError::Internal`] if the database fails.
 pub async fn home(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(username): Path<String>,
     method: Method,
     headers: HeaderMap,
@@ -169,7 +169,7 @@ pub async fn home(
 /// [`DavError::Internal`] if the database fails.
 pub async fn collection(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path((username, collection_id)): Path<(String, String)>,
     method: Method,
     headers: HeaderMap,
@@ -209,7 +209,7 @@ pub async fn collection(
 /// and [`DavError::Internal`] if the database fails.
 pub async fn resource(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path((username, collection_id, filename)): Path<(String, String, String)>,
     method: Method,
     headers: HeaderMap,
@@ -649,7 +649,7 @@ fn resource_uid(filename: &str) -> Result<&str, DavError> {
 /// exists, and [`DavError::Internal`] if the database fails.
 async fn mkcalendar(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionUser,
     path_segment: Option<String>,
     body: &[u8],
 ) -> Result<Response, DavError> {

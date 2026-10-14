@@ -21,7 +21,7 @@ use axum::response::Response;
 use percent_encoding::{AsciiSet, CONTROLS};
 use rand::RngCore;
 
-use crate::auth::oidc::AuthUser;
+use crate::auth::SessionUser;
 use crate::db::{
     Db, ResourceKind, changes_since, get_calendar_object, get_card_object, next_sync_token,
 };
@@ -106,7 +106,7 @@ pub(crate) fn validate_sync_depth(headers: &HeaderMap) -> Result<(), DavError> {
 }
 
 /// Reject a request whose `{username}` is not the authenticated subject.
-pub(crate) fn ensure_owner(username: &str, user: &AuthUser) -> Result<(), DavError> {
+pub(crate) fn ensure_owner(username: &str, user: &SessionUser) -> Result<(), DavError> {
     if username == user.sub {
         Ok(())
     } else {

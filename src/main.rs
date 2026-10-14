@@ -6,27 +6,28 @@
 use std::error::Error;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
 
-use oxidav::auth::oidc::{DEFAULT_CLOCK_SKEW, DEFAULT_JWKS_TTL, JwksCache, OidcConfig};
+use oxidav::auth::session::AuthConfig;
 use oxidav::config::Config;
 use oxidav::db::init_pool;
 use oxidav::router::{AppState, build_router, offline_pool};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-/// Upper bound on the start-up OIDC discovery request. Keeping it short means a
-/// slow or unreachable IdP cannot stall server start-up.
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::from_env()?;
 
+    // Fail-closed: with `AUTH_ENABLED` set, a missing or empty auth setting must
+    // abort start-up rather than run with a forgeable session secret or an
+    // unreachable/misconfigured issuer.
+    let auth_config = AuthConfig::from_config(&config)
+        .map_err(|err| format!("invalid authentication configuration; refusing to start: {err}"))?;
+
     init_tracing(&config.log_level);
 
     let bind_addr = config.bind_addr;
-    let state = build_state(config).await;
+    let state = build_state(config, auth_config).await;
     let app = build_router(state);
 
     let listener = TcpListener::bind(bind_addr).await?;
@@ -40,14 +41,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Build the shared [`AppState`], opening the database and resolving the OIDC
-/// `jwks_uri` from the IdP discovery document.
+/// Build the shared [`AppState`], opening the database.
 ///
-/// Both steps are **best-effort**: a database that cannot be opened degrades to
-/// an offline pool (DAV authentication then fails closed) and OIDC discovery
-/// failures fall back to [`AppState::offline_oidc`] with a derived `jwks_uri`.
-/// Neither blocks nor fails start-up.
-async fn build_state(config: Config) -> AppState {
+/// Opening the database is **best-effort**: a database that cannot be opened
+/// degrades to an offline pool (DAV authentication then fails closed) instead of
+/// blocking start-up. The already-validated [`AuthConfig`] is attached as-is.
+async fn build_state(config: Config, auth_config: AuthConfig) -> AppState {
     let db = match init_pool(&config.database_url).await {
         Ok(pool) => pool,
         Err(err) => {
@@ -59,43 +58,11 @@ async fn build_state(config: Config) -> AppState {
         }
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(DISCOVERY_TIMEOUT)
-        .build()
-    {
-        Ok(client) => client,
-        Err(err) => {
-            tracing::warn!(%err, "could not build the OIDC HTTP client; starting offline");
-            return AppState::offline_oidc(config, db);
-        }
-    };
-
-    match OidcConfig::discover(&client, &config.pocket_id_issuer, config.audience.clone()).await {
-        Ok(oidc) => {
-            tracing::info!(
-                issuer = %oidc.issuer,
-                jwks_uri = %oidc.jwks_uri,
-                audience = oidc.audience.as_deref().unwrap_or("<unset>"),
-                "OIDC discovery succeeded"
-            );
-            let oidc = Arc::new(oidc);
-            let jwks = Arc::new(JwksCache::new(
-                Arc::clone(&oidc),
-                client,
-                DEFAULT_JWKS_TTL,
-                DEFAULT_CLOCK_SKEW,
-            ));
-            AppState::new(config, oidc, jwks, db)
-        }
-        Err(err) => {
-            tracing::warn!(
-                %err,
-                "OIDC discovery failed at start-up; continuing offline \
-                 (bearer tokens are rejected until the IdP is reachable)"
-            );
-            AppState::offline_oidc(config, db)
-        }
+    if auth_config.enabled {
+        tracing::info!(issuer = %auth_config.issuer_url, "OIDC authentication enabled");
     }
+
+    AppState::new(config, Some(Arc::new(auth_config)), db)
 }
 
 /// Initialise `tracing-subscriber` with the `env-filter` layer, falling back to

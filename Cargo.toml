@@ -36,16 +36,39 @@ sqlx = { version = "0.8", default-features = false, features = [
     "macros",
     "migrate",
 ] }
-# F04: OIDC (Pocket ID) RS256 verification. `rust_crypto` selects the pure-Rust
-# backend (RSA + SHA-256), preserving the "no OpenSSL" property of the binary.
+# F04/F17: OIDC (Pocket ID) RS256 verification + HS256 session signing.
+# `rust_crypto` selects the pure-Rust backend (RSA + SHA-256), preserving the
+# "no OpenSSL" property of the static binary. F17 ports valet's OIDC flow but
+# deliberately **keeps** `rust_crypto` instead of valet's `aws_lc_rs`: valet
+# links `aws-lc-sys` (a C/assembly build) and OxiDav ships a static musl binary
+# where that is unwanted. This is design parity with valet, not feature parity.
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
-# F04: JWKS + OIDC discovery download. `default-features = false` drops the
+# F04/F17: JWKS + OIDC discovery download. `default-features = false` drops the
 # native-tls/system-proxy stack; `rustls` (with aws-lc-rs, so not OpenSSL) and
-# `json` are the only things needed to fetch `openid-configuration`/JWKS.
+# `json` are the only things needed to fetch `openid-configuration`/JWKS. The
+# `stream` feature (F17) is required by `session::read_limited_json`, which caps
+# the response body by summing chunks as they arrive, not only via
+# `content-length`.
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls",
+    "stream",
 ] }
+# F17: `CookieJar`/`Set-Cookie` extractors for the OIDC server-side flow
+# (`/api/auth/*`). Only the `cookie` feature is pulled; the rest of axum-extra
+# stays out.
+axum-extra = { version = "0.10", features = ["cookie"] }
+# F17: `cookie::time::Duration` for computing cookie `Max-Age` values. Declared
+# directly so the auth routes can name the type without relying on axum-extra's
+# re-export.
+cookie = "0.18"
+# F17: parse and mutate URLs (query string building for `authorize`/`end_session`
+# and origin comparison of `jwks_uri`, RFC 8414). `reqwest` already pulls `url`
+# transitively, but a direct dependency is required to `use url::…` here.
+url = "2"
+# F17: `StreamExt::next` over `reqwest`'s chunked body stream for the size-capped
+# reader (`session::read_limited_json`).
+futures = "0.3"
 # F05: app-token secret hashing (SHA-256, or HMAC-SHA256 with an optional pepper).
 sha2 = "0.10"
 hmac = "0.12"
@@ -83,6 +106,7 @@ vcard4 = { version = "0.7", default-features = false }
 tower = { version = "0.5", features = ["util"] }
 # `tokio::time::timeout` is only needed by the shutdown-signal unit tests.
 tokio = { version = "1", features = ["time"] }
-# F04: generate an RS256 key pair in-memory so the OIDC tests never touch the
-# network (no dependency on a real Pocket ID deployment).
-rsa = "0.9"
+# F17: in-process HTTP server that serves a fake JWKS/discovery document to the
+# `session` unit tests, so `validate_id_token`/`discover` are exercised without
+# a real IdP.
+wiremock = "0.6"

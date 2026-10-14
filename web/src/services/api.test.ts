@@ -1,121 +1,143 @@
 /**
- * Tests del cliente HTTP (F14): inyección del `Authorization: Bearer` y política
- * de renovación `401 → refresh → reintento único`, con el módulo `auth` mockeado
- * para controlar token, modo OIDC y resultado del refresco.
+ * Tests del cliente HTTP (F17): toda petición viaja con `credentials: "include"`
+ * y **sin** cabecera `Authorization`; un 401 en una ruta no auth emite el evento
+ * global `oxidav:unauthorized`, mientras que un 401 en `/auth/*` (parte del
+ * flujo) queda silencioso.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, request } from './api'
-import { getAccessToken, isOidcEnabled, logout, refresh } from './auth'
-
-vi.mock('./auth', () => ({
-  getAccessToken: vi.fn(),
-  isOidcEnabled: vi.fn(),
-  refresh: vi.fn(),
-  logout: vi.fn(),
-}))
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { ApiError, api, request, UNAUTHORIZED_EVENT } from './api'
 
 function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
+  return {
+    ok: status >= 200 && status < 300,
     status,
-    headers: { 'Content-Type': 'application/json' },
-  })
+    statusText: status === 200 ? 'OK' : 'Error',
+    json: async () => body,
+  } as unknown as Response
 }
 
 function errorResponse(status: number, code = 'unauthorized', message = 'No autorizado'): Response {
   return jsonResponse({ error: { code, message } }, status)
 }
 
-let fetchMock: ReturnType<typeof vi.fn>
+function lastInit(fetchMock: ReturnType<typeof vi.fn>): RequestInit {
+  return fetchMock.mock.calls[0][1] as RequestInit
+}
 
-describe('api request', () => {
-  beforeEach(() => {
-    fetchMock = vi.fn()
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.clearAllMocks()
+})
+
+describe('api request — credenciales y sin token', () => {
+  it('envía credentials: include en un GET', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
-    vi.mocked(getAccessToken).mockReturnValue('token-1')
-    vi.mocked(isOidcEnabled).mockReturnValue(false)
-    vi.mocked(refresh).mockResolvedValue(undefined)
-    vi.mocked(logout).mockResolvedValue(undefined)
-  })
-
-  afterEach(() => {
-    vi.unstubAllGlobals()
-    vi.clearAllMocks()
-  })
-
-  it('inyecta Authorization: Bearer con el token actual', async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }))
-
-    const result = await request<{ ok: boolean }>('/v1/me')
-
-    expect(result).toEqual({ ok: true })
-    const init = fetchMock.mock.calls[0][1] as RequestInit
-    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer token-1')
-  })
-
-  it('no añade Authorization cuando no hay token', async () => {
-    vi.mocked(getAccessToken).mockReturnValue(null)
-    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }))
 
     await request('/v1/me')
 
-    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect(lastInit(fetchMock)).toMatchObject({ credentials: 'include' })
+    expect(new Headers(lastInit(fetchMock).headers).has('Authorization')).toBe(false)
+  })
+
+  it('envía credentials: include en un POST y no añade Authorization', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ ok: true }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await api.post('/v1/app-tokens', { name: 'iOS' })
+
+    const init = lastInit(fetchMock)
+    expect(init).toMatchObject({ method: 'POST', credentials: 'include' })
     expect(new Headers(init.headers).has('Authorization')).toBe(false)
   })
+})
 
-  it('en 401 refresca una vez y reintenta con el nuevo token', async () => {
-    vi.mocked(isOidcEnabled).mockReturnValue(true)
-    vi.mocked(getAccessToken).mockReturnValueOnce('stale').mockReturnValueOnce('fresh')
-    fetchMock
-      .mockResolvedValueOnce(errorResponse(401))
-      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+describe('api request — detección global de 401', () => {
+  it('un 401 en una ruta no auth dispara oxidav:unauthorized', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(401)))
+    const handler = vi.fn()
+    window.addEventListener(UNAUTHORIZED_EVENT, handler)
 
-    const result = await request<{ ok: boolean }>('/v1/me')
+    await api.get('/v1/me').catch(() => undefined)
 
-    expect(result).toEqual({ ok: true })
-    expect(refresh).toHaveBeenCalledTimes(1)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    const retryInit = fetchMock.mock.calls[1][1] as RequestInit
-    expect(new Headers(retryInit.headers).get('Authorization')).toBe('Bearer fresh')
-    expect(logout).not.toHaveBeenCalled()
+    window.removeEventListener(UNAUTHORIZED_EVENT, handler)
+    expect(handler).toHaveBeenCalledTimes(1)
   })
 
-  it('si el refresco falla, cierra sesión y propaga el error (sin reintentar)', async () => {
-    vi.mocked(isOidcEnabled).mockReturnValue(true)
-    vi.mocked(refresh).mockRejectedValueOnce(new Error('refresh caído'))
-    fetchMock.mockResolvedValueOnce(errorResponse(401))
+  it.each(['/auth/me', '/auth/logout'])(
+    'un 401 en %s NO dispara el evento global (es parte del flujo)',
+    async (path) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(401)))
+      const handler = vi.fn()
+      window.addEventListener(UNAUTHORIZED_EVENT, handler)
 
-    await expect(request('/v1/me')).rejects.toThrow('No autorizado')
+      await request(path, path === '/auth/logout' ? { method: 'POST' } : undefined).catch(
+        () => undefined,
+      )
 
-    expect(refresh).toHaveBeenCalledTimes(1)
-    expect(logout).toHaveBeenCalledTimes(1)
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-  })
+      window.removeEventListener(UNAUTHORIZED_EVENT, handler)
+      expect(handler).not.toHaveBeenCalled()
+    },
+  )
+})
 
-  it('nunca reintenta más de una vez aunque siga devolviendo 401', async () => {
-    vi.mocked(isOidcEnabled).mockReturnValue(true)
-    fetchMock.mockResolvedValue(errorResponse(401))
+describe('api request — mapeo de errores', () => {
+  it('mapea el sobre de error F06 a un ApiError con code y message', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(422, 'invalid', 'Datos inválidos')))
 
-    await expect(request('/v1/me')).rejects.toBeInstanceOf(ApiError)
+    const error = await request('/v1/me').catch((e: unknown) => e)
 
-    expect(refresh).toHaveBeenCalledTimes(1)
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-  })
-
-  it('en modo dev (sin OIDC) no intenta refrescar ante 401', async () => {
-    vi.mocked(isOidcEnabled).mockReturnValue(false)
-    fetchMock.mockResolvedValueOnce(errorResponse(401))
-
-    await expect(request('/v1/me')).rejects.toBeInstanceOf(ApiError)
-
-    expect(refresh).not.toHaveBeenCalled()
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(422)
+    expect((error as ApiError).code).toBe('invalid')
+    expect((error as ApiError).message).toBe('Datos inválidos')
   })
 
   it('mapea una caída de red a un ApiError(0, network)', async () => {
-    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'))
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')))
+
     const error = await request('/v1/me').catch((e: unknown) => e)
+
     expect(error).toBeInstanceOf(ApiError)
     expect((error as ApiError).code).toBe('network')
+    expect((error as ApiError).status).toBe(0)
+  })
+
+  it('devuelve undefined ante un 204', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(undefined, 204)))
+
+    await expect(api.delete('/v1/app-tokens/1')).resolves.toBeUndefined()
+  })
+})
+
+describe('api — rutas de autenticación', () => {
+  it('getMe resuelve la identidad', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ sub: 'u1', email: 'a@b.c', name: 'Lorenzo' })),
+    )
+
+    await expect(api.getMe()).resolves.toEqual({ sub: 'u1', email: 'a@b.c', name: 'Lorenzo' })
+    expect(lastInit(vi.mocked(fetch))).toMatchObject({ credentials: 'include' })
+  })
+
+  it('logout lee end_session_url tal y como lo serializa el backend', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ end_session_url: 'https://idp.example/logout' })),
+    )
+
+    const result = await api.logout()
+
+    expect(result).toEqual({ end_session_url: 'https://idp.example/logout' })
+    expect(vi.mocked(fetch).mock.calls[0][0]).toContain('/api/auth/logout')
+    expect(lastInit(vi.mocked(fetch))).toMatchObject({ method: 'POST' })
+  })
+
+  it('logout acepta end_session_url: null (solo cierre local)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ end_session_url: null })))
+
+    await expect(api.logout()).resolves.toEqual({ end_session_url: null })
   })
 })

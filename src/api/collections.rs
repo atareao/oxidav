@@ -1,6 +1,6 @@
 //! F06 — CRUD handlers for `collections`.
 //!
-//! Every handler is scoped to the authenticated subject ([`AuthUser::sub`]):
+//! Every handler is scoped to the authenticated subject ([`SessionUser::sub`]):
 //! a collection owned by another user is treated as non-existent (`404`), which
 //! keeps the API free of IDOR leaks. The request bodies are decoded manually
 //! from raw bytes so that malformed payloads map to the uniform `400` envelope
@@ -12,13 +12,13 @@
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use rand::RngCore;
 use serde::Deserialize;
 
-use crate::auth::oidc::AuthUser;
+use crate::auth::SessionUser;
 use crate::db::models::{CollectionKind, NewCollection};
 use crate::db::{
     clamp_collection_limit, clamp_offset, count_collections, create_collection, delete_collection,
@@ -75,7 +75,7 @@ impl Pagination {
 /// [`ApiError::Internal`] if the database query fails.
 pub async fn list(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Query(query): Query<Pagination>,
 ) -> Result<Json<Page<CollectionDto>>, ApiError> {
     let (limit, offset) = query.resolve()?;
@@ -100,7 +100,7 @@ pub async fn list(
 /// malformed payload, and [`ApiError::Internal`] if the insert fails.
 pub async fn create(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let request: CreateCollectionRequest = parse_json_body(&body)?;
@@ -131,7 +131,7 @@ pub async fn create(
 /// to another user, and [`ApiError::Internal`] if the query fails.
 pub async fn get_one(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(id): Path<String>,
 ) -> Result<Json<CollectionDto>, ApiError> {
     let collection = get_collection(&state.db, &id, &user.sub)
@@ -154,7 +154,7 @@ pub async fn get_one(
 /// belongs to another user; and [`ApiError::Internal`] if the update fails.
 pub async fn update(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Json<CollectionDto>, ApiError> {
@@ -203,7 +203,7 @@ pub async fn update(
 /// to another user, and [`ApiError::Internal`] if the delete fails.
 pub async fn delete_one(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     // Ownership is enforced inside the statement; no check-then-act window.

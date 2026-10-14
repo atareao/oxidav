@@ -11,8 +11,13 @@ fn test_state() -> AppState {
         bind_addr: "127.0.0.1:0".parse().expect("valid socket addr"),
         log_level: "info".to_string(),
         database_url: "sqlite::memory:".to_string(),
-        pocket_id_issuer: "https://id.example.com".to_string(),
-        audience: None,
+        auth_enabled: false,
+        auth_issuer_url: String::new(),
+        auth_client_id: String::new(),
+        auth_client_secret: String::new(),
+        auth_redirect_url: String::new(),
+        auth_post_logout_redirect_url: String::new(),
+        jwt_secret: String::new(),
     })
 }
 

@@ -5,7 +5,7 @@
 //! logged with `tracing` and the response carries a generic message.
 
 use axum::Json;
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
@@ -77,11 +77,10 @@ impl IntoResponse for ApiError {
             }
         }));
 
-        if status == StatusCode::UNAUTHORIZED {
-            (status, [(header::WWW_AUTHENTICATE, "Bearer")], body).into_response()
-        } else {
-            (status, body).into_response()
-        }
+        // No `WWW-Authenticate` challenge: F17 authenticates with an HttpOnly
+        // session cookie, not `Bearer`, so there is no scheme for a client to
+        // negotiate. (DAV keeps its own `Basic` challenge, see `auth::basic`.)
+        (status, body).into_response()
     }
 }
 

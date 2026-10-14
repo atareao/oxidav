@@ -2,7 +2,7 @@
 //!
 //! The SPA cannot speak CardDAV, so these endpoints expose the `card_objects`
 //! of an `addressbook` collection as clean JSON DTOs. Every handler is scoped to
-//! the authenticated subject ([`AuthUser::sub`]): a collection owned by another
+//! the authenticated subject ([`SessionUser::sub`]): a collection owned by another
 //! user — or a collection of the wrong kind (a calendar) — is treated as
 //! non-existent (`404`), so no endpoint can leak another user's data (IDOR).
 //!
@@ -49,12 +49,12 @@
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
 
-use crate::auth::oidc::AuthUser;
+use crate::auth::SessionUser;
 use crate::dav::common::new_id;
 use crate::dav::vcf::{CardFields, build_vcf};
 use crate::db::models::{CardObjectUpdate, CollectionKind, NewCardObject};
@@ -121,7 +121,7 @@ impl ContactListQuery {
 /// user, or is not an `addressbook`; [`ApiError::Internal`] if a query fails.
 pub async fn list(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(id): Path<String>,
     Query(query): Query<ContactListQuery>,
 ) -> Result<Json<Vec<ContactDto>>, ApiError> {
@@ -145,7 +145,7 @@ pub async fn list(
 /// [`ApiError::Internal`] if the insert fails.
 pub async fn create(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -204,7 +204,7 @@ pub async fn create(
 /// query fails.
 pub async fn get_one(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path((id, uid)): Path<(String, String)>,
 ) -> Result<Json<ContactDto>, ApiError> {
     let collection = addressbook_collection(&state, &id, &user.sub).await?;
@@ -229,7 +229,7 @@ pub async fn get_one(
 /// invalid and cannot be safely recomposed (see [`validate_stored_uid`]).
 pub async fn update(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path((id, uid)): Path<(String, String)>,
     body: Bytes,
 ) -> Result<Json<ContactDto>, ApiError> {
@@ -305,7 +305,7 @@ pub async fn update(
 /// the delete fails.
 pub async fn delete_one(
     State(state): State<AppState>,
-    Extension(user): Extension<AuthUser>,
+    user: SessionUser,
     Path((id, uid)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
     let collection = addressbook_collection(&state, &id, &user.sub).await?;
