@@ -67,8 +67,9 @@ local con `podman run -p 8080:8080 -v oxidav-data:/app/data --env-file .env oxid
 
 ## Nota
 
-**Deuda**: sin code-splitting (chunk > 500 kB); Vite `base: './'` asume
-rutas de un solo segmento (si se añaden rutas anidadas, valorar `base: '/'`).
+Sin deuda de code-splitting (resuelto en F16, `docs/F16-polish-release.md`).
+**Nota**: Vite `base: './'` asume rutas de un solo segmento (si se añaden
+rutas anidadas, valorar `base: '/'`).
 
 ## Relacionado
 

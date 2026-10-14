@@ -22,8 +22,7 @@ Backend: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `carg
 
 ## Deuda / pendiente
 
-- Code-splitting del bundle (chunk > 500 kB por Antd) — fuera de alcance.
-- El `from` del guard (redirección post-login a la ruta solicitada) queda como mejora menor.
+Sin deuda pendiente: el code-splitting del bundle y la redirección post-login se cerraron en **F16** (`docs/F16-polish-release.md`).
 
 ## Relacionado
 
