@@ -74,8 +74,7 @@ Frontend (desde `web/`):
 
 ## Deuda / pendiente
 
-- **OIDC PKCE en frontend sin implementar** (heredado de F11; previsto en F14 o
-  feature propia).
+- **OIDC PKCE en frontend**: implementado en **F14** (`docs/F14-settings-profile.md`).
 - Menores: las fichas de import sin `FN` se descartan (documentado); separadores
   Unicode adicionales en el import.
 

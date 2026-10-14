@@ -39,7 +39,7 @@ Las transacciones de escritura usan **`BEGIN IMMEDIATE`** (`BEGIN_WRITE`/`begin_
 
 ## Deuda / pendiente
 
-- OIDC PKCE en frontend sin implementar (heredado de F04; previsto en F14 o feature propia). El frontend usa un proveedor de token mínimo (`web/src/services/auth.ts`).
+- OIDC PKCE en frontend: implementado en **F14** (`docs/F14-settings-profile.md`).
 
 ## Relacionado
 
