@@ -1,13 +1,22 @@
 # Changelog
-## [unreleased]
+## [0.2.0] - 2026-10-15
 
 ### Documentation
 
 - Add generated CHANGELOG.md
+- Close the session loose ends
+
+### Features
+
+- Replace bearer OIDC with the server-side session flow
 
 ### Miscellaneous Tasks
 
 - Adopt gitflow with valet parity
+
+### Testing
+
+- Reset the OIDC caches so the discover tests stop flaking
 ## [0.1.1] - 2026-10-14
 
 ### Build
