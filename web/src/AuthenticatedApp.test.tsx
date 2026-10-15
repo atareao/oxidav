@@ -7,7 +7,7 @@
  */
 
 import { theme } from 'antd'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ComponentProps } from 'react'
 import { MemoryRouter } from 'react-router-dom'
@@ -99,12 +99,15 @@ describe('AuthenticatedApp theme', () => {
     renderAt('/calendar')
 
     const toggle = await screen.findByRole('button', { name: /cambiar tema/i })
-    expect(toggle).toHaveTextContent('🌙')
+    // The toggle is icon-only; Ant Design exposes each icon as
+    // `<span role="img" aria-label="moon|sun">`, so we assert on that instead
+    // of the old emoji text.
+    expect(within(toggle).getByRole('img', { name: 'moon' })).toBeInTheDocument()
     expect(lastAlgorithm()).not.toBe(theme.darkAlgorithm)
 
     await user.click(toggle)
 
-    expect(toggle).toHaveTextContent('☀️')
+    expect(within(toggle).getByRole('img', { name: 'sun' })).toBeInTheDocument()
     await waitFor(() => expect(lastAlgorithm()).toBe(theme.darkAlgorithm))
   })
 
