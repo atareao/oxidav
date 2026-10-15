@@ -80,6 +80,10 @@ pub struct CalendarObject {
     pub dtstart: Option<i64>,
     /// `DTEND`, Unix milliseconds.
     pub dtend: Option<i64>,
+    /// IANA TZID of `DTSTART`, if the source `.ics` carried one.
+    pub dtstart_tzid: Option<String>,
+    /// IANA TZID of `DTEND`, if the source `.ics` carried one.
+    pub dtend_tzid: Option<String>,
     /// Raw `RRULE` text.
     pub rrule: Option<String>,
     /// Opaque ETag (see `compute_etag`).
@@ -109,6 +113,10 @@ pub struct NewCalendarObject {
     pub dtstart: Option<i64>,
     /// `DTEND`, Unix milliseconds.
     pub dtend: Option<i64>,
+    /// IANA TZID of `DTSTART`, if known.
+    pub dtstart_tzid: Option<String>,
+    /// IANA TZID of `DTEND`, if known.
+    pub dtend_tzid: Option<String>,
     /// Raw `RRULE` text.
     pub rrule: Option<String>,
     /// The raw `.ics` payload.
@@ -126,6 +134,10 @@ pub struct CalendarObjectUpdate {
     pub dtstart: Option<i64>,
     /// `DTEND`, Unix milliseconds.
     pub dtend: Option<i64>,
+    /// IANA TZID of `DTSTART`, if known.
+    pub dtstart_tzid: Option<String>,
+    /// IANA TZID of `DTEND`, if known.
+    pub dtend_tzid: Option<String>,
     /// Raw `RRULE` text.
     pub rrule: Option<String>,
     /// The raw `.ics` payload.

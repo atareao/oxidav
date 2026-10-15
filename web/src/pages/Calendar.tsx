@@ -72,6 +72,17 @@ function formatTime(ms: number | null): string {
   return ms === null ? 'Todo el día' : timeFormatter.format(new Date(ms))
 }
 
+/**
+ * The browser's IANA time zone, used to anchor created/edited events (F18) so a
+ * recurrence repeats in local wall-clock time instead of drifting across a DST
+ * change. Returns `undefined` when the runtime cannot resolve it, in which case
+ * the field must be **omitted** — the API rejects an empty `tzid` with a 400.
+ */
+function browserTimeZone(): string | undefined {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  return zone === undefined || zone === '' ? undefined : zone
+}
+
 function defaultRange(): [Dayjs, Dayjs] {
   const start = dayjs().second(0).millisecond(0)
   return [start, start.add(1, 'hour')]
@@ -85,7 +96,10 @@ interface EventFormValues {
 }
 
 /** Fields the optimistic layer may rewrite on an existing event. */
-type EventChanges = Pick<CalendarEvent, 'summary' | 'description' | 'dtstart' | 'dtend'>
+type EventChanges = Pick<
+  CalendarEvent,
+  'summary' | 'description' | 'dtstart' | 'dtend' | 'dtstart_tzid' | 'dtend_tzid'
+>
 
 type OptimisticAction =
   | { kind: 'create'; event: CalendarEvent }
@@ -245,6 +259,9 @@ export function Calendar() {
       }
 
       if (editing === null) {
+        // A newly created event is anchored to the browser's current zone so a
+        // recurrence repeats in local wall-clock time (F18).
+        const tzid = browserTimeZone()
         const optimisticId = tempId()
         startTransition(async () => {
           addOptimistic({
@@ -257,6 +274,8 @@ export function Calendar() {
               description: hasDescription ? description : null,
               dtstart,
               dtend,
+              dtstart_tzid: tzid ?? null,
+              dtend_tzid: tzid ?? null,
               rrule: null,
               etag: '',
               created_at: Date.now(),
@@ -267,6 +286,9 @@ export function Calendar() {
             const input: CreateEventInput = { summary: values.summary, dtstart, dtend }
             if (hasDescription) {
               input.description = description
+            }
+            if (tzid !== undefined) {
+              input.tzid = tzid
             }
             const created = await createEvent(collectionId, input)
             setEvents((previous) => [...previous, created])
@@ -283,6 +305,11 @@ export function Calendar() {
       }
 
       const target = editing
+      // Editing must NOT re-anchor the event: `dtstart` is a fixed instant, so
+      // re-anchoring (say) a `Europe/Madrid` event to the browser zone would
+      // silently change the local time of its recurrence. Preserve the existing
+      // anchor; when the event has none, omit `tzid` rather than invent one.
+      const anchorTzid = target.dtstart_tzid
       startTransition(async () => {
         addOptimistic({
           kind: 'update',
@@ -292,12 +319,17 @@ export function Calendar() {
             description: hasDescription ? description : null,
             dtstart,
             dtend,
+            dtstart_tzid: anchorTzid,
+            dtend_tzid: target.dtend_tzid,
           },
         })
         try {
           const input: UpdateEventInput = { summary: values.summary, dtstart, dtend }
           if (hasDescription) {
             input.description = description
+          }
+          if (anchorTzid !== null) {
+            input.tzid = anchorTzid
           }
           const updated = await updateEvent(collectionId, target.uid, input)
           setEvents((previous) =>
@@ -478,7 +510,7 @@ export function Calendar() {
                       {dayEvents.map((event) => (
                         <li
                           key={event.uid}
-                          style={{ display: 'flex', alignItems: 'center', gap: 4 }}
+                          style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}
                         >
                           <Button
                             type="link"
@@ -488,11 +520,27 @@ export function Calendar() {
                               height: 'auto',
                               textAlign: 'left',
                               whiteSpace: 'normal',
+                              minWidth: 0,
                             }}
                             onClick={() => openEdit(event)}
                           >
                             {formatTime(event.dtstart)} · {event.summary ?? '(sin título)'}
                           </Button>
+                          {event.dtstart_tzid !== null ? (
+                            <Typography.Text
+                              type="secondary"
+                              style={{
+                                fontSize: 12,
+                                flex: '0 0 auto',
+                                maxWidth: 96,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {event.dtstart_tzid}
+                            </Typography.Text>
+                          ) : null}
                           <Popconfirm
                             title="Eliminar evento"
                             description="¿Seguro que quieres eliminar este evento?"
@@ -522,8 +570,7 @@ export function Calendar() {
       </Card>
 
       <Modal
-        title={editing === null ? 'Nuevo evento' : 'Editar evento'}
-        open={modalOpen}
+        title={editing === null ? 'Nuevo evento' : 'Editar evento'}        open={modalOpen}
         onOk={() => form.submit()}
         okText={editing === null ? 'Crear' : 'Guardar'}
         cancelText="Cancelar"
@@ -558,7 +605,11 @@ export function Calendar() {
             label="Fecha y hora"
             rules={[{ required: true, message: 'Selecciona un rango' }]}
           >
-            <RangePicker showTime style={{ width: '100%' }} />
+            <RangePicker
+              showTime
+              format="DD/MM/YYYY HH:mm:ss"
+              style={{ width: '100%' }}
+            />
           </Form.Item>
         </Form>
       </Modal>

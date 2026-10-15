@@ -495,8 +495,9 @@ async fn get_event(
 /// The body is parsed with [`ics::parse_ics`]; its `UID` must equal the `{uid}`
 /// path segment (else `409 Conflict`). The raw payload is stored verbatim and
 /// the denormalised fields (`summary`, `description`, `dtstart`, `dtend`,
-/// `rrule`) together with a freshly computed `ETag` are persisted by the F03
-/// repositories. The response always carries the new `ETag`.
+/// `dtstart_tzid`, `dtend_tzid`, `rrule`) together with a freshly computed `ETag`
+/// are persisted by the F03 repositories. The response always carries the new
+/// `ETag`.
 async fn put_event(
     state: &AppState,
     username: &str,
@@ -536,6 +537,8 @@ async fn put_event(
                 description: parsed.description,
                 dtstart: Some(parsed.dtstart_ms),
                 dtend: parsed.dtend_ms,
+                dtstart_tzid: parsed.dtstart_tzid,
+                dtend_tzid: parsed.dtend_tzid,
                 rrule: parsed.rrule,
                 raw_payload: raw.to_string(),
             };
@@ -554,6 +557,8 @@ async fn put_event(
                 description: parsed.description,
                 dtstart: Some(parsed.dtstart_ms),
                 dtend: parsed.dtend_ms,
+                dtstart_tzid: parsed.dtstart_tzid,
+                dtend_tzid: parsed.dtend_tzid,
                 rrule: parsed.rrule,
                 raw_payload: raw.to_string(),
             };

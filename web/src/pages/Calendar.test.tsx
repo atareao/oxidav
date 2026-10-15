@@ -13,12 +13,17 @@
 
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { App } from 'antd'
+import { App, ConfigProvider } from 'antd'
+import esES from 'antd/locale/es_ES'
+import dayjs from 'dayjs'
+import customParseFormat from 'dayjs/plugin/customParseFormat'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { listCalendarCollections } from '../services/collections'
-import { createEvent, deleteEvent, listEvents } from '../services/events'
+import { createEvent, deleteEvent, listEvents, updateEvent } from '../services/events'
 import type { CalendarEvent, Collection } from '../types/api'
 import { Calendar } from './Calendar'
+
+dayjs.extend(customParseFormat)
 
 vi.mock('../services/collections', () => ({
   listCalendarCollections: vi.fn(),
@@ -57,6 +62,8 @@ function makeEvent(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
     description: null,
     dtstart,
     dtend: dtstart + 3_600_000,
+    dtstart_tzid: null,
+    dtend_tzid: null,
     rrule: null,
     etag: 'etag-1',
     created_at: 0,
@@ -88,9 +95,11 @@ function renderCalendar() {
   } as unknown as ReturnType<typeof App.useApp>)
 
   render(
-    <App>
-      <Calendar />
-    </App>,
+    <ConfigProvider locale={esES}>
+      <App>
+        <Calendar />
+      </App>
+    </ConfigProvider>,
   )
 }
 
@@ -195,5 +204,113 @@ describe('Calendar', () => {
 
     await waitFor(() => expect(screen.queryByText(/Reunión/)).not.toBeInTheDocument())
     expect(deleteEvent).toHaveBeenCalledWith(collection.id, 'uid-1')
+  })
+
+  it('envía el tzid del navegador y mantiene dtstart/dtend en ms al crear (F18)', async () => {
+    // No hardcoded zone: compare against whatever the host reports, so the
+    // suite is green in any TZ (CI is usually UTC).
+    const expectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone
+
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([])
+    vi.mocked(createEvent).mockResolvedValue(
+      makeEvent({ uid: 'nuevo-uid', summary: 'Con zona' }),
+    )
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await screen.findByRole('heading', { name: /calendario/i, level: 2 })
+
+    await user.click(await screen.findByRole('button', { name: /nuevo evento/i }))
+    const dialog = await screen.findByRole('dialog')
+
+    // Read the range the form actually shows instead of freezing the clock:
+    // the payload's ms must mirror the visible start (and start + 1 h). Query by
+    // the input id so the lookup is independent of the (Spanish) placeholder.
+    const startInput = dialog.querySelector<HTMLInputElement>('input#range')
+    expect(startInput).not.toBeNull()
+    const expectedStart = dayjs(startInput?.value, 'DD/MM/YYYY HH:mm:ss').valueOf()
+    expect(Number.isNaN(expectedStart)).toBe(false)
+
+    await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'Con zona')
+    await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+    await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
+    const [, input] = vi.mocked(createEvent).mock.calls[0]
+    expect(input.tzid).toBe(expectedTz)
+    expect(input.dtstart).toBe(expectedStart)
+    expect(input.dtend).toBe(expectedStart + 3_600_000)
+  })
+
+  it('preserva el ancla al editar un evento con zona (F18)', async () => {
+    const dtstart = atToday(10)
+    const dtend = dtstart + 3_600_000
+
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([
+      makeEvent({
+        summary: 'Editable',
+        dtstart,
+        dtend,
+        dtstart_tzid: 'Europe/Madrid',
+        dtend_tzid: 'Europe/Madrid',
+      }),
+    ])
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Editable' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Editable/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, uid, input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(uid).toBe('uid-1')
+    // The existing anchor is sent back unchanged — NOT re-derived from the
+    // browser zone.
+    expect(input.tzid).toBe('Europe/Madrid')
+    expect(input.dtstart).toBe(dtstart)
+    expect(input.dtend).toBe(dtend)
+  })
+
+  it('no inventa un tzid al editar un evento sin zona (F18)', async () => {
+    const dtstart = atToday(10)
+    const dtend = dtstart + 3_600_000
+
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([
+      makeEvent({ summary: 'Sin zona', dtstart, dtend }),
+    ])
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Sin zona' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Sin zona/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect('tzid' in input).toBe(false)
+    expect(input.dtstart).toBe(dtstart)
+    expect(input.dtend).toBe(dtend)
+  })
+
+  it('muestra la zona horaria del evento cuando la tiene (F18)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([
+      makeEvent({
+        summary: 'Con zona',
+        dtstart_tzid: 'Europe/Madrid',
+        dtend_tzid: 'Europe/Madrid',
+      }),
+    ])
+
+    renderCalendar()
+
+    expect(await screen.findByText('Europe/Madrid')).toBeInTheDocument()
   })
 })
