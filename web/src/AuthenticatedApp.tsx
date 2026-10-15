@@ -79,7 +79,7 @@ function ThemedApp() {
     >
       <AntdApp>
         <Routes>
-          {/* The shared layout keeps the Sider/Header shell mounted while a
+          {/* The shared layout keeps the header shell mounted while a
               protected page chunk suspends inside it. */}
           <Route
             element={

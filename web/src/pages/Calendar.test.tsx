@@ -313,4 +313,39 @@ describe('Calendar', () => {
 
     expect(await screen.findByText('Europe/Madrid')).toBeInTheDocument()
   })
+
+  it('renderiza el Alert de error con la prop `title` (sin la deprecada `message`)', async () => {
+    vi.mocked(listCalendarCollections).mockRejectedValue(new Error('no disponible'))
+    vi.mocked(listEvents).mockResolvedValue([])
+
+    // Ant Design v6 deprecates `Alert.message` in favour of `title`; the legacy
+    // prop logs a console warning. Any such warning fails this test.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    renderCalendar()
+
+    expect(await screen.findByText('No se pudieron cargar los datos')).toBeInTheDocument()
+    const deprecatedUsages = consoleError.mock.calls
+      .flat()
+      .filter((arg) => typeof arg === 'string' && arg.includes('`message` is deprecated'))
+    expect(deprecatedUsages).toEqual([])
+    consoleError.mockRestore()
+  })
+
+  it('recarga los datos al pulsar «Reintentar» en el Alert de error', async () => {
+    vi.mocked(listCalendarCollections)
+      .mockRejectedValueOnce(new Error('no disponible'))
+      .mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([])
+
+    const user = userEvent.setup()
+    renderCalendar()
+
+    await screen.findByText('No se pudieron cargar los datos')
+    await user.click(screen.getByRole('button', { name: 'Reintentar' }))
+
+    await waitFor(() =>
+      expect(screen.queryByText('No se pudieron cargar los datos')).not.toBeInTheDocument(),
+    )
+    expect(listCalendarCollections).toHaveBeenCalledTimes(2)
+  })
 })

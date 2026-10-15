@@ -23,6 +23,7 @@ import {
   Descriptions,
   Drawer,
   Empty,
+  Flex,
   Form,
   Input,
   Modal,
@@ -60,6 +61,7 @@ import {
   serializeContactsToVcf,
   vcardToCreateInput,
 } from '../utils/vcf'
+import { PAGE_GAP, fluidControlStyle } from './pageLayout'
 
 /** Shape of the `Form` values used by the create/edit modal. */
 interface ContactFormValues {
@@ -503,94 +505,95 @@ export function Contacts() {
     <>
       <h1 className="sr-only">Contactos</h1>
 
-      {loadError !== null ? (
-        <Alert
-          type="error"
-          showIcon
-          message="No se pudieron cargar los datos"
-          description={loadError}
-          action={
-            <Button
-              size="small"
-              onClick={() => {
-                setCollectionsReloadToken((token) => token + 1)
-                reloadContacts()
-              }}
-            >
-              Reintentar
-            </Button>
-          }
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-
-      <Card
-        title="Libreta de direcciones"
-        extra={
-          <Space wrap>
-            <Select
-              aria-label="Libreta"
-              style={{ minWidth: 200 }}
-              placeholder="Selecciona una libreta"
-              value={effectiveCollectionId ?? undefined}
-              onChange={(value: string) => setSelectedCollectionId(value)}
-              loading={collectionsLoading}
-              disabled={collections.length === 0}
-              options={collections.map((collection) => ({
-                value: collection.id,
-                label: collection.name,
-              }))}
-            />
-            <Input.Search
-              allowClear
-              aria-label="Buscar contactos"
-              placeholder="Buscar contactos"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              style={{ width: 220 }}
-            />
-            <Button onClick={handleExport} disabled={optimisticContacts.length === 0}>
-              Exportar .vcf
-            </Button>
-            <Tooltip title="Importa uno o varios contactos desde un fichero .vcf">
-              <Button onClick={handleImportClick} loading={importing} disabled={collections.length === 0}>
-                Importar .vcf
+      <Flex vertical gap={PAGE_GAP}>
+        {loadError !== null ? (
+          <Alert
+            type="error"
+            showIcon
+            title="No se pudieron cargar los datos"
+            description={loadError}
+            action={
+              <Button
+                size="small"
+                onClick={() => {
+                  setCollectionsReloadToken((token) => token + 1)
+                  reloadContacts()
+                }}
+              >
+                Reintentar
               </Button>
-            </Tooltip>
-            <Button type="primary" onClick={openCreate} disabled={effectiveCollectionId === null}>
-              Nuevo contacto
-            </Button>
-          </Space>
-        }
-      >
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".vcf,text/vcard,text/x-vcard"
-          aria-label="Importar archivo .vcf"
-          style={{ display: 'none' }}
-          onChange={handleFileChange}
-        />
-        {collections.length === 0 && !loading ? (
-          <Empty description="No hay libretas de direcciones disponibles" />
-        ) : (
-          <Table<Contact>
-            rowKey="uid"
-            columns={columns}
-            dataSource={filteredContacts}
-            loading={loading}
-            pagination={{ pageSize: 20, showSizeChanger: false }}
-            locale={{
-              emptyText: <Empty description="No hay contactos" />,
-            }}
-            onRow={(contact) => ({
-              onClick: () => setDetail(contact),
-              style: { cursor: 'pointer' },
-            })}
-            scroll={{ x: 'max-content' }}
+            }
           />
-        )}
-      </Card>
+        ) : null}
+
+        <Card
+          title="Libreta de direcciones"
+          extra={
+            <Space wrap>
+              <Select
+                aria-label="Libreta"
+                style={fluidControlStyle}
+                placeholder="Selecciona una libreta"
+                value={effectiveCollectionId ?? undefined}
+                onChange={(value: string) => setSelectedCollectionId(value)}
+                loading={collectionsLoading}
+                disabled={collections.length === 0}
+                options={collections.map((collection) => ({
+                  value: collection.id,
+                  label: collection.name,
+                }))}
+              />
+              <Input.Search
+                allowClear
+                aria-label="Buscar contactos"
+                placeholder="Buscar contactos"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                style={fluidControlStyle}
+              />
+              <Button onClick={handleExport} disabled={optimisticContacts.length === 0}>
+                Exportar .vcf
+              </Button>
+              <Tooltip title="Importa uno o varios contactos desde un fichero .vcf">
+                <Button onClick={handleImportClick} loading={importing} disabled={collections.length === 0}>
+                  Importar .vcf
+                </Button>
+              </Tooltip>
+              <Button type="primary" onClick={openCreate} disabled={effectiveCollectionId === null}>
+                Nuevo contacto
+              </Button>
+            </Space>
+          }
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".vcf,text/vcard,text/x-vcard"
+            aria-label="Importar archivo .vcf"
+            style={{ display: 'none' }}
+            onChange={handleFileChange}
+          />
+          {collections.length === 0 && !loading ? (
+            <Empty description="No hay libretas de direcciones disponibles" />
+          ) : (
+            <Table<Contact>
+              rowKey="uid"
+              columns={columns}
+              dataSource={filteredContacts}
+              loading={loading}
+              pagination={{ pageSize: 20, showSizeChanger: false }}
+              locale={{
+                emptyText: <Empty description="No hay contactos" />,
+              }}
+              onRow={(contact) => ({
+                onClick: () => setDetail(contact),
+                style: { cursor: 'pointer' },
+              })}
+              scroll={{ x: 'max-content' }}
+            />
+          )}
+        </Card>
+      </Flex>
 
       <Drawer
         title={detail === null ? 'Contacto' : displayName(detail)}
