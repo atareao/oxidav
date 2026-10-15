@@ -299,7 +299,7 @@ export function Settings() {
 
   return (
     <>
-      <Typography.Title level={2}>Ajustes</Typography.Title>
+      <h1 className="sr-only">Ajustes</h1>
 
       {error !== null && !loading ? (
         <Alert

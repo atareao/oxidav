@@ -56,7 +56,7 @@ describe('AuthenticatedApp routing', () => {
 
   it('redirects "/" to the calendar view', async () => {
     renderAt('/')
-    expect(await screen.findByRole('heading', { name: /calendario/i, level: 2 })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: /calendario/i, level: 1 })).toBeInTheDocument()
   })
 
   it.each([
@@ -66,7 +66,7 @@ describe('AuthenticatedApp routing', () => {
     ['/settings', /ajustes/i],
   ])('renders the %s route with its title', async (path, heading) => {
     renderAt(path)
-    expect(await screen.findByRole('heading', { name: heading, level: 2 })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument()
   })
 
   it('navigates between sections using the sidebar menu', async () => {
@@ -75,7 +75,7 @@ describe('AuthenticatedApp routing', () => {
 
     await user.click(await screen.findByRole('menuitem', { name: /contactos/i }))
 
-    expect(await screen.findByRole('heading', { name: /contactos/i, level: 2 })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: /contactos/i, level: 1 })).toBeInTheDocument()
   })
 })
 
@@ -89,7 +89,7 @@ describe('AuthenticatedApp theme', () => {
 
   it('starts with the light (default) algorithm applied via ConfigProvider', async () => {
     renderAt('/calendar')
-    await screen.findByRole('heading', { name: /calendario/i, level: 2 })
+    await screen.findByRole('heading', { name: /calendario/i, level: 1 })
 
     expect(lastAlgorithm()).toBe(theme.defaultAlgorithm)
   })
@@ -113,7 +113,7 @@ describe('AuthenticatedApp theme', () => {
 
   it('applies a non-empty design token set via ConfigProvider', async () => {
     renderAt('/calendar')
-    await screen.findByRole('heading', { name: /calendario/i, level: 2 })
+    await screen.findByRole('heading', { name: /calendario/i, level: 1 })
 
     const applied = lastTheme()
     expect(applied?.token).toBeDefined()

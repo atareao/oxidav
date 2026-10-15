@@ -182,7 +182,7 @@ describe('Sync', () => {
 
     const user = setupUser()
     renderSync()
-    await screen.findByRole('heading', { name: /sincronización/i, level: 2 })
+    await screen.findByRole('heading', { name: /sincronización/i, level: 1 })
 
     await user.click(screen.getByRole('button', { name: 'Crear token' }))
     const createDialog = await screen.findByRole('dialog')

@@ -248,7 +248,7 @@ export function Sync() {
 
   return (
     <>
-      <Typography.Title level={2}>Sincronización y dispositivos</Typography.Title>
+      <h1 className="sr-only">Sincronización y dispositivos</h1>
 
       {error !== null ? (
         <Alert

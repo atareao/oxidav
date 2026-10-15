@@ -131,7 +131,7 @@ describe('Calendar', () => {
 
     const user = userEvent.setup()
     renderCalendar()
-    await screen.findByRole('heading', { name: /calendario/i, level: 2 })
+    await screen.findByRole('heading', { name: /calendario/i, level: 1 })
 
     await user.click(await screen.findByRole('button', { name: /nuevo evento/i }))
     const dialog = await screen.findByRole('dialog')
@@ -168,7 +168,7 @@ describe('Calendar', () => {
 
     const user = userEvent.setup()
     renderCalendar()
-    await screen.findByRole('heading', { name: /calendario/i, level: 2 })
+    await screen.findByRole('heading', { name: /calendario/i, level: 1 })
 
     await user.click(await screen.findByRole('button', { name: /nuevo evento/i }))
     const dialog = await screen.findByRole('dialog')
@@ -219,7 +219,7 @@ describe('Calendar', () => {
 
     const user = userEvent.setup()
     renderCalendar()
-    await screen.findByRole('heading', { name: /calendario/i, level: 2 })
+    await screen.findByRole('heading', { name: /calendario/i, level: 1 })
 
     await user.click(await screen.findByRole('button', { name: /nuevo evento/i }))
     const dialog = await screen.findByRole('dialog')

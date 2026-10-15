@@ -31,7 +31,6 @@ import {
   Space,
   Table,
   Tooltip,
-  Typography,
 } from 'antd'
 import type { TableColumnsType } from 'antd'
 import {
@@ -502,7 +501,7 @@ export function Contacts() {
 
   return (
     <>
-      <Typography.Title level={2}>Contactos</Typography.Title>
+      <h1 className="sr-only">Contactos</h1>
 
       {loadError !== null ? (
         <Alert

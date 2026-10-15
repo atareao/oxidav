@@ -154,7 +154,7 @@ describe('Contacts', () => {
     const user = userEvent.setup()
     renderContacts()
 
-    await screen.findByRole('heading', { name: /contactos/i, level: 2 })
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
     await waitFor(() => expect(listContacts).toHaveBeenCalledTimes(2))
     expect(listContacts).toHaveBeenNthCalledWith(
       1,
@@ -225,7 +225,7 @@ describe('Contacts', () => {
 
     const user = userEvent.setup()
     renderContacts()
-    await screen.findByRole('heading', { name: /contactos/i, level: 2 })
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
 
     await user.click(await screen.findByRole('button', { name: /nuevo contacto/i }))
     const dialog = await screen.findByRole('dialog')
@@ -262,7 +262,7 @@ describe('Contacts', () => {
 
     const user = userEvent.setup()
     renderContacts()
-    await screen.findByRole('heading', { name: /contactos/i, level: 2 })
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
 
     await user.click(await screen.findByRole('button', { name: /nuevo contacto/i }))
     const dialog = await screen.findByRole('dialog')
@@ -381,7 +381,7 @@ describe('Contacts', () => {
     vi.mocked(createContact).mockResolvedValue(makeContact({ uid: 'imported-1', fn: 'Imported Person' }))
 
     renderContacts()
-    await screen.findByRole('heading', { name: /contactos/i, level: 2 })
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
 
     const vcf = serializeContactsToVcf([
       {

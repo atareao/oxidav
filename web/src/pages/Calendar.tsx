@@ -387,7 +387,7 @@ export function Calendar() {
 
   return (
     <>
-      <Typography.Title level={2}>Calendario</Typography.Title>
+      <h1 className="sr-only">Calendario</h1>
 
       {loadError !== null ? (
         <Alert
