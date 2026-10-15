@@ -409,6 +409,7 @@ export function Sync() {
           <Alert
             type="warning"
             showIcon
+            style={{ marginBottom: 16 }}
             title="Este token no volverá a mostrarse"
             description="Cópialo ahora y guárdalo en un lugar seguro. Si lo pierdes, revócalo y crea otro."
           />
