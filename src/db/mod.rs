@@ -442,9 +442,10 @@ pub async fn insert_calendar_object(
     let mut tx = begin_write(pool).await?;
     let row = sqlx::query_as::<_, CalendarObject>(
         "INSERT INTO calendar_objects
-            (id, collection_id, uid, summary, description, dtstart, dtend, rrule,
-             etag, raw_payload, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, collection_id, uid, summary, description, dtstart, dtend,
+             dtstart_tzid, dtend_tzid, rrule, etag, raw_payload, created_at,
+             updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING *",
     )
     .bind(&new.id)
@@ -454,6 +455,8 @@ pub async fn insert_calendar_object(
     .bind(&new.description)
     .bind(new.dtstart)
     .bind(new.dtend)
+    .bind(&new.dtstart_tzid)
+    .bind(&new.dtend_tzid)
     .bind(&new.rrule)
     .bind(&etag)
     .bind(&new.raw_payload)
@@ -495,7 +498,8 @@ pub async fn update_calendar_object(
     let mut tx = begin_write(pool).await?;
     let row = sqlx::query_as::<_, CalendarObject>(
         "UPDATE calendar_objects
-            SET summary = ?, description = ?, dtstart = ?, dtend = ?, rrule = ?,
+            SET summary = ?, description = ?, dtstart = ?, dtend = ?,
+                dtstart_tzid = ?, dtend_tzid = ?, rrule = ?,
                 etag = ?, raw_payload = ?, updated_at = ?
           WHERE id = ?
          RETURNING *",
@@ -504,6 +508,8 @@ pub async fn update_calendar_object(
     .bind(&update.description)
     .bind(update.dtstart)
     .bind(update.dtend)
+    .bind(&update.dtstart_tzid)
+    .bind(&update.dtend_tzid)
     .bind(&update.rrule)
     .bind(&etag)
     .bind(&update.raw_payload)

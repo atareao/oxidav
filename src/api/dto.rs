@@ -121,6 +121,17 @@ pub struct EventDto {
     pub dtstart: Option<i64>,
     /// End instant, Unix milliseconds.
     pub dtend: Option<i64>,
+    /// IANA time-zone the event's `DTSTART` is anchored to (F18), if any.
+    ///
+    /// `null` means the start is UTC (the pre-F18 behaviour). This is the zone
+    /// the `.ics` is composed with (`DTSTART;TZID=<zone>` + a `VTIMEZONE`
+    /// block); the `dtstart` instant itself is always UTC milliseconds.
+    pub dtstart_tzid: Option<String>,
+    /// IANA time-zone the event's `DTEND` is anchored to (F18), if any.
+    ///
+    /// A DAV client may anchor `DTSTART` and `DTEND` to different zones, so this
+    /// is exposed independently of [`dtstart_tzid`](Self::dtstart_tzid).
+    pub dtend_tzid: Option<String>,
     /// Raw `RRULE` text (never expanded).
     pub rrule: Option<String>,
     /// Opaque ETag.
@@ -141,6 +152,8 @@ impl From<&CalendarObject> for EventDto {
             description: object.description.clone(),
             dtstart: object.dtstart,
             dtend: object.dtend,
+            dtstart_tzid: object.dtstart_tzid.clone(),
+            dtend_tzid: object.dtend_tzid.clone(),
             rrule: object.rrule.clone(),
             etag: object.etag.clone(),
             created_at: object.created_at,
@@ -170,6 +183,15 @@ pub struct CreateEventRequest {
     /// Raw `RRULE` text (never expanded).
     #[serde(default)]
     pub rrule: Option<String>,
+    /// Optional IANA time-zone name the event is anchored to (e.g.
+    /// `"Europe/Madrid"`).
+    ///
+    /// When present, the stored `.ics` is composed as
+    /// `DTSTART;TZID=<zone>` / `DTEND;TZID=<zone>` plus a `VTIMEZONE` block, so
+    /// an `RRULE` recurs in **local** wall-clock time. `dtstart`/`dtend` remain
+    /// the UTC instants and are not shifted. An unknown zone is a `400`.
+    #[serde(default)]
+    pub tzid: Option<String>,
     /// Optional client-chosen `UID`; a fresh one is minted when omitted.
     #[serde(default)]
     pub uid: Option<String>,
@@ -198,6 +220,14 @@ pub struct UpdateEventRequest {
     /// New raw `RRULE` text, if provided.
     #[serde(default)]
     pub rrule: Option<String>,
+    /// New IANA time-zone anchor, if provided (must resolve to a known zone).
+    ///
+    /// A single `tzid` is applied to **both** `DTSTART` and `DTEND`. An absent
+    /// `tzid` means "leave the zone unchanged" — there is deliberately **no**
+    /// way to clear the zone through a `PATCH` (the DTO cannot distinguish
+    /// "absent" from "null", the same MVP limitation as every other field).
+    #[serde(default)]
+    pub tzid: Option<String>,
 }
 
 impl UpdateEventRequest {
@@ -209,6 +239,7 @@ impl UpdateEventRequest {
             && self.dtstart.is_none()
             && self.dtend.is_none()
             && self.rrule.is_none()
+            && self.tzid.is_none()
     }
 }
 

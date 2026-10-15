@@ -29,6 +29,10 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 /// The Pocket ID `sub` the test app token is minted for.
 const SUB: &str = "user-a";
 
+/// The subject the REST API assumes when auth is disabled
+/// ([`oxidav::auth::SessionUser::dev`]).
+const DEV_SUB: &str = "dev";
+
 /// A throwaway file-backed DSN under `/tmp/opencode` (never `data/oxidav.db`).
 fn temp_db_url(tag: &str) -> String {
     let dir = PathBuf::from("/tmp/opencode/oxidav-tests");
@@ -47,8 +51,19 @@ struct TestEnv {
 }
 
 async fn test_env(tag: &str) -> TestEnv {
+    test_env_for(tag, SUB).await
+}
+
+/// Like [`test_env`] but mints the DAV app token (and therefore the DAV
+/// identity) for `sub`.
+///
+/// The REST API runs as the dev subject when auth is disabled
+/// ([`oxidav::auth::SessionUser::dev`], `sub = "dev"`), so a DAV→REST
+/// round-trip must authenticate the DAV side — and own the collection — as
+/// `"dev"` to make both surfaces address the same identity.
+async fn test_env_for(tag: &str, sub: &str) -> TestEnv {
     let pool: SqlitePool = init_pool(&temp_db_url(tag)).await.expect("init_pool");
-    let (_id, token) = create_app_token(&pool, SUB, "dav client")
+    let (_id, token) = create_app_token(&pool, sub, "dav client")
         .await
         .expect("create app token");
 
@@ -69,7 +84,7 @@ async fn test_env(tag: &str) -> TestEnv {
     TestEnv {
         app,
         pool,
-        basic: basic_header(SUB, &token),
+        basic: basic_header(sub, &token),
     }
 }
 
@@ -167,11 +182,16 @@ async fn dav_with(
 
 /// Create a calendar collection owned by [`SUB`] with a fixed id.
 async fn make_calendar(env: &TestEnv, id: &str) {
+    make_calendar_owned(env, id, SUB).await;
+}
+
+/// Create a calendar collection with a fixed id, owned by `owner`.
+async fn make_calendar_owned(env: &TestEnv, id: &str, owner: &str) {
     create_collection(
         &env.pool,
         &NewCollection {
             id: id.to_string(),
-            user_id: SUB.to_string(),
+            user_id: owner.to_string(),
             name: "Trabajo".to_string(),
             kind: CollectionKind::Calendar,
             color: "#1677ff".to_string(),
@@ -187,6 +207,19 @@ fn ics_event(uid: &str, summary: &str) -> String {
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//oxidav//test//EN\r\n\
          BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:{summary}\r\n\
          DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+/// A `VCALENDAR` whose `VEVENT` anchors `DTSTART`/`DTEND` to `Europe/Madrid`.
+///
+/// 2024-03-15 is before the 2024 DST change (2024-03-31), so `Europe/Madrid` is
+/// CET (UTC+01:00): `10:00` local is `09:00` UTC (`1_710_493_200_000` ms).
+fn ics_event_madrid(uid: &str, summary: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//oxidav//test//EN\r\n\
+         BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:{summary}\r\n\
+         DTSTART;TZID=Europe/Madrid:20240315T100000\r\n\
+         DTEND;TZID=Europe/Madrid:20240315T110000\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
     )
 }
 
@@ -308,6 +341,8 @@ async fn propfind_collection_lists_resources_with_getetag() {
             description: None,
             dtstart: Some(1_710_496_800_000),
             dtend: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: ics.to_string(),
         },
@@ -363,6 +398,8 @@ async fn propfind_depth_zero_hides_collection_members() {
             description: None,
             dtstart: Some(1_710_496_800_000),
             dtend: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".to_string(),
         },
@@ -443,6 +480,8 @@ async fn propfind_resource_returns_etag_and_calendar_data() {
             description: None,
             dtstart: Some(1_710_496_800_000),
             dtend: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: ics.to_string(),
         },
@@ -512,6 +551,68 @@ async fn put_creates_a_resource_with_201_and_denormalises_it() {
         stored.raw_payload, ics,
         "the raw .ics must be kept verbatim"
     );
+}
+
+/// F18 Paso 13 — a `PUT` with `DTSTART;TZID=…` stores the correct UTC instant
+/// (10:00 `Europe/Madrid` == 09:00 UTC) **and** the parsed zone, and the raw
+/// `.ics` is still kept verbatim.
+#[tokio::test]
+async fn put_with_tzid_stores_the_utc_instant_and_the_zone() {
+    let env = test_env("put-tzid").await;
+    make_calendar(&env, "col-work").await;
+
+    let ics = ics_event_madrid("evt-tz@oxidav", "Reunión");
+    let response = dav_with(&env, "PUT", &uri_for("evt-tz@oxidav"), &[], &ics).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let stored = get_calendar_object(&env.pool, "col-work", "evt-tz@oxidav")
+        .await
+        .expect("query")
+        .expect("the object must be persisted");
+    // 2024-03-15 10:00 Europe/Madrid (CET, UTC+1) == 09:00 UTC.
+    assert_eq!(stored.dtstart, Some(1_710_493_200_000));
+    assert_eq!(stored.dtstart_tzid.as_deref(), Some("Europe/Madrid"));
+    assert_eq!(stored.dtend_tzid.as_deref(), Some("Europe/Madrid"));
+    assert_eq!(
+        stored.raw_payload, ics,
+        "the raw .ics must be kept verbatim"
+    );
+}
+
+/// F18 Paso 13 — round-trip DAV→REST: after the `PUT`, the REST `EventDto`
+/// reports the parsed zone and the correct UTC instant.
+#[tokio::test]
+async fn put_with_tzid_round_trips_through_the_rest_api() {
+    // The REST API runs as the dev subject when auth is disabled, so the DAV
+    // side authenticates (and the collection is owned) as `dev` too.
+    let env = test_env_for("tz-roundtrip", DEV_SUB).await;
+    make_calendar_owned(&env, "col-work", DEV_SUB).await;
+
+    let ics = ics_event_madrid("evt-tz-1", "Reunión");
+    let dav_uri = format!("/dav/calendars/{DEV_SUB}/col-work/evt-tz-1.ics");
+    let created = dav_with(&env, "PUT", &dav_uri, &[], &ics).await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/api/v1/collections/col-work/events/evt-tz-1")
+        .body(Body::empty())
+        .expect("build request");
+    let response = env
+        .app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("send request");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON body");
+    assert_eq!(value["dtstart_tzid"], "Europe/Madrid");
+    assert_eq!(value["dtend_tzid"], "Europe/Madrid");
+    assert_eq!(value["dtstart"], 1_710_493_200_000_i64);
 }
 
 #[tokio::test]

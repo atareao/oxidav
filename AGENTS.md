@@ -53,6 +53,9 @@ requisito de empaquetado**.
   de diseño con `valet`, no paridad de features.
 - `reqwest` con `default-features = false` + la feature `rustls` (**nunca**
   `native-tls`, que enlazaría OpenSSL).
+- `chrono-tz` (F18, zonas horarias): tablas IANA embebidas, **Rust puro sin
+  OpenSSL**, así que respeta la regla del binario musl estático. Ojo: incrusta la
+  tzdb completa (varios MB).
 
 ## SQLite (PRAGMAs, esquema y gotchas)
 - PRAGMAs obligatorios: `journal_mode=WAL`, `synchronous=NORMAL`,
