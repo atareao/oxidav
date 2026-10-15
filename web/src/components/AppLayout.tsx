@@ -31,6 +31,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { AuthContext } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
+import { titleForPath, useDocumentTitle } from '../hooks/useDocumentTitle'
 import { RouteFallback } from './RouteFallback'
 
 const { Header, Content } = Layout
@@ -102,6 +103,10 @@ export function AppLayout({ children }: AppLayoutProps) {
   const authenticated = auth?.user != null
   const loggingOut = auth?.loggingOut ?? false
   const [drawerOpen, setDrawerOpen] = useState(false)
+
+  // Refleja la vista activa en la pestaña del navegador y restaura «OxiDav» al
+  // desmontar el shell.
+  useDocumentTitle(titleForPath(location.pathname))
 
   // Solo móvil cuando `xs` es *explícitamente* `true`. En un viewport de
   // escritorio todos los breakpoints son `false`/`undefined`, así que cualquier

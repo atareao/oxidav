@@ -228,6 +228,44 @@ describe('AppLayout — contratos de regresión', () => {
   })
 })
 
+describe('AppLayout — título del documento por ruta', () => {
+  const originalTitle = document.title
+
+  afterEach(() => {
+    document.title = originalTitle
+  })
+
+  it.each([
+    ['/calendar', 'Calendario · OxiDav'],
+    ['/contacts', 'Contactos · OxiDav'],
+    ['/sync', 'Sincronización · OxiDav'],
+    ['/settings', 'Ajustes · OxiDav'],
+    ['/unknown', 'OxiDav'],
+  ])('con la ruta %s el título es «%s»', (path, expected) => {
+    renderAt(path)
+
+    expect(document.title).toBe(expected)
+  })
+
+  it('restaura el título base al desmontar', () => {
+    const { unmount } = renderAt('/calendar')
+    expect(document.title).toBe('Calendario · OxiDav')
+
+    unmount()
+
+    expect(document.title).toBe('OxiDav')
+  })
+})
+
+describe('AppLayout — botones de solo icono', () => {
+  it('los controles de tema y cierre de sesión exponen aria-label', () => {
+    renderAt('/calendar')
+
+    expect(screen.getByRole('button', { name: /cambiar tema/i })).toHaveAttribute('aria-label')
+    expect(screen.getByRole('button', { name: /cerrar sesión/i })).toHaveAttribute('aria-label')
+  })
+})
+
 function jsonResponse(body: unknown, status = 200): Response {
   return {
     ok: status >= 200 && status < 300,
