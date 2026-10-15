@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -61,6 +62,20 @@ export interface ThemeProviderProps {
  */
 export function ThemeProvider({ children }: ThemeProviderProps) {
   const [mode, setModeState] = useState<ThemeMode>(readStoredMode)
+
+  /**
+   * Push the *real app mode* to the document so the browser paints native
+   * chrome (scrollbars, form controls, canvas background) in the same scheme
+   * the user picked here — instead of following `prefers-color-scheme` from
+   * the operating system.
+   *
+   * `web/src/index.css` keeps a `color-scheme: light` default for the login
+   * screen, which renders *outside* this provider; this effect overrides it
+   * whenever the provider is mounted.
+   */
+  useEffect(() => {
+    document.documentElement.style.colorScheme = mode
+  }, [mode])
 
   const setMode = useCallback((next: ThemeMode) => {
     setModeState(next)
