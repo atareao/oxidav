@@ -18,6 +18,7 @@ OxiDav es un **único binario distribuible** (Rust + Axum + Tokio) que sirve:
   - SPA: **OIDC Authorization Code server-side** contra **Pocket ID** con **cliente confidencial**: el backend intercambia el código, valida el `id_token` (RS256 + JWKS) y establece una **cookie de sesión firmada** (`oxidav_session`, `HttpOnly` + `Secure` + `SameSite=Lax`, 8 h). El SPA **no almacena ni envía tokens** (sin `Bearer`, sin `sessionStorage`) y **nunca ve el `access_token`**; la única excepción es el `id_token_hint` del `end_session_url` que devuelve el logout, que el SPA solo usa para navegar a una URL `https:`. OxiDav **no almacena contraseñas principales**.
   - Clientes DAV nativos (iOS, DAVx⁵, Thunderbird): **Basic Auth** con **app tokens** revocables (`oxidav_<id>_<secret>`, secreto hasheado en SQLite). El DAV **también** acepta la cookie de sesión cuando la auth está activa.
 - **DAV**: CalDAV/CardDAV core, `PROPFIND` / `REPORT` / `PUT` / `DELETE` / `MKCALENDAR`, y **RFC 6578 (sync-collection)** con `sync-token` incremental (tombstones).
+- **Zonas horarias**: soporte de `TZID` (IANA) extremo a extremo con bloque **`VTIMEZONE`** derivado de la tzdb (`chrono-tz`), de modo que las recurrencias (`RRULE`) se repiten en **hora local**.
 - **REST `/api/v1`**: colecciones, eventos, contactos, búsqueda y app tokens.
 - **SPA**: vistas **Calendario**, **Contactos** (import/export `.vcf`), **Sincronización y Dispositivos** (URLs DAV + gestor de tokens) y **Ajustes** (perfil, tema claro/oscuro, colecciones).
 

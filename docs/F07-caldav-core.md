@@ -40,7 +40,7 @@ Colección no-`calendar` (addressbook) tratada como `404`; `PUT` con `UNIQUE` vi
 
 ## Limitaciones conocidas
 
-`REPORT` devuelve un set fijo de props (no negocia `<d:prop>` aún); `OPTIONS` solo en `/dav/`; `Depth: infinity` se degrada a `1`; **RRULE no se expande** (solo se guarda); zonas horarias simplificadas. Compatibilidad real con clientes DAV requiere pruebas manuales.
+`REPORT` devuelve un set fijo de props (no negocia `<d:prop>` aún); `OPTIONS` solo en `/dav/`; `Depth: infinity` se degrada a `1`; **RRULE no se expande** (solo se guarda). La **limitación de zonas horarias queda levantada por [F18](./F18-timezone-support.md)**: el `TZID` se resuelve con la tzdb IANA embebida y el `.ics` compuesto incluye su bloque `VTIMEZONE`. Compatibilidad real con clientes DAV requiere pruebas manuales.
 
 ## Cómo verificar
 
