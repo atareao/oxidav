@@ -29,12 +29,16 @@ vi.mock('antd', async (importOriginal) => {
   }
 })
 
-function lastAlgorithm() {
+function lastTheme() {
   const calls = configProviderSpy.mock.calls
   const lastProps = calls.at(-1)?.[0] as
     | ComponentProps<typeof import('antd').ConfigProvider>
     | undefined
-  return lastProps?.theme?.algorithm
+  return lastProps?.theme
+}
+
+function lastAlgorithm() {
+  return lastTheme()?.algorithm
 }
 
 function renderAt(path: string) {
@@ -78,6 +82,9 @@ describe('AuthenticatedApp routing', () => {
 describe('AuthenticatedApp theme', () => {
   beforeEach(() => {
     configProviderSpy.mockClear()
+    // The chosen theme is persisted in `localStorage`; clear it so each test
+    // starts from the documented default (`light`) regardless of execution order.
+    localStorage.clear()
   })
 
   it('starts with the light (default) algorithm applied via ConfigProvider', async () => {
@@ -99,5 +106,38 @@ describe('AuthenticatedApp theme', () => {
 
     expect(toggle).toHaveTextContent('☀️')
     await waitFor(() => expect(lastAlgorithm()).toBe(theme.darkAlgorithm))
+  })
+
+  it('applies a non-empty design token set via ConfigProvider', async () => {
+    renderAt('/calendar')
+    await screen.findByRole('heading', { name: /calendario/i, level: 2 })
+
+    const applied = lastTheme()
+    expect(applied?.token).toBeDefined()
+
+    const token = applied?.token ?? {}
+    expect(Object.keys(token).length).toBeGreaterThan(0)
+    expect(token.borderRadius).toBeGreaterThan(0)
+    expect(token.fontSize).toBeGreaterThan(0)
+    expect(token.controlHeight).toBeGreaterThan(0)
+    expect(typeof token.fontFamily).toBe('string')
+    expect((token.fontFamily ?? '').length).toBeGreaterThan(0)
+
+    expect(applied?.components).toBeDefined()
+    expect(Object.keys(applied?.components ?? {}).length).toBeGreaterThan(0)
+  })
+
+  it('keeps the light/dark algorithm switch while applying tokens', async () => {
+    const user = userEvent.setup()
+    renderAt('/calendar')
+
+    const toggle = await screen.findByRole('button', { name: /cambiar tema/i })
+    expect(lastAlgorithm()).toBe(theme.defaultAlgorithm)
+    expect(Object.keys(lastTheme()?.token ?? {}).length).toBeGreaterThan(0)
+
+    await user.click(toggle)
+
+    await waitFor(() => expect(lastAlgorithm()).toBe(theme.darkAlgorithm))
+    expect(Object.keys(lastTheme()?.token ?? {}).length).toBeGreaterThan(0)
   })
 })

@@ -11,11 +11,52 @@
  */
 
 import { App as AntdApp, ConfigProvider, theme } from 'antd'
+import type { ThemeConfig } from 'antd'
 import esES from 'antd/locale/es_ES'
 import { lazy } from 'react'
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom'
 import { AppLayout } from './components/AppLayout'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
+
+/**
+ * Design tokens shared by both colour schemes.
+ *
+ * `colorPrimary` is deliberately absent: the plan keeps Ant Design's default
+ * brand colour and only refines radii, typography, control density and spacing.
+ */
+const DESIGN_TOKENS: ThemeConfig['token'] = {
+  borderRadius: 10,
+  fontFamily:
+    "system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+  fontSize: 14,
+  controlHeight: 36,
+  lineWidth: 1,
+  wireframe: false,
+}
+
+/**
+ * Per-component refinements layered on top of the seed tokens above.
+ */
+const COMPONENT_TOKENS: ThemeConfig['components'] = {
+  Layout: {
+    headerHeight: 56,
+    headerPadding: '0 16px',
+  },
+  Menu: {
+    itemBorderRadius: 8,
+    itemHeight: 40,
+  },
+  Card: {
+    bodyPadding: 20,
+    headerHeight: 48,
+  },
+  Table: {
+    cellPaddingBlock: 10,
+  },
+  Button: {
+    contentFontSize: 14,
+  },
+}
 
 // Pages are lazy-loaded so each route ships in its own chunk. They use named
 // exports, hence the `.then(m => ({ default: m.X }))` mapping.
@@ -32,6 +73,8 @@ function ThemedApp() {
       locale={esES}
       theme={{
         algorithm: mode === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm,
+        token: DESIGN_TOKENS,
+        components: COMPONENT_TOKENS,
       }}
     >
       <AntdApp>
