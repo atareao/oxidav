@@ -1,6 +1,6 @@
 # F18 — Soporte de zonas horarias (`TZID`) extremo a extremo con `VTIMEZONE`
 
-> El plan de origen es [`plans/PLAN-019-timezone-support.md`](../plans/PLAN-019-timezone-support.md).
+> El plan de origen es [`plans/PLAN-019-timezone-support-COMPLETED.md`](../plans/PLAN-019-timezone-support-COMPLETED.md).
 > Levanta la limitación de zonas horarias de [F07](./F07-caldav-core.md).
 
 ## Qué implementa
@@ -238,7 +238,7 @@ que se vuelve a parsear.
 
 ## Relacionado
 
-- [`plans/PLAN-019-timezone-support.md`](../plans/PLAN-019-timezone-support.md)
+- [`plans/PLAN-019-timezone-support-COMPLETED.md`](../plans/PLAN-019-timezone-support-COMPLETED.md)
 - [`docs/F07-caldav-core.md`](./F07-caldav-core.md) — limitación de zonas horarias que F18 levanta
 - [`docs/F06-rest-api.md`](./F06-rest-api.md)
 - [`docs/F03-data-layer.md`](./F03-data-layer.md)

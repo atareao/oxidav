@@ -2,7 +2,7 @@
 
 > Sustituye el modelo de [F04](./F04-oidc-pocket-id.md) (verificación de JWT `Bearer`
 > contra el JWKS por parte del SPA). El detalle del plan está en
-> [`plans/PLAN-018-oidc-valet-parity.md`](../plans/PLAN-018-oidc-valet-parity.md).
+> [`plans/PLAN-018-oidc-valet-parity-COMPLETED.md`](../plans/PLAN-018-oidc-valet-parity-COMPLETED.md).
 
 ## Qué implementa
 
@@ -257,7 +257,7 @@ ante issuer/audiencia/nonce/signatura incorrectos, `alg=none`, confusión de alg
 
 ## Relacionado
 
-- [`plans/PLAN-018-oidc-valet-parity.md`](../plans/PLAN-018-oidc-valet-parity.md)
+- [`plans/PLAN-018-oidc-valet-parity-COMPLETED.md`](../plans/PLAN-018-oidc-valet-parity-COMPLETED.md)
 - [`docs/F04-oidc-pocket-id.md`](./F04-oidc-pocket-id.md) — modelo anterior, superado por F17
 - [`docs/F05-app-tokens-basic-auth.md`](./F05-app-tokens-basic-auth.md)
 - [`docs/F06-rest-api.md`](./F06-rest-api.md)
