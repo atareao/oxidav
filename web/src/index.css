@@ -1,9 +1,17 @@
 /*
- * OxiDav — sistema de diseño base (F19).
+ * OxiDav — estilos base del SPA (F19, revisado en F20).
  *
- * Este fichero solo aporta lo que Ant Design no cubre: un pequeño conjunto de
- * variables CSS (espaciado, tipografía, radios), un reset mínimo y unas pocas
- * utilidades reutilizables por las páginas.
+ * El sistema de diseño vivo es `theme.token` / `theme.components` de Ant Design,
+ * definido en `web/src/AuthenticatedApp.tsx`. Este fichero aporta SOLO lo que
+ * Ant Design no expresa: el esquema de color del chrome nativo, un reset mínimo
+ * y las dos variables que consume el propio `body`.
+ *
+ * Invariante (F20): ningún custom property declarado aquí sin consumidor.
+ * `--font-sans` es además la pila de fuentes ÚNICA del proyecto: el tema de Ant
+ * Design la referencia con `var(--font-sans)`, de modo que la pila nunca se
+ * repite. Si necesitas un espaciado, un radio o una tipografía en TypeScript,
+ * usa los tokens de Ant Design (`theme.token`); no declares una variable CSS
+ * nueva.
  *
  * `color-scheme` declara el modo que el navegador debe usar para el chrome
  * nativo (scrollbars, controles de formulario, fondo del canvas). El valor por
@@ -17,28 +25,11 @@
 :root {
   color-scheme: light;
 
-  /* Escala de espaciado (múltiplos de 4 px). */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 24px;
-  --space-6: 32px;
-  --space-7: 48px;
-
-  /* Radios. */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-pill: 999px;
-
-  /* Tipografía. */
+  /* Pila de fuentes: única declaración del proyecto. El tema de Ant Design la
+   * referencia con `var(--font-sans)`. */
   --font-sans:
     system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
     sans-serif;
-  --font-mono:
-    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
-    'Liberation Mono', monospace;
   --line-height-base: 1.5;
 }
 
@@ -68,7 +59,7 @@ body {
 /*
  * `sr-only` oculta visualmente un elemento sin sacarlo del árbol de
  * accesibilidad: lo siguen leyendo los lectores de pantalla. Lo usan las
- * páginas de la Fase 4 para su `h1` semántico.
+ * páginas para su `h1` semántico.
  */
 .sr-only {
   position: absolute;
@@ -80,15 +71,4 @@ body {
   clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
-}
-
-/* Contenedor de página: ancho completo con padding consistente. */
-.page {
-  padding: var(--space-4);
-}
-
-@media (min-width: 768px) {
-  .page {
-    padding: var(--space-5);
-  }
 }
