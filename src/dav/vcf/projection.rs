@@ -12,7 +12,7 @@
 use vcard4::property::{Property, TextOrUriProperty};
 
 use super::{
-    VcfError, ensure_formatted_name, has_property, logical_lines, parse_vcf, pref_of,
+    VcfError, has_property, logical_lines, parse_normalized, parsed_card, pref_of,
     text_or_uri_value,
 };
 
@@ -197,19 +197,19 @@ pub struct RawProperty {
 /// [`VcfError::Malformed`] when the enveloped payload is not parseable, and
 /// [`VcfError::MissingUid`] when no usable `UID` can be derived.
 pub fn project_card(raw: &str) -> Result<CardProjection, VcfError> {
-    let parsed = parse_vcf(raw)?;
-
-    // `parse_vcf` guarantees a usable `UID`/`FN`; the *full* card is re-parsed
-    // here because `ParsedCard` exposes only the six denormalised fields. The
-    // `FN` injection of `parse_vcf` is applied too, so the typed card and the
-    // denormalised view always agree.
-    let normalized = ensure_formatted_name(raw).ok_or(VcfError::MissingUid)?;
-    let cards = vcard4::parse_loose(normalized.as_ref())
-        .map_err(|err| VcfError::Malformed(err.to_string()))?;
-    let card = cards.first().ok_or(VcfError::NotACard)?;
+    // A single crate parse feeds both the denormalised view (`parsed`) and the
+    // full typed card (`card`); `parse_vcf` is not called again, so the payload
+    // is parsed once instead of twice.
+    let (card, _normalized) = parse_normalized(raw)?;
+    // Reuse `parse_vcf`'s `UID`/`FN` extraction so the projection's success and
+    // error paths stay identical to its own.
+    let parsed = parsed_card(&card)?;
 
     Ok(CardProjection {
-        // R1: verbatim from the raw lines, not from the typed model.
+        // R1: verbatim from the raw lines, not from the typed model. The
+        // **original** payload is scanned, never the `FN`-normalised copy: these
+        // fields must read exactly what the client wrote, and the synthetic `FN`
+        // injected for a card without one is not part of that payload.
         version: raw_property_value(raw, "VERSION").unwrap_or_default(),
         uid: parsed.uid,
         fn_: Some(parsed.fn_),
@@ -254,7 +254,7 @@ pub fn project_card(raw: &str) -> Result<CardProjection, VcfError> {
             .iter()
             .map(|prop| MediaValue::Uri(prop.value.to_string()))
             .collect(),
-        others: others(card),
+        others: others(&card),
     })
 }
 
@@ -580,6 +580,7 @@ fn any_property_value(value: &vcard4::property::AnyProperty) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dav::vcf::parse_vcf;
 
     fn card(body: &str) -> String {
         format!("BEGIN:VCARD\r\nVERSION:4.0\r\n{body}END:VCARD\r\n")

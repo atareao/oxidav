@@ -101,6 +101,28 @@ pub struct ParsedCard {
 /// the enveloped payload is not a parseable vCard, and [`VcfError::MissingUid`]
 /// when the card has no usable `UID`.
 pub fn parse_vcf(raw: &str) -> Result<ParsedCard, VcfError> {
+    let (card, _normalized) = parse_normalized(raw)?;
+    parsed_card(&card)
+}
+
+/// Parse `raw` with the [`vcard4`] crate, returning the first card **and** the
+/// exact text that was parsed.
+///
+/// This is the crate parse shared by [`parse_vcf`] and
+/// [`super::projection::project_card`]: both build their view from the *same*
+/// [`vcard4::Vcard`], so the crate parses a payload once per request instead of
+/// twice. The returned [`Cow`] is the payload unchanged when it already carries
+/// an `FN` ([`Cow::Borrowed`]), or a copy with the synthetic `FN` injected
+/// before `END:VCARD` ([`Cow::Owned`]) — the normalisation described in the
+/// module docs.
+///
+/// # Errors
+///
+/// [`VcfError::Empty`] for an empty payload, [`VcfError::NotACard`] when the
+/// envelope is missing or no card is produced, [`VcfError::MissingUid`] when no
+/// `FN` can be guaranteed, and [`VcfError::Malformed`] when the enveloped
+/// payload is not parseable.
+fn parse_normalized(raw: &str) -> Result<(vcard4::Vcard, Cow<'_, str>), VcfError> {
     if raw.trim().is_empty() {
         return Err(VcfError::Empty);
     }
@@ -114,8 +136,17 @@ pub fn parse_vcf(raw: &str) -> Result<ParsedCard, VcfError> {
 
     let cards = vcard4::parse_loose(normalized.as_ref())
         .map_err(|err| VcfError::Malformed(err.to_string()))?;
-    let card = cards.first().ok_or(VcfError::NotACard)?;
+    let card = cards.into_iter().next().ok_or(VcfError::NotACard)?;
 
+    Ok((card, normalized))
+}
+
+/// Build the denormalised [`ParsedCard`] from an already-parsed card.
+///
+/// Split out of [`parse_vcf`] so [`super::projection::project_card`] can reuse
+/// the same `UID`/`FN`/`EMAIL`/`TEL`/`ORG`/`NOTE` extraction — and therefore
+/// the same validation errors — without a second crate parse.
+fn parsed_card(card: &vcard4::Vcard) -> Result<ParsedCard, VcfError> {
     let uid = card
         .uid
         .as_ref()
