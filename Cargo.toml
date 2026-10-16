@@ -1,6 +1,6 @@
 [package]
 name = "oxidav"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 # Guarantees `web/dist` exists at compile time for `rust-embed` (F15).
 build = "build.rs"
