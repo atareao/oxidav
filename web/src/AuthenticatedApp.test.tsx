@@ -123,8 +123,9 @@ describe('AuthenticatedApp theme', () => {
     expect(token.borderRadius).toBeGreaterThan(0)
     expect(token.fontSize).toBeGreaterThan(0)
     expect(token.controlHeight).toBeGreaterThan(0)
-    expect(typeof token.fontFamily).toBe('string')
-    expect((token.fontFamily ?? '').length).toBeGreaterThan(0)
+    // The font stack lives in exactly one place: `index.css`. The theme must
+    // reference the CSS variable instead of repeating the literal stack.
+    expect(token.fontFamily).toBe('var(--font-sans)')
 
     expect(applied?.components).toBeDefined()
     expect(Object.keys(applied?.components ?? {}).length).toBeGreaterThan(0)
