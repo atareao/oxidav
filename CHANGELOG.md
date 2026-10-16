@@ -1,4 +1,30 @@
 # Changelog
+## [0.5.0] - 2026-10-16
+
+### Bug Fixes
+
+- El harness de tests acota su directorio y respeta TMPDIR
+
+### Documentation
+
+- Regenerar el changelog para 0.4.0
+- Añadir PLAN-025 (partir dav/xml.rs y auth/session.rs)
+- Cierre de PLAN-025 (desviaciones y un error mio cazado por la verificacion)
+- Añadir PLAN-026 (el diálogo de edición, con pestañas, F23)
+- Documentación de F23 y cierre de PLAN-026
+- Cierra PLAN-027 con los resultados medidos
+
+### Features
+
+- El diálogo de edición va con pestañas, como el detalle (F23)
+
+### Refactor
+
+- Extraer la serialización a dav/xml/write.rs (PLAN-025, paso 1)
+- Extraer el parseo a dav/xml/parse.rs (PLAN-025, paso 2)
+- Extraer la configuración a auth/session/config.rs (PLAN-025, paso 3)
+- Extraer el bloque OIDC a auth/session/oidc.rs (PLAN-025, paso 4a)
+- Extraer los tokens propios a auth/session/tokens.rs (PLAN-025, paso 4b)
 ## [0.4.0] - 2026-10-16
 
 ### Bug Fixes
