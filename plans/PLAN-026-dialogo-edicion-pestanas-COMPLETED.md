@@ -60,3 +60,41 @@ El detalle de un contacto se lee por pestañas (`ContactDetailTabs`, F22: **8 pe
 ## Versionado
 
 Es un `feat` → **minor**: la próxima versión pasaría a **0.5.0**.
+
+---
+
+## Cierre (PLAN-026 completado)
+
+Dos commits:
+
+```
+7354ebc 📝 docs: añadir PLAN-026 (el diálogo de edición, con pestañas, F23)
+135f242 ✨ feat: el diálogo de edición va con pestañas, como el detalle (F23)
+```
+
+### Resultado
+
+- El cuerpo del diálogo es un `<Tabs>` con las cinco pestañas del detalle (`names`, `contact`, `addresses`, `work`, `additional`); **`fn` fuera**, siempre visible.
+- **Salto a la pestaña del primer error** (la activa, la enfoca y no envía) y **punto rojo con descripción accesible** en las que tengan error.
+- **El payload del PATCH no cambia.** `buildUpdateInput`/`groupsFromForm` intactos.
+- Backend **sin tocar**.
+
+### Verificación
+
+- **20 ficheros / 217 tests** verdes (eran 174; F23 añade 43); `typecheck`, `lint` y `build` limpios; backend **551 / 0**.
+- **RED demostrado con evidencia, no afirmado**: con la implementación anterior en su sitio (restaurada desde una copia, y restituida después verificando el `sha256` byte a byte), **fallan 8 de los 17 tests** del componente. Los dos que no fallan son los del payload: **guarda de contrato**, no prueba de F23 — y así queda dicho.
+- **`Contacts.test.tsx`: +11 líneas de navegación, 0 aserciones tocadas** (verificado con el diff: solo `user.click` a la pestaña antes de tocar sus campos).
+
+### Desviaciones y hallazgos de la auditoría
+
+La auditoría de React marcó diez cosas. Se cerraron **cuatro** antes de dar la feature por buena (el color-solo del punto rojo, el `shouldUpdate` que re-renderizaba todo en cada tecla, el fallback de foco dependiente de los ids de AntD —ahora acotado y **fijado con un test**— y el camino de foco sin unificar). Dos detalles se documentan como **deuda** en `docs/F23`: `ContactForm.tsx` ha crecido a 785 líneas (candidato a extraer `TabFields`) y la descripción accesible se fija por DOM porque AntD v6 no reenvía props al botón de pestaña.
+
+Un hallazgo de la auditoría era un **falso positivo** y se dice: señaló el cambio de `compose.yaml` como contaminación de F23. **No lo es**: es una modificación del dueño del repositorio que está en el árbol de trabajo desde antes de F22, y se ha quedado **fuera de todos los commits**. No se revierte: no es de F23, pero tampoco es basura.
+
+### Nota de proceso
+
+Los dos primeros encargos a `frontend-dev` terminaron **en silencio y con la suite en rojo** (6 fallos). Se resolvió **troceando el trabajo en encargos atómicos** con ficheros disjuntos y verificación propia por CLI en cada paso; de ahí que los arreglos se hicieran en cuatro encargos pequeños en vez de dos grandes. Nada se dio por bueno sin comprobarlo.
+
+### Versionado
+
+Es un `feat` → **minor**: la próxima versión sería **0.5.0**.
