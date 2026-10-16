@@ -315,9 +315,15 @@ fn inject_property(raw: &str, name: &str, value: &str) -> String {
 ///
 /// This is the composition-side counterpart of [`ParsedCard`]: where
 /// [`parse_vcf`] extracts these fields *from* a payload, [`build_vcf`] renders
-/// them *into* one. It is the single, shared home of vCard serialisation,
-/// reused by the REST contact endpoints (F12) instead of duplicating `.vcf`
-/// construction in the HTTP layer.
+/// them *into* one.
+///
+/// Since F22 the REST contact endpoints use [`build_vcf`] only to compose the
+/// **skeleton** (`BEGIN`/`VERSION:4.0`/`UID`/`FN`/`END`); the rest of a card is
+/// written by the surgical merge in [`merge`](crate::dav::vcf::merge), which
+/// replaces only the properties the client edited and leaves the stored payload
+/// otherwise **byte for byte** intact. This struct is therefore no longer "the
+/// single home of vCard serialisation": it is the minimal seed the merge starts
+/// from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardFields {
     /// `UID`.
@@ -392,12 +398,29 @@ fn safe_uid(value: &str) -> String {
         .collect()
 }
 
+/// Whether a character is forbidden in a serialised content line.
+///
+/// Covers C0/C1 control characters (including CR, LF and TAB) and the Unicode
+/// line/paragraph separators U+2028/U+2029, which some vCard parsers treat as
+/// line breaks. This is the **single** predicate shared by the REST field
+/// validators (`crate::api::contacts`) and the `merge` render helpers: rejecting
+/// such characters up front is the security boundary against content-line /
+/// property injection (decision 8, «rechazar, no sanear»).
+#[must_use]
+pub(crate) fn is_forbidden_char(c: char) -> bool {
+    c.is_control() || c == '\u{2028}' || c == '\u{2029}'
+}
+
 /// Escape a free-text value for a content line (RFC 6350 §3.4).
 ///
 /// Backslash, comma and semicolon gain a leading backslash; LF becomes the
 /// two-character sequence `\n`. A bare `\r` is dropped so CRLF input collapses
 /// to a single logical newline, matching [`parse_vcf`]'s unescaping. Applied
 /// only to the free-text fields; the structured `UID` is emitted verbatim.
+///
+/// The `merge` module's `escape_text` follows the **same** semantics (`\r` is
+/// discarded, not turned into `\n`): there is one escape rule for vCard text in
+/// this crate.
 fn escape_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {

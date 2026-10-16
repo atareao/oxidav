@@ -27,19 +27,34 @@
 //!
 //! # Renderizado de líneas
 //!
-//! Los helpers [`render_text_property`], [`render_structured_property`] y
-//! [`render_uri_property`] preparan las líneas de contenido que llevan los
-//! [`PropertyEdit`]. Cada propiedad usa su encoding (decisión 6 del plan):
+//! Los helpers [`render_text_property`], [`render_structured_property`],
+//! [`render_uri_property`] y [`render_list_property`] preparan las líneas de
+//! contenido que llevan los [`PropertyEdit`]. Cada propiedad usa su encoding
+//! (decisión 6 del plan):
 //!
 //! * **Texto** ([`render_text_property`]): se escapan `\`, `,` y `;`, y el salto
 //!   de línea se convierte en la secuencia `\n` (RFC 6350 §3.4).
 //! * **Estructurado** ([`render_structured_property`]): los componentes se unen
 //!   con `;` **sin escapar**, pero cada componente se escapa por dentro como si
 //!   fuera texto (RFC 6350 §3.4: `\`, `,` y salto de línea), de modo que un `;`
-//!   interno tampoco rompe el campo.
+//!   interno tampoco rompe el campo. [`render_structured_property_preescaped`]
+//!   es la variante para componentes **ya escapados** (la usa el `N`, cuyas
+//!   sub-listas se unen con `,` sin escapar).
 //! * **URI** ([`render_uri_property`]): el valor se emite **verbatim** (escapar
-//!   una URI la corrompe), salvo que contenga caracteres de control, en cuyo
-//!   caso se rechaza.
+//!   una URI la corrompe).
+//! * **Lista** ([`render_list_property`]): los elementos se unen con `,` sin
+//!   escapar (el separador) y cada elemento se escapa por dentro.
+//!
+//! Las **cuatro** devuelven cadena vacía si algún valor contiene un carácter de
+//! control (incluidos CR/LF) o U+2028/U+2029: la vía del merge **rechaza** esos
+//! valores (decisión 8, «rechazar, no sanear»), así que un valor multilínea no
+//! se acepta por aquí. No se pierde nada: el payload que escribió el cliente se
+//! conserva verbatim y no se re-renderiza.
+//!
+//! Las líneas insertadas se **pliegan** al vuelo a 75 octetos (RFC 6350 §3.2)
+//! con [`super::super::common::fold_content_line`], respetando el terminador del
+//! fichero (`CRLF` o `LF`); por eso un `NOTE`/`URL` largo no emite una línea
+//! física por encima de los 75 octetos (igual que hacía [`super::build_vcf`]).
 //!
 //! Los parámetros se emiten como `;TYPE=a,b` y `;PREF=n` (en ese orden). Se
 //! validan aquí con alfabeto acotado (decisión 5): un `TYPE` fuera de `[A-Za-z0-9-]`
@@ -111,10 +126,13 @@ pub fn merge_properties(raw: &str, edits: &[PropertyEdit]) -> Result<String, Mer
 
     // Nombre de propiedad normalizado: se compara sin distinguir mayúsculas y
     // sin espacios sobrantes. El `name` es entrada interna de confianza, así que
-    // no se valida como si viniera del cliente; solo se normaliza.
+    // no se valida como si viniera del cliente; solo se normaliza. Las
+    // propiedades protegidas (`UID`/`VERSION`/`BEGIN`/`END`, decisión 4) se
+    // descartan: un merge nunca las toca.
     let names: Vec<String> = edits
         .iter()
         .map(|edit| edit.name.trim().to_ascii_lowercase())
+        .filter(|name| !is_protected_property_name(name))
         .collect();
 
     // Terminador de línea para las líneas nuevas: el del `END:VCARD`, o CRLF si
@@ -130,9 +148,22 @@ pub fn merge_properties(raw: &str, edits: &[PropertyEdit]) -> Result<String, Mer
     for (idx, span) in spans.iter().enumerate() {
         if idx == terminator_idx {
             for edit in edits {
+                // Decisión 4: `merge_properties` es `pub`, así que en vez de
+                // confiar en el llamante se **ignora** cualquier edición de una
+                // propiedad protegida (`UID`/`VERSION`/`BEGIN`/`END`).
+                if is_protected_property_name(&edit.name) {
+                    continue;
+                }
                 for line in &edit.lines {
-                    out.push_str(line);
-                    out.push_str(terminator);
+                    // Defensa en profundidad: ni siquiera bajo un nombre no
+                    // protegido una línea debe **introducir** una propiedad
+                    // protegida (p. ej. `name: "N"` con una línea `UID:…`). Un
+                    // llamante equivocado salta aquí en desarrollo/tests.
+                    debug_assert!(
+                        !super::property_name(line).is_some_and(is_protected_property_name),
+                        "merge_properties no debe insertar una propiedad protegida: {line}"
+                    );
+                    push_folded_line(line, terminator, &mut out);
                 }
             }
         }
@@ -149,16 +180,54 @@ pub fn merge_properties(raw: &str, edits: &[PropertyEdit]) -> Result<String, Mer
     Ok(out)
 }
 
+/// Whether `name` (case-insensitive, trimmed) is one of the properties a merge
+/// must **never** touch: the envelope (`BEGIN`/`END`), the `VERSION` and the
+/// identity (`UID`) — decision 4.
+fn is_protected_property_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "uid" | "version" | "begin" | "end"
+    )
+}
+
+/// Inserta `line` en `out` **plegándola** a 75 octetos (RFC 6350 §3.2) sin partir
+/// un carácter UTF-8, con el terminador del payload (`terminator`).
+///
+/// Reutiliza [`super::super::common::fold_content_line`] —la misma rutina que usa
+/// [`super::build_vcf`]— pero adapta el terminador: esa función emite siempre
+/// `CRLF`, mientras que el merge respeta el terminador del fichero (`CRLF` o
+/// `LF`). Como los valores no pueden contener saltos de línea (los `render_*`
+/// rechazan los caracteres de control), los `CRLF` de la salida plegada son solo
+/// los cortes de plegado y el fin de línea, de modo que sustituirlos por el
+/// terminador del fichero es seguro.
+fn push_folded_line(line: &str, terminator: &str, out: &mut String) {
+    if terminator == "\r\n" {
+        super::super::common::fold_content_line(line, out);
+    } else {
+        let mut folded = String::new();
+        super::super::common::fold_content_line(line, &mut folded);
+        out.push_str(&folded.replace("\r\n", terminator));
+    }
+}
+
 /// Renderiza una propiedad de texto (`FN`, `NICKNAME`, `TITLE`, `NOTE`,
 /// `CATEGORIES`…), escapando `\`, `,` y `;` y convirtiendo el salto de línea en
 /// `\n` (RFC 6350 §3.4).
 ///
-/// Devuelve cadena vacía cuando los parámetros son inválidos.
+/// Devuelve cadena vacía cuando los parámetros son inválidos **o** cuando el
+/// valor contiene un carácter de control (incluidos CR/LF) o U+2028/U+2029: la
+/// vía del merge **rechaza** esos valores (decisión 8, «rechazar, no sanear»), de
+/// modo que un valor multilínea no se acepta por aquí. No es una pérdida de
+/// datos: el payload que escribió el cliente se conserva verbatim y el merge no
+/// lo re-renderiza.
 #[must_use]
 pub fn render_text_property(name: &str, value: &str, types: &[String], pref: Option<u8>) -> String {
     let Some(params) = render_parameters(types, pref) else {
         return String::new();
     };
+    if value.chars().any(super::is_forbidden_char) {
+        return String::new();
+    }
     format!("{}{}:{}", name.trim(), params, escape_text(value))
 }
 
@@ -168,7 +237,8 @@ pub fn render_text_property(name: &str, value: &str, types: &[String], pref: Opt
 /// Los componentes se unen con `;` sin escapar; dentro de cada componente se
 /// aplica el escape de texto completo (RFC 6350 §3.4: `\`, `,` y salto de
 /// línea), de modo que un `;` interno tampoco rompe el campo. Devuelve cadena
-/// vacía cuando los parámetros son inválidos.
+/// vacía cuando los parámetros son inválidos **o** algún componente contiene un
+/// carácter de control o U+2028/U+2029 (ver [`render_text_property`]).
 #[must_use]
 pub fn render_structured_property(
     name: &str,
@@ -179,6 +249,12 @@ pub fn render_structured_property(
     let Some(params) = render_parameters(types, pref) else {
         return String::new();
     };
+    if components
+        .iter()
+        .any(|component| component.chars().any(super::is_forbidden_char))
+    {
+        return String::new();
+    }
     let value = components
         .iter()
         .map(|component| escape_text(component))
@@ -187,17 +263,41 @@ pub fn render_structured_property(
     format!("{}{}:{}", name.trim(), params, value)
 }
 
+/// Renderiza una propiedad estructurada con componentes **ya escapados**.
+///
+/// Como [`render_structured_property`], pero los componentes se unen con `;`
+/// **verbatim** (no se vuelven a escapar). Se usa para el `N`: sus componentes
+/// `additional`/`prefix`/`suffix` son **listas separadas por `,`** (RFC 6350
+/// §6.2.2), de modo que el separador de la lista no debe escaparse y volver a
+/// escapar el componente entero lo rompería. Cada componente debe venir ya
+/// pasado por [`escape_text_value`] (o por el mismo escape).
+///
+/// Devuelve cadena vacía cuando los parámetros son inválidos.
+#[must_use]
+pub fn render_structured_property_preescaped(
+    name: &str,
+    components: &[String],
+    types: &[String],
+    pref: Option<u8>,
+) -> String {
+    let Some(params) = render_parameters(types, pref) else {
+        return String::new();
+    };
+    format!("{}{}:{}", name.trim(), params, components.join(";"))
+}
+
 /// Renderiza una propiedad de tipo URI (`URL`, `IMPP`, `GEO`, `TZ`, `PHOTO`).
 ///
 /// La URI se emite **verbatim** (no se escapan `,` ni `;`); se le añaden los
 /// parámetros igual que a las propiedades de texto. Devuelve cadena vacía cuando
-/// los parámetros son inválidos.
+/// los parámetros son inválidos **o** la URI contiene un carácter de control o
+/// U+2028/U+2029 (ver [`render_text_property`]).
 #[must_use]
 pub fn render_uri_property(name: &str, value: &str, types: &[String], pref: Option<u8>) -> String {
     let Some(params) = render_parameters(types, pref) else {
         return String::new();
     };
-    if value.chars().any(char::is_control) {
+    if value.chars().any(super::is_forbidden_char) {
         return String::new();
     }
     format!("{}{}:{}", name.trim(), params, value)
@@ -207,7 +307,8 @@ pub fn render_uri_property(name: &str, value: &str, types: &[String], pref: Opti
 /// `,` **sin escapar** (el separador de la lista), pero dentro de cada elemento se
 /// aplica el escape de texto de RFC 6350 §3.4 (`\`, `,` y `;`), de modo que una
 /// coma interna no se confunda con un separador. Devuelve cadena vacía cuando los
-/// parámetros son inválidos.
+/// parámetros son inválidos **o** algún elemento contiene un carácter de control
+/// o U+2028/U+2029 (ver [`render_text_property`]).
 #[must_use]
 pub fn render_list_property(
     name: &str,
@@ -218,12 +319,29 @@ pub fn render_list_property(
     let Some(params) = render_parameters(types, pref) else {
         return String::new();
     };
+    if values
+        .iter()
+        .any(|value| value.chars().any(super::is_forbidden_char))
+    {
+        return String::new();
+    }
     let value = values
         .iter()
         .map(|element| escape_text(element))
         .collect::<Vec<_>>()
         .join(",");
     format!("{}{}:{}", name.trim(), params, value)
+}
+
+/// Escapa un valor de texto (RFC 6350 §3.4) para un componente estructurado.
+///
+/// Es la **misma** regla que aplican los `render_*` sobre cada componente; se
+/// expone para construir los componentes del `N`, cuyas sub-listas
+/// `additional`/`prefix`/`suffix` se escapan **elemento a elemento** y se unen
+/// con `,` sin escapar (RFC 6350 §6.2.2).
+#[must_use]
+pub fn escape_text_value(value: &str) -> String {
+    escape_text(value)
 }
 
 /// Máximo de *tokens* `TYPE` admitidos por propiedad.
@@ -270,7 +388,13 @@ fn render_parameters(types: &[String], pref: Option<u8>) -> Option<String> {
 }
 
 /// Escapa un valor de texto según RFC 6350 §3.4: `\`, `,` y `;` ganan una barra,
-/// y cualquier salto de línea se vuelve la secuencia `\n`.
+/// un salto de línea (`LF`) se vuelve la secuencia `\n` y un `CR` suelto se
+/// **descarta**.
+///
+/// Estas son exactamente las reglas de `escape_text` en [`super`] (la que usa
+/// [`super::build_vcf`]): hay **una** semántica de escape de texto en la crate.
+/// En la práctica los `render_*` rechazan antes cualquier carácter de control,
+/// así que las ramas de `\n`/`\r` solo cubren llamadas internas.
 fn escape_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -278,7 +402,8 @@ fn escape_text(value: &str) -> String {
             '\\' => out.push_str("\\\\"),
             ',' => out.push_str("\\,"),
             ';' => out.push_str("\\;"),
-            '\n' | '\r' => out.push_str("\\n"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
             _ => out.push(ch),
         }
     }
@@ -615,12 +740,24 @@ mod tests {
 
     #[test]
     fn render_text_property_escapes_reserved_characters() {
-        // `\`, `,` y `;` ganan una barra; el salto de línea se vuelve `\n`.
-        let value = "a\\b,c;d\ne";
+        // `\`, `,` y `;` ganan una barra.
+        let value = "a\\b,c;d";
         assert_eq!(
             render_text_property("NOTE", value, &[], None),
-            "NOTE:a\\\\b\\,c\\;d\\ne"
+            "NOTE:a\\\\b\\,c\\;d"
         );
+    }
+
+    #[test]
+    fn render_text_property_rejects_control_characters() {
+        // FIX-4 (decisión 8): un carácter de control (incluidos CR/LF) o un
+        // separador de línea Unicode hacen que el render **rechace** (cadena
+        // vacía), en vez de sanear. Un valor multilínea no se acepta por aquí.
+        assert_eq!(render_text_property("NOTE", "a\x07b", &[], None), "");
+        assert_eq!(render_text_property("NOTE", "a\u{2028}b", &[], None), "");
+        assert_eq!(render_text_property("NOTE", "a\nb", &[], None), "");
+        assert_eq!(render_text_property("NOTE", "a\rb", &[], None), "");
+        assert_eq!(render_text_property("NOTE", "a\u{2029}b", &[], None), "");
     }
 
     #[test]
@@ -665,9 +802,21 @@ mod tests {
             render_structured_property("ORG", &list(&["A\\B"]), &[], None),
             "ORG:A\\\\B"
         );
+    }
+
+    #[test]
+    fn render_structured_property_rejects_control_characters() {
+        assert_eq!(
+            render_structured_property("N", &list(&["a\x07b"]), &[], None),
+            ""
+        );
+        assert_eq!(
+            render_structured_property("N", &list(&["a\u{2028}b"]), &[], None),
+            ""
+        );
         assert_eq!(
             render_structured_property("N", &list(&["a\nb"]), &[], None),
-            "N:a\\nb"
+            ""
         );
     }
 
@@ -688,6 +837,19 @@ mod tests {
         assert_eq!(
             render_uri_property("URL", "https://x/y", &list(&["work"]), Some(1)),
             "URL;TYPE=work;PREF=1:https://x/y"
+        );
+    }
+
+    #[test]
+    fn render_uri_property_rejects_control_and_line_separators() {
+        assert_eq!(render_uri_property("URL", "https://x/\x07", &[], None), "");
+        assert_eq!(
+            render_uri_property("URL", "https://x/\u{2028}", &[], None),
+            ""
+        );
+        assert_eq!(
+            render_uri_property("URL", "https://x/\u{2029}", &[], None),
+            ""
         );
     }
 
@@ -712,16 +874,27 @@ mod tests {
     #[test]
     fn render_list_property_escapes_special_characters_inside_elements() {
         // Dentro de cada elemento se aplica el escape de texto completo (RFC 6350
-        // §3.4): `\`, `,` y `;` ganan una barra y el salto de línea se vuelve
-        // `\n`. Una coma interna así no se confunde con el separador.
+        // §3.4): `\`, `,` y `;` ganan una barra. Una coma interna así no se
+        // confunde con el separador.
         assert_eq!(
-            render_list_property(
-                "CATEGORIES",
-                &list(&["a,b", "c;d", "e\\f", "g\nh"]),
-                &[],
-                None
-            ),
-            "CATEGORIES:a\\,b,c\\;d,e\\\\f,g\\nh"
+            render_list_property("CATEGORIES", &list(&["a,b", "c;d", "e\\f"]), &[], None),
+            "CATEGORIES:a\\,b,c\\;d,e\\\\f"
+        );
+    }
+
+    #[test]
+    fn render_list_property_rejects_control_characters() {
+        assert_eq!(
+            render_list_property("CATEGORIES", &list(&["a\x07b"]), &[], None),
+            ""
+        );
+        assert_eq!(
+            render_list_property("CATEGORIES", &list(&["a\u{2028}b"]), &[], None),
+            ""
+        );
+        assert_eq!(
+            render_list_property("CATEGORIES", &list(&["a\nb"]), &[], None),
+            ""
         );
     }
 
@@ -858,5 +1031,166 @@ mod tests {
             render_structured_property("N", &list(&["Doe"]), &[], Some(0)),
             ""
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // FIX-1 — render_structured_property_preescaped y escape_text_value
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_structured_property_preescaped_does_not_reescape() {
+        // Los componentes ya vienen escapados: se unen con `;` verbatim, de modo
+        // que una coma (separador de sub-lista del `N`) sobrevive.
+        assert_eq!(
+            render_structured_property_preescaped(
+                "N",
+                &list(&["Lovelace", "Ada", "Byron,King", "Dr.,Prof.", "Jr.,PhD"]),
+                &[],
+                None
+            ),
+            "N:Lovelace;Ada;Byron,King;Dr.,Prof.;Jr.,PhD"
+        );
+    }
+
+    #[test]
+    fn escape_text_value_matches_the_render_escaping() {
+        assert_eq!(escape_text_value("a\\b,c;d"), "a\\\\b\\,c\\;d");
+        assert_eq!(escape_text_value("plain"), "plain");
+    }
+
+    // -----------------------------------------------------------------------
+    // FIX-5 — propiedades protegidas (decisión 4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_ignores_protected_property_edits() {
+        // El primitivo es `pub`: aunque un llamante pase ediciones de `UID`,
+        // `VERSION`, `BEGIN` o `END`, se **ignoran** (decisión 4) y el payload no
+        // cambia. El `debug_assert!` interno no salta porque estas líneas nunca
+        // llegan a insertarse.
+        let raw = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u@oxidav\r\nFN:N\r\nEND:VCARD\r\n";
+        let edits = [
+            PropertyEdit {
+                name: s("UID"),
+                lines: vec![s("UID:evil")],
+            },
+            PropertyEdit {
+                name: s("VERSION"),
+                lines: vec![s("VERSION:3.0")],
+            },
+            PropertyEdit {
+                name: s("BEGIN"),
+                lines: vec![s("BEGIN:VCARD")],
+            },
+            PropertyEdit {
+                name: s("END"),
+                lines: vec![s("END:VCARD")],
+            },
+        ];
+        assert_eq!(merge_properties(raw, &edits), Ok(raw.to_string()));
+    }
+
+    #[test]
+    fn merge_applies_normal_edits_and_ignores_protected_ones() {
+        let raw = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u\r\nFN:N\r\nTEL:1\r\nEND:VCARD\r\n";
+        let edits = [
+            PropertyEdit {
+                name: s("UID"),
+                lines: vec![s("UID:evil")],
+            },
+            PropertyEdit {
+                name: s("TEL"),
+                lines: vec![s("TEL:2")],
+            },
+        ];
+
+        let expected = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u\r\nFN:N\r\nTEL:2\r\nEND:VCARD\r\n";
+        assert_eq!(merge_properties(raw, &edits), Ok(expected.to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // FIX-6 — plegado de las líneas insertadas
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_folds_long_inserted_lines() {
+        let raw = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u@oxidav\r\nFN:N\r\nEND:VCARD\r\n";
+        let value = "x".repeat(300);
+        let line = render_text_property("NOTE", &value, &[], None);
+        assert!(line.len() > 75, "the rendered line must need folding");
+        let edits = [PropertyEdit {
+            name: s("NOTE"),
+            lines: vec![line.clone()],
+        }];
+
+        let merged = merge_properties(raw, &edits).expect("merge");
+        for physical in merged.split("\r\n") {
+            assert!(
+                physical.len() <= 75,
+                "physical line exceeds 75 octets: {physical:?}"
+            );
+        }
+        assert!(merged.contains("\r\n "), "the line must be folded");
+
+        let projection = super::super::project_card(&merged).expect("project");
+        assert_eq!(projection.notes, vec![value.clone()]);
+
+        // Idempotencia: reaplicar el mismo edit re-pliega igual.
+        let twice = merge_properties(&merged, &edits).expect("merge again");
+        assert_eq!(merged, twice, "the merge must stay idempotent when folding");
+    }
+
+    #[test]
+    fn merge_folds_with_the_lf_terminator() {
+        let raw = "BEGIN:VCARD\nVERSION:4.0\nUID:u@oxidav\nFN:N\nEND:VCARD\n";
+        let value = "y".repeat(300);
+        let line = render_text_property("NOTE", &value, &[], None);
+        let edits = [PropertyEdit {
+            name: s("NOTE"),
+            lines: vec![line],
+        }];
+
+        let merged = merge_properties(raw, &edits).expect("merge");
+        assert!(
+            !merged.contains('\r'),
+            "an LF payload must stay LF: {merged:?}"
+        );
+        assert!(merged.contains("\n "), "the line must be folded with LF");
+        for physical in merged.split('\n') {
+            assert!(
+                physical.len() <= 75,
+                "physical line exceeds 75 octets: {physical:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // FIX-8 — terminadores y payload sin salto final
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_handles_a_payload_without_a_trailing_newline() {
+        let raw = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u\r\nFN:N\r\nTEL:1\r\nEND:VCARD";
+        let edits = [PropertyEdit {
+            name: s("TEL"),
+            lines: vec![s("TEL:2")],
+        }];
+
+        let expected = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u\r\nFN:N\r\nTEL:2\r\nEND:VCARD";
+        assert_eq!(merge_properties(raw, &edits), Ok(expected.to_string()));
+    }
+
+    #[test]
+    fn merge_respects_mixed_line_terminators() {
+        // CRLF y LF mezclados en el mismo payload: cada línea conserva su
+        // terminador y las nuevas se insertan con el del `END:VCARD`.
+        let raw = "BEGIN:VCARD\r\nVERSION:4.0\nUID:u\nFN:N\r\nTEL:1\r\nEND:VCARD\r\n";
+        let edits = [PropertyEdit {
+            name: s("TEL"),
+            lines: vec![s("TEL:2")],
+        }];
+
+        let expected = "BEGIN:VCARD\r\nVERSION:4.0\nUID:u\nFN:N\r\nTEL:2\r\nEND:VCARD\r\n";
+        assert_eq!(merge_properties(raw, &edits), Ok(expected.to_string()));
     }
 }

@@ -69,6 +69,8 @@
 //! [`insert_card_object`] for persistence. The body limit for that single route
 //! is raised to [`MAX_IMPORT_BODY_BYTES`].
 
+use std::collections::HashSet;
+
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
@@ -79,14 +81,16 @@ use serde::Deserialize;
 use crate::auth::SessionUser;
 use crate::dav::common::new_id;
 use crate::dav::vcf::merge::{
-    PropertyEdit, merge_properties, render_list_property, render_structured_property,
-    render_text_property, render_uri_property,
+    PropertyEdit, escape_text_value, merge_properties, render_list_property,
+    render_structured_property, render_structured_property_preescaped, render_text_property,
+    render_uri_property,
 };
-use crate::dav::vcf::{CardFields, build_vcf, parse_vcf, project_card};
+use crate::dav::vcf::{CardFields, build_vcf, is_forbidden_char, parse_vcf, project_card};
 use crate::db::models::{CardObjectUpdate, CollectionKind, NewCardObject};
 use crate::db::{
     Collection, DbError, clamp_collection_limit, clamp_offset, delete_card_object, get_card_object,
-    get_collection, insert_card_object, list_card_objects_window, update_card_object,
+    get_collection, insert_card_object, insert_card_objects_batch, list_card_objects_window,
+    update_card_object,
 };
 use crate::router::AppState;
 
@@ -233,13 +237,13 @@ pub async fn create(
 
     let collection = addressbook_collection(&state, &id, &user.sub).await?;
 
-    let uid = match request.uid.as_deref() {
+    let requested_uid = match request.uid.as_deref() {
         Some(raw) => validate_uid(raw)?,
         None => new_id(),
     };
 
     let skeleton = build_vcf(&CardFields {
-        uid: uid.clone(),
+        uid: requested_uid,
         fn_,
         email: None,
         phone: None,
@@ -248,6 +252,13 @@ pub async fn create(
     });
     let raw_payload = merge_properties(&skeleton, &edits).map_err(merge_failure)?;
     let parsed = parse_created(&raw_payload)?;
+
+    // FIX-3: persist the **parsed** `uid`, not the raw one. `vcard4` unescapes
+    // the value (`a\,b` -> `a,b`, `a\Nb` -> a real line feed), so the raw uid
+    // could diverge from the payload and leave a row that later makes any
+    // `PATCH` fail `validate_stored_uid` with a `500`. Re-validate the parsed
+    // value so an invalid result is a `400` before anything is written.
+    let uid = validate_uid(&parsed.uid)?;
 
     let new = NewCardObject {
         id: new_id(),
@@ -424,19 +435,45 @@ pub async fn import(
         ));
     }
 
-    // Validate every card up front, so a malformed file is a `400` before any
-    // row is written (no partial import).
+    // Validate every card up front (parse + uid), so a malformed file or an
+    // invalid uid is a `400` before any row is written.
     let mut parsed_cards = Vec::with_capacity(cards.len());
     for card in &cards {
         let parsed = parse_vcf(card).map_err(|_| {
             ApiError::Validation("El cuerpo contiene una vCard inválida".to_string())
         })?;
+        // FIX-3: the stored `uid` is the **parsed** (unescaped) value; reject a
+        // card whose parsed uid is not a valid stored uid (e.g. a `UID:a\Nb`
+        // that unescapes to a real line feed) before anything is written.
+        validate_uid(&parsed.uid)?;
         parsed_cards.push((card.to_string(), parsed));
     }
 
-    let mut created = Vec::with_capacity(parsed_cards.len());
-    for (raw_card, parsed) in parsed_cards {
-        let new = NewCardObject {
+    // FIX-2: pre-validate duplicates — inside the file and against the store —
+    // so a clash is a `409` with **zero** rows written. The batch insert below
+    // is a single transaction, so the whole import is all-or-nothing.
+    let mut seen: HashSet<&str> = HashSet::with_capacity(parsed_cards.len());
+    for (_, parsed) in &parsed_cards {
+        if !seen.insert(parsed.uid.as_str()) {
+            return Err(ApiError::Conflict(
+                "El fichero contiene uids duplicados".to_string(),
+            ));
+        }
+    }
+    for (_, parsed) in &parsed_cards {
+        if get_card_object(&state.db, &collection.id, &parsed.uid)
+            .await?
+            .is_some()
+        {
+            return Err(ApiError::Conflict(
+                "Ya existe un contacto con ese uid en la colección".to_string(),
+            ));
+        }
+    }
+
+    let new_cards: Vec<NewCardObject> = parsed_cards
+        .into_iter()
+        .map(|(raw_card, parsed)| NewCardObject {
             id: new_id(),
             collection_id: collection.id.clone(),
             uid: parsed.uid,
@@ -446,14 +483,17 @@ pub async fn import(
             organization: parsed.organization,
             notes: parsed.notes,
             raw_payload: raw_card,
-        };
-        let stored = insert_card_object(&state.db, &new)
-            .await
-            .map_err(map_insert_error)?;
-        created.push(ContactDto::from(&stored));
-    }
+        })
+        .collect();
 
-    Ok((StatusCode::CREATED, Json(created)))
+    let stored = insert_card_objects_batch(&state.db, &new_cards)
+        .await
+        .map_err(map_insert_error)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(stored.iter().map(ContactDto::from).collect::<Vec<_>>()),
+    ))
 }
 
 /// Split a raw `.vcf` file into its individual card payloads, **verbatim**
@@ -537,16 +577,6 @@ async fn addressbook_collection(
     } else {
         Err(ApiError::NotFound)
     }
-}
-
-/// Whether a character is forbidden in any free-text field or `uid`.
-///
-/// Covers C0/C1 control characters (including `\r`, `\n`, `\t`) and the Unicode
-/// line/paragraph separators U+2028/U+2029, which some vCard parsers treat as
-/// line breaks. Rejecting them up front is the security boundary against
-/// content-line/property injection into the composed `raw_payload`.
-fn is_forbidden_char(c: char) -> bool {
-    c.is_control() || c == '\u{2028}' || c == '\u{2029}'
 }
 
 /// Validate and normalise a required free-text field (e.g. `fn`).
@@ -982,22 +1012,35 @@ fn render_labelled(
 }
 
 /// Render the structured `N` from its input.
+///
+/// RFC 6350 §6.2.2: the components `additional`/`prefix`/`suffix` are
+/// **comma-separated lists**, so the comma is a *separator* and must **not** be
+/// escaped, while each list item is escaped as text (RFC 6350 §3.4). The
+/// family/given components are single values and are escaped whole.
 fn render_name(input: &StructuredNameInput) -> Result<String, ApiError> {
+    let family = validate_value(&opt_str(&input.family), "name.family", MAX_TEXT_LEN)?;
+    let given = validate_value(&opt_str(&input.given), "name.given", MAX_TEXT_LEN)?;
     let components = vec![
-        validate_value(&opt_str(&input.family), "name.family", MAX_TEXT_LEN)?,
-        validate_value(&opt_str(&input.given), "name.given", MAX_TEXT_LEN)?,
+        escape_text_value(&family),
+        escape_text_value(&given),
         join_name_list(&input.additional, "name.additional")?,
         join_name_list(&input.prefix, "name.prefix")?,
         join_name_list(&input.suffix, "name.suffix")?,
     ];
-    let line = render_structured_property("N", &components, &[], None);
+    let line = render_structured_property_preescaped("N", &components, &[], None);
     if line.is_empty() {
         return Err(invalid_parameters("name"));
     }
     Ok(line)
 }
 
-/// Join a comma-separated name sub-list (e.g. `additional`), validating each.
+/// Join a comma-separated name sub-list (e.g. `additional`), validating each
+/// item.
+///
+/// Each item is escaped with [`escape_text_value`] and the items are joined with
+/// `,` **unescaped**: the comma is the list separator (RFC 6350 §6.2.2), not a
+/// value character. Escaping it (as a plain structured component would) would
+/// emit `Dr.\,Prof.`, which is not conformant.
 fn join_name_list(values: &Option<Vec<String>>, field: &str) -> Result<String, ApiError> {
     let Some(values) = values else {
         return Ok(String::new());
@@ -1007,7 +1050,11 @@ fn join_name_list(values: &Option<Vec<String>>, field: &str) -> Result<String, A
         .iter()
         .map(|value| validate_value(value, field, MAX_TEXT_LEN))
         .collect::<Result<_, _>>()?;
-    Ok(validated.join(","))
+    Ok(validated
+        .iter()
+        .map(|value| escape_text_value(value))
+        .collect::<Vec<_>>()
+        .join(","))
 }
 
 /// Render `GENDER` (`sex;identity`), rejecting an empty or out-of-range sex.
@@ -1317,5 +1364,58 @@ mod tests {
             ..UpdateContactRequest::default()
         };
         assert!(!with_note.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // FIX-1 — sub-listas del `N` (separador `,` sin escapar)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_name_escapes_list_items_but_not_the_separator() {
+        let input = StructuredNameInput {
+            family: Some("Lovelace".to_string()),
+            given: Some("Ada".to_string()),
+            additional: Some(vec!["Byron".to_string(), "King".to_string()]),
+            prefix: Some(vec!["Dr.".to_string(), "Prof.".to_string()]),
+            suffix: Some(vec!["Jr.".to_string(), "PhD".to_string()]),
+        };
+
+        assert_eq!(
+            render_name(&input).expect("render"),
+            "N:Lovelace;Ada;Byron,King;Dr.,Prof.;Jr.,PhD"
+        );
+    }
+
+    #[test]
+    fn render_name_escapes_each_list_item_inside() {
+        // Un carácter reservado dentro de un ítem sí se escapa (`;` -> `\;`),
+        // pero el separador `,` de la sub-lista no.
+        let input = StructuredNameInput {
+            prefix: Some(vec!["Dr.;X".to_string(), "Prof.".to_string()]),
+            ..StructuredNameInput::default()
+        };
+
+        assert_eq!(render_name(&input).expect("render"), "N:;;;Dr.\\;X,Prof.;");
+    }
+
+    #[test]
+    fn render_name_sub_lists_round_trip_through_the_parser() {
+        let input = StructuredNameInput {
+            family: Some("Lovelace".to_string()),
+            given: Some("Ada".to_string()),
+            additional: Some(vec!["Byron".to_string(), "King".to_string()]),
+            prefix: Some(vec!["Dr.".to_string(), "Prof.".to_string()]),
+            suffix: Some(vec!["PhD".to_string()]),
+        };
+        let line = render_name(&input).expect("render");
+        let payload = format!(
+            "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u@oxidav\r\nFN:Ada\r\n{line}\r\nEND:VCARD\r\n"
+        );
+
+        let projection = project_card(&payload).expect("project");
+        let name = projection.name.expect("name");
+        assert_eq!(name.additional, vec!["Byron", "King"]);
+        assert_eq!(name.prefix, vec!["Dr.", "Prof."]);
+        assert_eq!(name.suffix, vec!["PhD"]);
     }
 }

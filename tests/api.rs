@@ -19,6 +19,7 @@ use oxidav::db::init_pool;
 use oxidav::db::models::{NewCalendarObject, NewCardObject};
 use oxidav::db::{
     get_calendar_object, get_card_object, insert_calendar_object, insert_card_object,
+    list_card_objects,
 };
 use oxidav::router::{AppState, build_router, offline_pool};
 use serde_json::{Value, json};
@@ -2773,6 +2774,7 @@ async fn assert_columns_agree(env: &TestEnv, collection_id: &str, uid: &str) {
         .expect("read card")
         .expect("card exists");
     let parsed = parse_vcf(&row.raw_payload).expect("payload parses");
+    assert_eq!(row.uid, parsed.uid);
     assert_eq!(row.fn_.as_deref(), Some(parsed.fn_.as_str()));
     assert_eq!(row.email, parsed.email);
     assert_eq!(row.phone, parsed.phone);
@@ -3221,6 +3223,30 @@ async fn new_field_validation_rejects_with_400() {
             json!({ "fn": "Ada", "addresses": [ { "street": "a\u{0007}b" } ] }),
         ),
         (
+            "control char in urls",
+            json!({ "fn": "Ada", "urls": ["https://x/\u{0007}"] }),
+        ),
+        (
+            "control char in geos",
+            json!({ "fn": "Ada", "geos": ["geo:1,2\u{0007}"] }),
+        ),
+        (
+            "control char in timezones",
+            json!({ "fn": "Ada", "timezones": ["America/New_York\u{0007}"] }),
+        ),
+        (
+            "control char in name family",
+            json!({ "fn": "Ada", "name": { "family": "a\u{0007}b" } }),
+        ),
+        (
+            "control char in name prefix",
+            json!({ "fn": "Ada", "name": { "prefix": ["Dr.\u{0007}"] } }),
+        ),
+        (
+            "control char in gender identity",
+            json!({ "fn": "Ada", "gender": { "sex": "F", "identity": "a\u{0007}b" } }),
+        ),
+        (
             "overlong birthday",
             json!({ "fn": "Ada", "birthday": "x".repeat(1000) }),
         ),
@@ -3390,4 +3416,263 @@ async fn import_rejects_a_payload_without_cards() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "garbage import -> {value}");
     assert_eq!(value["error"]["code"], "validation");
     assert!(value["error"]["message"].is_string());
+}
+
+/// FIX-2 — dos tarjetas con el **mismo** `uid` en un fichero: `409` y **cero**
+/// filas escritas (la importación no es parcial).
+#[tokio::test]
+async fn import_rejects_duplicate_uids_within_the_file() {
+    let env = TestEnv::new("f22-import-dup").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let uri = format!("/api/v1/collections/{cid}/contacts/import");
+
+    let file = format!(
+        "{}{}",
+        plain_card("dup@oxidav", "First"),
+        plain_card("dup@oxidav", "Second"),
+    );
+
+    let (status, value) = env
+        .call_body(
+            Method::POST,
+            &uri,
+            Some(&token),
+            "text/vcard",
+            file.into_bytes(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "duplicate import -> {value}");
+    assert_eq!(value["error"]["code"], "conflict");
+
+    let rows = list_card_objects(&env.pool, &cid).await.expect("list");
+    assert_eq!(rows.len(), 0, "a rejected import must write nothing");
+}
+
+/// FIX-2 — un `uid` que ya existe en la colección: `409` y **cero** filas
+/// nuevas (ni siquiera las tarjetas válidas que lo preceden).
+#[tokio::test]
+async fn import_rejects_an_existing_uid_without_writing() {
+    let env = TestEnv::new("f22-import-existing").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let uri = format!("/api/v1/collections/{cid}/contacts/import");
+
+    seed_card(
+        &env,
+        &cid,
+        "card-taken",
+        "taken@oxidav",
+        &plain_card("taken@oxidav", "Taken"),
+    )
+    .await;
+
+    let file = format!(
+        "{}{}",
+        plain_card("fresh@oxidav", "Fresh"),
+        plain_card("taken@oxidav", "Clash"),
+    );
+
+    let (status, value) = env
+        .call_body(
+            Method::POST,
+            &uri,
+            Some(&token),
+            "text/vcard",
+            file.into_bytes(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "existing uid -> {value}");
+    assert_eq!(value["error"]["code"], "conflict");
+
+    let rows = list_card_objects(&env.pool, &cid).await.expect("list");
+    assert_eq!(rows.len(), 1, "only the seeded card must remain");
+    assert!(
+        get_card_object(&env.pool, &cid, "fresh@oxidav")
+            .await
+            .expect("get")
+            .is_none(),
+        "no partial import: the fresh card must not be stored"
+    );
+}
+
+/// FIX-2 — el camino feliz de tres tarjetas sigue siendo `201` con las tres.
+#[tokio::test]
+async fn import_three_cards_is_atomic_and_created() {
+    let env = TestEnv::new("f22-import-three").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let uri = format!("/api/v1/collections/{cid}/contacts/import");
+
+    let file = format!(
+        "{}{}{}",
+        plain_card("one@oxidav", "One"),
+        plain_card("two@oxidav", "Two"),
+        plain_card("three@oxidav", "Three"),
+    );
+
+    let (status, value) = env
+        .call_body(
+            Method::POST,
+            &uri,
+            Some(&token),
+            "text/vcard",
+            file.into_bytes(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "import failed: {value}");
+    assert_eq!(value.as_array().map(Vec::len), Some(3));
+
+    let rows = list_card_objects(&env.pool, &cid).await.expect("list");
+    assert_eq!(rows.len(), 3, "all three cards must be stored");
+}
+
+/// FIX-3 — la importación persiste el `uid` **parseado** (desescapado), no el
+/// crudo: `UID:a\,b` deja la columna igual que `parse_vcf(payload).uid`.
+#[tokio::test]
+async fn import_persists_the_parsed_uid() {
+    let env = TestEnv::new("f22-import-uid").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let uri = format!("/api/v1/collections/{cid}/contacts/import");
+
+    let card = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:a\\,b\r\nFN:Comma Uid\r\nEND:VCARD\r\n";
+    let parsed = parse_vcf(card).expect("parse");
+    assert_eq!(parsed.uid, "a,b", "the parser unescapes the comma");
+
+    let (status, value) = env
+        .call_body(
+            Method::POST,
+            &uri,
+            Some(&token),
+            "text/vcard",
+            card.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "import failed: {value}");
+
+    let row = get_card_object(&env.pool, &cid, &parsed.uid)
+        .await
+        .expect("get")
+        .expect("row exists");
+    assert_eq!(row.uid, parse_vcf(&row.raw_payload).expect("reparse").uid);
+    assert_eq!(row.uid, "a,b");
+    assert_columns_agree(&env, &cid, &parsed.uid).await;
+}
+
+/// FIX-3 — un `UID:a\Nb` (que desescapa a un salto de línea real) → `400` y
+/// **ninguna** fila escrita.
+#[tokio::test]
+async fn import_rejects_a_uid_that_unescapes_to_a_newline() {
+    let env = TestEnv::new("f22-import-uid-nl").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let uri = format!("/api/v1/collections/{cid}/contacts/import");
+
+    let card = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:a\\Nb\r\nFN:Newline Uid\r\nEND:VCARD\r\n";
+    assert!(
+        parse_vcf(card).expect("parse").uid.contains('\n'),
+        "the parser turns \\N into a real line feed"
+    );
+
+    let (status, value) = env
+        .call_body(
+            Method::POST,
+            &uri,
+            Some(&token),
+            "text/vcard",
+            card.as_bytes().to_vec(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "newline uid -> {value}");
+    assert_eq!(value["error"]["code"], "validation");
+
+    let rows = list_card_objects(&env.pool, &cid).await.expect("list");
+    assert_eq!(rows.len(), 0, "no row must be written for an invalid uid");
+}
+
+/// FIX-3 — la creación persiste el `uid` **parseado** y rechaza el que desescapa
+/// a un salto de línea.
+#[tokio::test]
+async fn create_persists_the_parsed_uid() {
+    let env = TestEnv::new("f22-create-uid").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let base = format!("/api/v1/collections/{cid}/contacts");
+
+    // JSON `"a\\,b"` is the value `a\,b`, which the parser unescapes to `a,b`.
+    let (status, created) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({ "fn": "Comma", "uid": "a\\,b" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(created["uid"], "a,b");
+
+    let row = get_card_object(&env.pool, &cid, "a,b")
+        .await
+        .expect("get")
+        .expect("row exists");
+    assert_eq!(row.uid, parse_vcf(&row.raw_payload).expect("reparse").uid);
+
+    // A uid that unescapes to a real line feed is a `400`, and nothing is stored.
+    let (status, value) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({ "fn": "Newline", "uid": "a\\Nb" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "newline uid -> {value}");
+    assert_eq!(value["error"]["code"], "validation");
+}
+
+/// FIX-1 — las sub-listas del `N` separan por `,` sin escapar y round-trip.
+#[tokio::test]
+async fn name_sub_lists_are_comma_separated_and_round_trip() {
+    let env = TestEnv::new("f22-name-lists").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let base = format!("/api/v1/collections/{cid}/contacts");
+
+    let (status, created) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({
+                "fn": "Ada Lovelace",
+                "name": {
+                    "family": "Lovelace",
+                    "given": "Ada",
+                    "additional": ["Byron", "King"],
+                    "prefix": ["Dr.", "Prof."],
+                    "suffix": ["Jr.", "PhD"],
+                },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    let uid = created["uid"].as_str().expect("uid").to_string();
+
+    let raw = stored_raw(&env, &cid, &uid).await;
+    assert!(
+        raw.contains("N:Lovelace;Ada;Byron,King;Dr.,Prof.;Jr.,PhD\r\n"),
+        "sub-lists must be comma-separated without escaping: {raw}"
+    );
+    assert!(
+        !raw.contains("Dr.\\,Prof."),
+        "the list separator must not be escaped: {raw}"
+    );
+
+    let uri = format!("{base}/{uid}");
+    let (status, d) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "detail failed: {d}");
+    assert_eq!(d["name"]["additional"], json!(["Byron", "King"]));
+    assert_eq!(d["name"]["prefix"], json!(["Dr.", "Prof."]));
+    assert_eq!(d["name"]["suffix"], json!(["Jr.", "PhD"]));
 }
