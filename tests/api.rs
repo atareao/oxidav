@@ -2999,6 +2999,201 @@ async fn patch_with_an_empty_array_deletes_the_property() {
     assert!(!raw.contains("TEL"), "a TEL survived: {raw}");
 }
 
+/// A card carrying one occurrence of every structured/scalar property the
+/// "replace with nothing deletes" contract can remove, with a marker `NOTE` and
+/// the `FN` last so the merge can move a replacement to the end.
+fn deletable_card() -> String {
+    [
+        "BEGIN:VCARD",
+        "VERSION:4.0",
+        "UID:delete-uid@oxidav",
+        "N:Lovelace;Ada;;;",
+        "GENDER:F;female",
+        "BDAY:--0203",
+        "ANNIVERSARY:20100101",
+        "NOTE:keep me byte for byte",
+        "FN:Ada Lovelace",
+        "END:VCARD",
+    ]
+    .join("\r\n")
+        + "\r\n"
+}
+
+/// Decisión 7 (extendida) — un `gender` presente y **totalmente vacío** borra el
+/// `GENDER`; el resto del payload sigue byte a byte.
+#[tokio::test]
+async fn patch_with_an_empty_gender_deletes_the_property() {
+    let env = TestEnv::new("f22-delete-gender").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    let original = deletable_card();
+    let expected = original.replace("GENDER:F;female\r\n", "");
+    assert_ne!(original, expected, "the seed must carry a GENDER");
+
+    // Both encodings of "totally empty": an empty object and explicit nulls.
+    for (uid, body) in [
+        ("delete-gender-a@oxidav", json!({ "gender": {} })),
+        (
+            "delete-gender-b@oxidav",
+            json!({ "gender": { "sex": null, "identity": null } }),
+        ),
+    ] {
+        let card = original.replace("delete-uid@oxidav", uid);
+        let expected_card = expected.replace("delete-uid@oxidav", uid);
+        seed_card(&env, &cid, &format!("seed-{uid}"), uid, &card).await;
+
+        let uri = format!("/api/v1/collections/{cid}/contacts/{uid}");
+        let (status, body_out) = env
+            .call(Method::PATCH, &uri, Some(&token), Some(body))
+            .await;
+        assert_eq!(status, StatusCode::OK, "patch failed: {body_out}");
+
+        let raw = stored_raw(&env, &cid, uid).await;
+        assert!(!raw.contains("GENDER"), "GENDER survived: {raw}");
+        assert_eq!(raw, expected_card, "the rest of the payload changed");
+    }
+}
+
+/// Decisión 7 (extendida) — un `name` presente y **totalmente vacío** borra el
+/// `N`; el resto del payload sigue byte a byte.
+#[tokio::test]
+async fn patch_with_an_empty_name_deletes_the_property() {
+    let env = TestEnv::new("f22-delete-name").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    let original = deletable_card();
+    let expected = original.replace("N:Lovelace;Ada;;;\r\n", "");
+    assert_ne!(original, expected, "the seed must carry an N");
+    seed_card(&env, &cid, "seed-name", "delete-uid@oxidav", &original).await;
+
+    let uri = format!("/api/v1/collections/{cid}/contacts/delete-uid@oxidav");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "name": {} })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let raw = stored_raw(&env, &cid, "delete-uid@oxidav").await;
+    assert!(!raw.contains("N:Lovelace"), "N survived: {raw}");
+    assert_eq!(raw, expected, "the rest of the payload changed");
+}
+
+/// Decisión 7 (extendida) — un `birthday` vacío tras `trim` borra el `BDAY`; el
+/// resto del payload sigue byte a byte.
+#[tokio::test]
+async fn patch_with_a_blank_birthday_deletes_the_property() {
+    let env = TestEnv::new("f22-delete-bday").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    let original = deletable_card();
+    let expected = original.replace("BDAY:--0203\r\n", "");
+    assert_ne!(original, expected, "the seed must carry a BDAY");
+    seed_card(&env, &cid, "seed-bday", "delete-uid@oxidav", &original).await;
+
+    let uri = format!("/api/v1/collections/{cid}/contacts/delete-uid@oxidav");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "birthday": "  " })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let raw = stored_raw(&env, &cid, "delete-uid@oxidav").await;
+    assert!(!raw.contains("BDAY"), "BDAY survived: {raw}");
+    assert_eq!(raw, expected, "the rest of the payload changed");
+}
+
+/// Decisión 7 (extendida) — un `anniversary` vacío tras `trim` borra el
+/// `ANNIVERSARY`; el resto del payload sigue byte a byte.
+#[tokio::test]
+async fn patch_with_a_blank_anniversary_deletes_the_property() {
+    let env = TestEnv::new("f22-delete-anniv").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    let original = deletable_card();
+    let expected = original.replace("ANNIVERSARY:20100101\r\n", "");
+    assert_ne!(original, expected, "the seed must carry an ANNIVERSARY");
+    seed_card(&env, &cid, "seed-anniv", "delete-uid@oxidav", &original).await;
+
+    let uri = format!("/api/v1/collections/{cid}/contacts/delete-uid@oxidav");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "anniversary": "" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let raw = stored_raw(&env, &cid, "delete-uid@oxidav").await;
+    assert!(!raw.contains("ANNIVERSARY"), "ANNIVERSARY survived: {raw}");
+    assert_eq!(raw, expected, "the rest of the payload changed");
+}
+
+/// Decisión 7 (control) — un `gender` **parcialmente** relleno **reemplaza** la
+/// línea (no la borra).
+#[tokio::test]
+async fn patch_with_a_partial_gender_replaces_the_property() {
+    let env = TestEnv::new("f22-partial-gender").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    let original = deletable_card();
+    seed_card(&env, &cid, "seed-partial", "delete-uid@oxidav", &original).await;
+
+    let uri = format!("/api/v1/collections/{cid}/contacts/delete-uid@oxidav");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "gender": { "sex": "M", "identity": null } })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    // The old `GENDER` line is gone from its position; the replacement is
+    // inserted just before the terminator (`FN` is last). Every other line keeps
+    // its position byte-for-byte.
+    let expected = [
+        "BEGIN:VCARD",
+        "VERSION:4.0",
+        "UID:delete-uid@oxidav",
+        "N:Lovelace;Ada;;;",
+        "BDAY:--0203",
+        "ANNIVERSARY:20100101",
+        "NOTE:keep me byte for byte",
+        "FN:Ada Lovelace",
+        "GENDER:M",
+        "END:VCARD",
+    ]
+    .join("\r\n")
+        + "\r\n";
+
+    let raw = stored_raw(&env, &cid, "delete-uid@oxidav").await;
+    assert!(
+        !raw.contains("GENDER:F;female"),
+        "the old GENDER survived: {raw}"
+    );
+    assert!(
+        raw.contains("GENDER:M"),
+        "the replacement is missing: {raw}"
+    );
+    assert_eq!(raw, expected, "the payload does not match the replacement");
+}
+
 /// Decisión 7 — una propiedad ausente del `PATCH` no se toca.
 #[tokio::test]
 async fn patch_leaves_absent_properties_alone() {

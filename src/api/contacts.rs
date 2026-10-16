@@ -30,6 +30,13 @@
 //! array (`[]`) **deletes** it. The four legacy scalars (`fn`, `email`, `phone`,
 //! `organization`) keep their old contract (`""` clears, absent leaves alone); a
 //! request carrying both a legacy scalar and its array counterpart is a `400`.
+//! "Replacing with nothing" also deletes a **structured**/free-text property
+//! modelled by an input object: a totally empty `name` (`{}`, or every one of its
+//! five components blank) removes `N`, a totally empty `gender`
+//! (`{sex: null, identity: null}` or `{}`) removes `GENDER`, and a blank
+//! `birthday`/`anniversary` (`""` after trim) removes `BDAY`/`ANNIVERSARY`. A
+//! **partially** filled object is a normal replacement (`fn` is mandatory and is
+//! never deletable).
 //!
 //! # Persistence
 //!
@@ -802,25 +809,44 @@ fn build_edits(fields: &WritableFields<'_>) -> Result<Vec<PropertyEdit>, ApiErro
             render_text_lines("NICKNAME", values, MAX_TEXT_LEN)?,
         );
     }
+    // A present-but-totally-empty structured `N` **deletes** the property,
+    // coherently with the empty arrays (`tels: []`) and the legacy scalars
+    // (`email: ""`): "present replaces; replacing with nothing deletes".
     if let Some(name) = fields.name {
-        push_edit(&mut edits, "N", vec![render_name(name)?]);
+        let lines = if name_is_empty(name) {
+            Vec::new()
+        } else {
+            vec![render_name(name)?]
+        };
+        push_edit(&mut edits, "N", lines);
     }
+    // `birthday`/`anniversary` are free-text scalars: `""` (blank after trim)
+    // deletes, mirroring the legacy scalar contract.
     if let Some(value) = fields.birthday {
-        push_edit(
-            &mut edits,
-            "BDAY",
-            vec![text_line("BDAY", value, MAX_TEXT_LEN)?],
-        );
+        let lines = if value.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![text_line("BDAY", value, MAX_TEXT_LEN)?]
+        };
+        push_edit(&mut edits, "BDAY", lines);
     }
     if let Some(value) = fields.anniversary {
-        push_edit(
-            &mut edits,
-            "ANNIVERSARY",
-            vec![text_line("ANNIVERSARY", value, MAX_TEXT_LEN)?],
-        );
+        let lines = if value.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![text_line("ANNIVERSARY", value, MAX_TEXT_LEN)?]
+        };
+        push_edit(&mut edits, "ANNIVERSARY", lines);
     }
+    // A present-but-totally-empty `gender` **deletes** the property; a partially
+    // filled one is a normal replacement.
     if let Some(gender) = fields.gender {
-        push_edit(&mut edits, "GENDER", vec![render_gender(gender)?]);
+        let lines = if gender_is_empty(gender) {
+            Vec::new()
+        } else {
+            vec![render_gender(gender)?]
+        };
+        push_edit(&mut edits, "GENDER", lines);
     }
     if let Some(values) = fields.impps {
         push_edit(&mut edits, "IMPP", render_labelled("IMPP", values, true)?);
@@ -1141,6 +1167,46 @@ fn render_addresses(values: &[AddressInput]) -> Result<Vec<String>, ApiError> {
 /// A `None` component becomes an empty string.
 fn opt_str(value: &Option<String>) -> String {
     value.clone().unwrap_or_default()
+}
+
+/// Whether a structured `N` input is **totally** empty: every one of its five
+/// components is absent, blank, or an empty/blank-only list.
+///
+/// A totally empty `N` deletes the property; any non-blank component makes it a
+/// replacement (decision 7, extended to the structured fields). This is the
+/// structured counterpart of the empty-array and blank-scalar deletions.
+fn name_is_empty(input: &StructuredNameInput) -> bool {
+    blank_component(&input.family)
+        && blank_component(&input.given)
+        && blank_component_list(&input.additional)
+        && blank_component_list(&input.prefix)
+        && blank_component_list(&input.suffix)
+}
+
+/// Whether a `GENDER` input is **totally** empty: neither `sex` nor `identity`
+/// carries a non-blank value.
+///
+/// A totally empty `gender` deletes the property; a partially filled one (a
+/// `sex` or an `identity`, or both) is a normal replacement.
+fn gender_is_empty(input: &GenderInput) -> bool {
+    is_blank(input.sex.as_deref()) && is_blank(input.identity.as_deref())
+}
+
+/// A single name component is blank when absent or empty after trim.
+fn blank_component(value: &Option<String>) -> bool {
+    is_blank(value.as_deref())
+}
+
+/// A name sub-list is blank when absent, empty, or holds only blank items.
+fn blank_component_list(values: &Option<Vec<String>>) -> bool {
+    values
+        .as_ref()
+        .is_none_or(|items| items.iter().all(|item| item.trim().is_empty()))
+}
+
+/// A `&str` is blank when it is absent or empty after trim.
+fn is_blank(value: Option<&str>) -> bool {
+    value.is_none_or(|value| value.trim().is_empty())
 }
 
 /// A `400` for a group holding more than [`MAX_VALUES`] values.
