@@ -789,8 +789,10 @@ fn address(prop: &vcard4::property::AddressProperty) -> Address {
 /// `PHOTO`: an external URI, or embedded base64 rendered as a `data:` URI.
 ///
 /// The media type comes from the raw `TYPE` token (`JPEG` → `image/jpeg`) —
-/// never from its `Display`, which would yield `X-JPEG` — and falls back to
-/// `None` when the token is not a known media type.
+/// never from its `Display`, which would yield `X-JPEG`. When the token is
+/// absent or not a known media type it falls back to
+/// `application/octet-stream`: an empty media type in `data:;base64,…` means
+/// `text/plain` (RFC 2397), so the UI would mistake an image for text.
 fn media_value(prop: &TextOrUriProperty) -> MediaValue {
     match prop {
         TextOrUriProperty::Uri(uri) => MediaValue::Uri(uri.value.to_string()),
@@ -800,15 +802,11 @@ fn media_value(prop: &TextOrUriProperty) -> MediaValue {
                 .and_then(|params| params.types.as_ref())
                 .into_iter()
                 .flatten()
-                .find_map(media_type_of);
-            let data_uri = match &media_type {
-                Some(media_type) => {
-                    format!("data:{media_type};base64,{}", text.value)
-                }
-                None => format!("data:;base64,{}", text.value),
-            };
+                .find_map(media_type_of)
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let data_uri = format!("data:{media_type};base64,{}", text.value);
             MediaValue::Data {
-                media_type,
+                media_type: Some(media_type),
                 data_uri,
             }
         }
@@ -1556,6 +1554,75 @@ mod tests {
 
         assert_eq!(projection.tels[0].types, vec!["internet".to_string()]);
         assert_eq!(projection.emails[0].types, vec!["INTERNET".to_string()]);
+    }
+
+    #[test]
+    fn projects_known_media_types_from_the_raw_extension_token() {
+        // El media type sale del token crudo de `TypeParameter::Extension`
+        // (`PNG`), no de su `Display` (que imprimiría `X-PNG`).
+        let raw = card(
+            "UID:media@oxidav\r\nFN:Media\r\n\
+             PHOTO;ENCODING=b;TYPE=PNG:iVBORw0KGgo=\r\n\
+             PHOTO;ENCODING=b;TYPE=gif:R0lGODlh\r\n",
+        );
+
+        let projection = project_card(&raw).expect("project");
+
+        assert_eq!(
+            projection.photos,
+            vec![
+                MediaValue::Data {
+                    media_type: Some("image/png".to_string()),
+                    data_uri: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                },
+                MediaValue::Data {
+                    media_type: Some("image/gif".to_string()),
+                    data_uri: "data:image/gif;base64,R0lGODlh".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn projects_an_embedded_media_with_an_unknown_type_as_octet_stream() {
+        // Un `TYPE` que no es un media type conocido no puede quedar en un
+        // `data:` URI con media type vacío: por RFC 2397 un `data:;base64,…`
+        // significa `text/plain`, y la UI creería que la imagen es texto.
+        let raw = card(
+            "UID:media-unknown@oxidav\r\nFN:Media\r\n\
+             PHOTO;ENCODING=b;TYPE=qqq:/9j/4AAQSkZJRgABAQAAAQ==\r\n",
+        );
+
+        let projection = project_card(&raw).expect("project");
+
+        assert_eq!(
+            projection.photos,
+            vec![MediaValue::Data {
+                media_type: Some("application/octet-stream".to_string()),
+                data_uri: "data:application/octet-stream;base64,/9j/4AAQSkZJRgABAQAAAQ=="
+                    .to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn projects_an_embedded_media_without_a_type_as_octet_stream() {
+        // Ausencia de `TYPE`: mismo caso desconocido, mismo fallback.
+        let raw = card(
+            "UID:media-notype@oxidav\r\nFN:Media\r\n\
+             PHOTO;ENCODING=b:/9j/4AAQSkZJRgABAQAAAQ==\r\n",
+        );
+
+        let projection = project_card(&raw).expect("project");
+
+        assert_eq!(
+            projection.photos,
+            vec![MediaValue::Data {
+                media_type: Some("application/octet-stream".to_string()),
+                data_uri: "data:application/octet-stream;base64,/9j/4AAQSkZJRgABAQAAAQ=="
+                    .to_string(),
+            }]
+        );
     }
 
     #[test]

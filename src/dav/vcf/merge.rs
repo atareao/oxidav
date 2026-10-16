@@ -692,6 +692,114 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // render_list_property
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_list_property_joins_elements_with_commas() {
+        // El separador de la lista es `,` y **no** se escapa.
+        assert_eq!(
+            render_list_property(
+                "CATEGORIES",
+                &list(&["Friends", "Family", "Work"]),
+                &[],
+                None
+            ),
+            "CATEGORIES:Friends,Family,Work"
+        );
+    }
+
+    #[test]
+    fn render_list_property_escapes_special_characters_inside_elements() {
+        // Dentro de cada elemento se aplica el escape de texto completo (RFC 6350
+        // §3.4): `\`, `,` y `;` ganan una barra y el salto de línea se vuelve
+        // `\n`. Una coma interna así no se confunde con el separador.
+        assert_eq!(
+            render_list_property(
+                "CATEGORIES",
+                &list(&["a,b", "c;d", "e\\f", "g\nh"]),
+                &[],
+                None
+            ),
+            "CATEGORIES:a\\,b,c\\;d,e\\\\f,g\\nh"
+        );
+    }
+
+    #[test]
+    fn render_list_property_with_a_single_element_omits_the_separator() {
+        assert_eq!(
+            render_list_property("CATEGORIES", &list(&["Solo"]), &[], None),
+            "CATEGORIES:Solo"
+        );
+    }
+
+    #[test]
+    fn render_list_property_with_an_empty_list_renders_an_empty_value() {
+        // Hoy una lista vacía no se rechaza: se emite la propiedad con el valor
+        // vacío (`CATEGORIES:`), que es una línea sintácticamente válida que
+        // vuelve a parsear como cero elementos. Se fija aquí para no romperlo por
+        // accidente.
+        assert_eq!(
+            render_list_property("CATEGORIES", &[], &[], None),
+            "CATEGORIES:"
+        );
+    }
+
+    #[test]
+    fn render_list_property_emits_type_and_pref_parameters() {
+        assert_eq!(
+            render_list_property("CATEGORIES", &list(&["Friends"]), &list(&["work"]), Some(2)),
+            "CATEGORIES;TYPE=work;PREF=2:Friends"
+        );
+    }
+
+    #[test]
+    fn render_list_property_rejects_invalid_parameters() {
+        // Mismo contrato que los otros `render_*`: parámetros inválidos → cadena
+        // vacía (rechazar, no sanear).
+        assert_eq!(
+            render_list_property("CATEGORIES", &list(&["x"]), &list(&["a b"]), None),
+            ""
+        );
+        assert_eq!(
+            render_list_property("CATEGORIES", &list(&["x"]), &[], Some(0)),
+            ""
+        );
+    }
+
+    #[test]
+    fn render_list_property_result_parses_back() {
+        // El resultado del merge vuelve a parsear como una `CATEGORIES` de la
+        // crate y produce los mismos elementos. Los `;` y `\` internos se
+        // deshacen del escape correctamente.
+        //
+        // No se usa ningún elemento con `,` interna a propósito: el parser de la
+        // crate (`vcard4` 0.7.3) **divide primero por `,`** y luego deshace el
+        // escape, así que un `\,` no puede round-trip (lo partiría en dos
+        // elementos). La emisión sí lo escapa, por RFC 6350 §3.4; es el parser de
+        // la crate el que no lo respeta.
+        let raw = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u@oxidav\r\nFN:N\r\nEND:VCARD\r\n";
+        let line = render_list_property(
+            "CATEGORIES",
+            &list(&["Friends", "Work;Team", "a\\b"]),
+            &[],
+            None,
+        );
+        let edits = [PropertyEdit {
+            name: s("CATEGORIES"),
+            lines: vec![line],
+        }];
+
+        let merged = merge_properties(raw, &edits).expect("merge");
+        let projection = super::super::project_card(&merged).expect("project");
+
+        assert_eq!(
+            projection.categories,
+            vec![list(&["Friends", "Work;Team", "a\\b"])]
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Validación de parámetros (decisión 5: rechazar, no sanear)
     // -----------------------------------------------------------------------
 
