@@ -84,3 +84,41 @@ La visibilidad que cruce módulos pasa a `pub(super)`/`pub(crate)` — **nunca**
 ## Versionado
 
 Los commits son `refactor` → **patch** en `git-cliff`. No hay `feat`, así que si el refactor se entrega solo, la próxima versión es `0.3.2`, no `0.4.0`.
+
+---
+
+## Cierre (PLAN-024 completado)
+
+Los cuatro pasos se hicieron en cuatro commits, cada uno verificado antes del siguiente:
+
+```
+74c9800 📝 docs: añadir PLAN-024 (partir los ficheros grandes de F22)
+52569d8 ♻️ refactor: extraer la proyección a vcf/projection.rs (PLAN-024, paso 1)
+9721c94 ♻️ refactor: extraer la composición a vcf/build.rs (PLAN-024, paso 2)
+68cc22e ♻️ refactor: un solo parseo en project_card (PLAN-024, paso 3)
+f8ca2af ♻️ refactor: partir api/contacts.rs en mod/validate/edits (PLAN-024, paso 4)
+```
+
+### Resultado
+
+| Antes | Después |
+|---|---|
+| `src/dav/vcf/mod.rs` **1 737** | `mod.rs` **500** (parseo + pre-paso endurecido + primitivas de línea) <br> `build.rs` **239** (composición) <br> `projection.rs` **1 036** (vista tipada de lectura) |
+| `src/api/contacts.rs` **1 487** | `mod.rs` **628** (handlers, importación, mapeo de errores) <br> `validate.rs` **357** (validadores y topes) <br> `edits.rs` **548** (campo del DTO → propiedades de vCard) |
+| `src/dav/vcf/merge.rs` 1 196 | **sin tocar** (una responsabilidad clara) |
+
+### Verificación
+
+- **551 pasando / 0 fallando** y **298** en `--lib`, **idénticos antes y después de cada paso**.
+- **Cero tests perdidos**: los 76 de `vcf/` se reparten 13/5/9/49 y los 13 de `api/contacts/` en 2/8/3; las sumas no se mueven.
+- `cargo fmt --all --check` y `cargo clippy --all-targets --locked -- -D warnings` limpios; frontend **19 ficheros / 174 tests** verde (no se tocó).
+- **Rutas públicas intactas**: `diff` vacío en las referencias a `dav::vcf::` y a `contacts::` entre el commit base y el final.
+- **Movimiento puro comprobado**, no supuesto: la región movida de la proyección es **byte a byte idéntica** (560 líneas, con una sola diferencia: un enlace intra-doc que mentía y se corrigió); la de la composición difiere solo en la ruta al módulo `common` (un `super` más) y en el bloque `is_forbidden_char`, que se queda en `mod.rs` por mandato del plan; y el reparto de `contacts.rs` se validó por **multiconjunto de líneas**, explicando el 100 % de las diferencias (marcas `pub(super)`, declaraciones de módulo y reformateos de `rustfmt`).
+- **Un solo parseo** en `project_card`: las llamadas reales a `parse_loose` bajan de **2 a 1** (comprobado con `grep` contra el commit anterior).
+- **Prueba de humo end-to-end por HTTP real**, la misma que cerró F22: `POST …/contacts/import` **201**, `PATCH {"fn"}` **200**, y la foto, el `BDAY:--0203`, el `N` con sub-listas y las propiedades `X-` quedan **idénticos**; **cero panics** en el log del servidor.
+
+### Corrección de un dato del propio plan
+
+La tabla del objetivo afirmaba que el mayor fichero del repo era `src/dav/ics.rs` (1 108 líneas). **Es falso**: `src/auth/session.rs` tiene **2 014** y `src/dav/xml.rs` **1 499**, ambos mayores y ninguno tocado por F22. La afirmación venía repetida de las auditorías de cierre y este plan la heredó sin comprobarla; se retracta aquí.
+
+El refactor sigue justificado por sí mismo —los dos ficheros eran los que F22 había hecho crecer, y mezclaban parseo, composición, proyección, validación y edición—, pero la comparación estaba mal. `session.rs` y `xml.rs` quedan como **candidatos a un refactor propio**, con su plan y su verificación.
