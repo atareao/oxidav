@@ -5,9 +5,9 @@
 //! these tests exercise the real cookie authentication path end to end without
 //! an IdP (was: an in-memory RS256 key pair and a loopback JWKS server).
 
-use std::path::PathBuf;
+mod common;
+
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -89,18 +89,6 @@ fn state_with_auth_and_db(db: SqlitePool) -> AppState {
 // Collections test harness
 // ---------------------------------------------------------------------------
 
-static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A throwaway file-backed DSN under `/tmp/opencode` (never `data/oxidav.db`).
-fn temp_db_url(tag: &str) -> String {
-    let dir = PathBuf::from("/tmp/opencode/oxidav-tests");
-    std::fs::create_dir_all(&dir).expect("create temp test dir");
-    let n = DB_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("api-{tag}-{}-{n}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    format!("sqlite://{}", path.display())
-}
-
 /// A router plus its database and the enabling auth config (for minting
 /// session cookies).
 struct TestEnv {
@@ -111,7 +99,9 @@ struct TestEnv {
 
 impl TestEnv {
     async fn new(tag: &str) -> Self {
-        let pool = init_pool(&temp_db_url(tag)).await.expect("init_pool");
+        let pool = init_pool(&common::temp_db_url("api", tag))
+            .await
+            .expect("init_pool");
         let auth = test_auth_config();
         let app = build_router(AppState::new(
             test_config(),

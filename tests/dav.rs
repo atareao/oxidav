@@ -7,9 +7,9 @@
 //! (minted here with the real F05 code), so both authentication paths are
 //! exercised end to end (never mocked).
 
-use std::path::PathBuf;
+mod common;
+
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -24,20 +24,8 @@ use oxidav::router::{AppState, build_router};
 use sqlx::SqlitePool;
 use tower::ServiceExt;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// Shared HS256 secret for the test session cookies and the enabling config.
 const TEST_JWT_SECRET: &str = "dav-test-jwt-secret";
-
-/// A throwaway file-backed DSN under `/tmp/opencode` (never `data/oxidav.db`).
-fn temp_db_url(tag: &str) -> String {
-    let dir = PathBuf::from("/tmp/opencode/oxidav-tests");
-    std::fs::create_dir_all(&dir).expect("create temp test dir");
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("dav-{tag}-{}-{n}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    format!("sqlite://{}", path.display())
-}
 
 /// Base [`Config`] shared by every DAV test: auth disabled, no IdP wired.
 fn base_config() -> Config {
@@ -101,7 +89,9 @@ struct TestEnv {
 }
 
 async fn test_env(tag: &str) -> TestEnv {
-    let pool: SqlitePool = init_pool(&temp_db_url(tag)).await.expect("init_pool");
+    let pool: SqlitePool = init_pool(&common::temp_db_url("dav", tag))
+        .await
+        .expect("init_pool");
     let (_id, token) = create_app_token(&pool, "user-a", "dav client")
         .await
         .expect("create app token");
@@ -127,7 +117,9 @@ struct AuthEnv {
 }
 
 async fn auth_env(tag: &str) -> AuthEnv {
-    let pool: SqlitePool = init_pool(&temp_db_url(tag)).await.expect("init_pool");
+    let pool: SqlitePool = init_pool(&common::temp_db_url("dav", tag))
+        .await
+        .expect("init_pool");
     let (_id, token) = create_app_token(&pool, "user-a", "dav client")
         .await
         .expect("create app token");
