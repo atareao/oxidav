@@ -193,7 +193,8 @@ fn escape_into(out: &mut String, text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DavNs, local_name, namespace_of};
+    use super::super::DavNs;
+    use super::super::parse::{local_name, namespace_of};
     use super::*;
     use quick_xml::events::Event;
     use quick_xml::reader::NsReader;
