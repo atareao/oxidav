@@ -307,7 +307,8 @@ export function Contacts() {
             )
             closeModal()
             // El detalle cacheado quedó viejo tras la edición: se invalida para
-            // que reabrir (o seguir viendo) el contacto lo vuelva a pedir.
+            // que, si el usuario vuelve a abrir el contacto, las pestañas del
+            // Drawer muestren el valor recién guardado en vez del anterior.
             reloadDetail()
             message.success('Contacto actualizado')
           } catch (error) {
@@ -684,6 +685,11 @@ export function Contacts() {
         okText={editing === null ? 'Crear' : 'Guardar'}
         cancelText="Cancelar"
         confirmLoading={saving}
+        // Con el detalle de edición aún cargando el formulario no existe, así que
+        // Guardar no haría nada útil: se bloquea hasta tener los valores.
+        okButtonProps={{
+          disabled: editing !== null && (editDetailLoading || editDetail === null),
+        }}
         maskClosable={!saving}
         keyboard={!saving}
         onCancel={() => {

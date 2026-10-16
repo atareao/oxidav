@@ -2,8 +2,9 @@
  * TypeScript mirror of the backend REST DTOs (`src/api/dto.rs`).
  *
  * Kept deliberately independent from the persistence models: the SPA only ever
- * sees these clean shapes and never `raw_payload` (the composed `.ics`).
- * Timestamps are Unix epoch **milliseconds** (`i64` on the Rust side).
+ * sees these clean shapes and never `raw_payload` (the composed `.ics` for
+ * events, `.vcf` for contacts). Timestamps are Unix epoch **milliseconds**
+ * (`i64` on the Rust side).
  */
 
 /** Kind of a collection, as exposed over the API. */
@@ -299,8 +300,14 @@ export interface CreateContactInput {
  */
 export interface UpdateContactInput {
   fn?: string
+  /**
+   * Legacy scalar `EMAIL`. The form never uses it: mixing it with {@link emails}
+   * is a `400` (the server rejects both at once), so prefer the array forms.
+   */
   email?: string
+  /** Legacy scalar `TEL`. The form never uses it; see {@link email}. */
   phone?: string
+  /** Legacy scalar `ORG`. The form never uses it; see {@link email}. */
   organization?: string
   /** Structured `N`. */
   name?: StructuredName

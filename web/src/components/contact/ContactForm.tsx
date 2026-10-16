@@ -18,6 +18,7 @@
 
 import { Button, Card, Divider, Flex, Form, Input, InputNumber, Select, Space, Typography } from 'antd'
 import type { FormInstance } from 'antd'
+import { useEffect } from 'react'
 import type { ContactFormValues } from './contactFormValues'
 
 /** Alfabeto que acepta el servidor para un *token* `TYPE` (decisión 5). */
@@ -39,6 +40,21 @@ function validateTypes(_rule: unknown, value: string[] | undefined): Promise<voi
   }
   if (tokens.some((token) => !TYPE_PATTERN.test(token))) {
     return Promise.reject(new Error('Solo letras, números y guiones'))
+  }
+  return Promise.resolve()
+}
+
+/**
+ * Valida el `PREF` de una fila: un entero en `1..=100` o vacío. Sin esto el
+ * `<InputNumber>` solo *sugiere* el rango (con `min`/`max`) pero deja teclear
+ * `0` o `200`, que el servidor rechaza con `400`.
+ */
+function validatePref(_rule: unknown, value: number | null | undefined): Promise<void> {
+  if (value === null || value === undefined) {
+    return Promise.resolve()
+  }
+  if (!Number.isInteger(value) || value < 1 || value > 100) {
+    return Promise.reject(new Error('El PREF debe ser un número entre 1 y 100'))
   }
   return Promise.resolve()
 }
@@ -105,21 +121,27 @@ function LabelledValueList({
                     tokenSeparators={[',']}
                     options={typeOptions}
                     placeholder="work, home…"
-                    aria-label="Tipos"
+                    aria-label={`Tipos ${field.name + 1}`}
                   />
                 </Form.Item>
                 <Form.Item
                   name={[field.name, 'pref']}
                   label="PREF"
                   style={{ width: 96, marginBottom: 0 }}
+                  rules={[{ validator: validatePref }]}
                 >
-                  <InputNumber min={1} max={100} style={{ width: '100%' }} aria-label="PREF" />
+                  <InputNumber
+                    min={1}
+                    max={100}
+                    style={{ width: '100%' }}
+                    aria-label={`PREF ${field.name + 1}`}
+                  />
                 </Form.Item>
                 <Button
                   danger
                   type="text"
                   onClick={() => remove(field.name)}
-                  aria-label={`Quitar ${label}`}
+                  aria-label={`Quitar ${label} ${field.name + 1}`}
                 >
                   Quitar
                 </Button>
@@ -135,13 +157,19 @@ function LabelledValueList({
   )
 }
 
+/**
+ * Claves de {@link ContactFormValues} que son listas simples de texto; es lo
+ * único que {@link TagListField} puede editar.
+ */
+type TagListFieldName = 'nicknames' | 'geos' | 'timezones' | 'titles' | 'roles' | 'urls'
+
 /** Lista de texto simple (por ejemplo `NICKNAME`, `TITLE`, `URL`…). */
 function TagListField({
   name,
   label,
   placeholder,
 }: {
-  name: keyof ContactFormValues
+  name: TagListFieldName
   label: string
   placeholder?: string
 }) {
@@ -187,7 +215,12 @@ function GroupListField({
                 size="small"
                 title={`${entryLabel} ${field.name + 1}`}
                 extra={
-                  <Button danger type="link" onClick={() => remove(field.name)}>
+                  <Button
+                    danger
+                    type="link"
+                    onClick={() => remove(field.name)}
+                    aria-label={`Quitar ${entryLabel.toLowerCase()} ${field.name + 1}`}
+                  >
                     Quitar
                   </Button>
                 }
@@ -245,7 +278,12 @@ function AddressList() {
               size="small"
               title={`Dirección ${field.name + 1}`}
               extra={
-                <Button danger type="link" onClick={() => remove(field.name)}>
+                <Button
+                  danger
+                  type="link"
+                  onClick={() => remove(field.name)}
+                  aria-label={`Quitar dirección ${field.name + 1}`}
+                >
                   Quitar
                 </Button>
               }
@@ -293,11 +331,21 @@ function AddressList() {
                       tokenSeparators={[',']}
                       options={typeOptions}
                       placeholder="work, home…"
-                      aria-label="Tipos de la dirección"
+                      aria-label={`Tipos de la dirección ${field.name + 1}`}
                     />
                   </Form.Item>
-                  <Form.Item name={[field.name, 'pref']} label="PREF" style={{ width: 96, marginBottom: 0 }}>
-                    <InputNumber min={1} max={100} style={{ width: '100%' }} aria-label="PREF de la dirección" />
+                  <Form.Item
+                    name={[field.name, 'pref']}
+                    label="PREF"
+                    style={{ width: 96, marginBottom: 0 }}
+                    rules={[{ validator: validatePref }]}
+                  >
+                    <InputNumber
+                      min={1}
+                      max={100}
+                      style={{ width: '100%' }}
+                      aria-label={`PREF de la dirección ${field.name + 1}`}
+                    />
                   </Form.Item>
                 </Flex>
               </Flex>
@@ -343,6 +391,17 @@ function NotesField() {
 }
 
 export function ContactForm({ form, initialValues, onFinish }: ContactFormProps) {
+  // La instancia `form` es única por vista y la comparte el `<Modal>` (su `onOk`
+  // llama a `form.submit()`), así que sobrevive al remontaje por `key` del
+  // formulario. Su *store* conserva los valores del contacto anterior y Ant
+  // Design, al reinicializar, hace `merge(initialValues, store)`: el *store*
+  // gana, de modo que `initialValues` por sí solo no reemplaza nada. Hay que
+  // resetear explícitamente cuando cambian los valores del contacto para que el
+  // formulario muestre los del contacto nuevo, no los del anterior.
+  useEffect(() => {
+    form.resetFields()
+  }, [form, initialValues])
+
   return (
     <Form form={form} layout="vertical" onFinish={onFinish} initialValues={initialValues}>
       <Form.Item

@@ -2,9 +2,10 @@
  * Typed access to the F12 contact (card-object) REST endpoints
  * (`/api/v1/collections/{id}/contacts`).
  *
- * Mirrors {@link file://./events.ts}: the client never parses or produces
- * `.vcf` — it sends/consumes plain JSON and the backend composes the stored
- * vCard payload.
+ * Mirrors {@link file://./events.ts}: the client parses no `.vcf`. Reading and
+ * writing go through plain JSON DTOs and the backend composes the stored vCard
+ * payload; the **only** place the SPA emits vCard is the client-side export
+ * (`utils/vcf`, F22), which serialises the light listing fields.
  */
 
 import type {

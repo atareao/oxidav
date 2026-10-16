@@ -31,7 +31,7 @@ import {
   updateContact,
 } from '../services/contacts'
 import type { Collection, Contact, ContactDetail } from '../types/api'
-import { serializeContactsToVcf } from '../utils/vcf'
+import { MAX_FILE_BYTES, serializeContactsToVcf } from '../utils/vcf'
 import { Contacts } from './Contacts'
 
 vi.mock('../services/collections', () => ({
@@ -158,6 +158,34 @@ function renderContacts() {
 // restoring them after every test keeps the global `URL` from leaking mocks.
 const originalCreateObjectURL = URL.createObjectURL
 const originalRevokeObjectURL = URL.revokeObjectURL
+
+/**
+ * El `<Modal>` y el `<Drawer>` de Ant Design conviven en el DOM con
+ * `role="dialog"` cuando el primero aún está animando su salida
+ * (`ant-zoom-leave`), así que `screen.getByRole('dialog')` se vuelve ambiguo.
+ * Estos helpers acotan la consulta al contenedor concreto que necesita cada
+ * test en lugar de aflojarla.
+ */
+function drawer(): HTMLElement {
+  const root = document.querySelector<HTMLElement>('.ant-drawer')
+  if (root === null) {
+    throw new Error('No hay ningún Drawer montado')
+  }
+  return root
+}
+
+/**
+ * jsdom no dispara `transitionend`, por lo que la animación de salida del
+ * `Modal` (`ant-zoom-leave`) nunca termina y su nodo se queda en el DOM. Este
+ * helper emite el evento que un navegador real enviaría para que el `Modal` se
+ * desmonte de verdad (igual que un `Drawer`, que sí trae `motionDeadline`).
+ */
+function finishModalLeave(): void {
+  const el = document.querySelector<HTMLElement>('.ant-modal')
+  if (el !== null) {
+    fireEvent.transitionEnd(el)
+  }
+}
 
 describe('Contacts', () => {
   beforeEach(() => {
@@ -705,7 +733,7 @@ describe('Contacts', () => {
     await within(dialog).findByRole('textbox', { name: 'Nombre' })
 
     // Quitar la única fila deja el grupo vacío → `[]`, que es como se borra.
-    await user.click(within(dialog).getByRole('button', { name: 'Quitar Teléfono' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Quitar Teléfono 1' }))
     await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
 
     await waitFor(() =>
@@ -749,10 +777,10 @@ describe('Contacts', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Añadir teléfono' }))
     const row = await screen.findByTestId('contact-labelled-row')
     await user.type(within(row).getByRole('textbox', { name: 'Teléfono valor' }), '+34600000000')
-    const types = within(row).getByRole('combobox', { name: 'Tipos' })
+    const types = within(row).getByRole('combobox', { name: 'Tipos 1' })
     await user.click(types)
     await user.type(types, 'work{Enter}')
-    await user.type(within(row).getByRole('spinbutton', { name: 'PREF' }), '1')
+    await user.type(within(row).getByRole('spinbutton', { name: 'PREF 1' }), '1')
 
     await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
 
@@ -790,6 +818,176 @@ describe('Contacts', () => {
         emails: [{ value: 'grace@example.com', types: [], pref: null }],
       }),
     )
+  })
+
+  it('borra una dirección con «Quitar» enviando las restantes', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    vi.mocked(getContact).mockResolvedValue(
+      makeDetail({
+        uid: 'uid-1',
+        fn: 'Ada Lovelace',
+        addresses: [
+          {
+            po_box: null,
+            extended: null,
+            street: 'Calle 1',
+            locality: null,
+            region: null,
+            postal_code: null,
+            country: null,
+            label: null,
+            types: [],
+            pref: null,
+          },
+          {
+            po_box: null,
+            extended: null,
+            street: 'Calle 2',
+            locality: null,
+            region: null,
+            postal_code: null,
+            country: null,
+            label: null,
+            types: [],
+            pref: null,
+          },
+        ],
+      }),
+    )
+    vi.mocked(updateContact).mockResolvedValue(makeContact({ fn: 'Ada Lovelace' }))
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByRole('textbox', { name: 'Nombre' })
+
+    await user.click(within(dialog).getByRole('button', { name: 'Quitar dirección 2' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(addressBook.id, 'uid-1', {
+        addresses: [
+          {
+            po_box: null,
+            extended: null,
+            street: 'Calle 1',
+            locality: null,
+            region: null,
+            postal_code: null,
+            country: null,
+            label: null,
+            types: [],
+            pref: null,
+          },
+        ],
+      }),
+    )
+  })
+
+  it('rechaza un fichero de importación demasiado grande sin llamar al servidor', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([])
+
+    renderContacts()
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
+
+    // No se asigna un buffer de 5 MB real: se falsifica el tamaño del `File`.
+    const big = new File(['x'], 'grande.vcf', { type: 'text/vcard' })
+    Object.defineProperty(big, 'size', { value: MAX_FILE_BYTES + 1 })
+
+    fireEvent.change(screen.getByLabelText('Importar archivo .vcf'), {
+      target: { files: [big] },
+    })
+
+    await waitFor(() =>
+      expect(messageError).toHaveBeenCalledWith('El archivo es demasiado grande (máximo 5 MB)'),
+    )
+    expect(importContacts).not.toHaveBeenCalled()
+  })
+
+  it('refresca el detalle tras editar (reabrir muestra el valor nuevo)', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+
+    let currentFn = 'Ada Lovelace'
+    vi.mocked(getContact).mockImplementation(() =>
+      Promise.resolve(makeDetail({ uid: 'uid-1', fn: currentFn, full_name: currentFn })),
+    )
+    vi.mocked(updateContact).mockImplementation(() => {
+      currentFn = 'Ada Byron'
+      return Promise.resolve(makeContact({ fn: 'Ada Byron' }))
+    })
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
+    const dialog = await screen.findByRole('dialog')
+    const nameInput = await within(dialog).findByRole('textbox', { name: 'Nombre' })
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Ada Byron')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(messageSuccess).toHaveBeenCalledWith('Contacto actualizado'))
+
+    // Reabrir el contacto pide el detalle de nuevo y muestra el valor guardado.
+    await user.click(await screen.findByRole('button', { name: 'Ver Ada Byron' }))
+    // El Modal de la edición anterior todavía anima su salida y conserva
+    // `role="dialog"`: se consulta dentro del Drawer, que es el nodo que este
+    // test necesita, y el resultado afirma exactamente lo mismo que antes.
+    await waitFor(() => expect(drawer()).toBeInTheDocument())
+    // El nombre nuevo aparece en el título del Drawer **y** en la fila `FN` del
+    // detalle recargado; se acota a la fila del `<Descriptions>` para afirmar
+    // que el detalle en sí trae el valor nuevo, no solo la cabecera.
+    const fnRow = (await within(drawer()).findByText('FN')).closest('tr')
+    expect(fnRow).not.toBeNull()
+    expect(fnRow).toHaveTextContent('Ada Byron')
+    expect(within(drawer()).queryByText('Ada Lovelace')).not.toBeInTheDocument()
+  })
+
+  it('reaplica los valores iniciales al cambiar de contacto en el modal', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([
+      makeContact({ id: 'c1', uid: 'uid-1', fn: 'Ada Lovelace' }),
+      makeContact({ id: 'c2', uid: 'uid-2', fn: 'Bob Esponja' }),
+    ])
+    vi.mocked(getContact).mockImplementation((_collectionId, uid) =>
+      Promise.resolve(
+        makeDetail({
+          id: uid === 'uid-1' ? 'c1' : 'c2',
+          uid,
+          fn: uid === 'uid-1' ? 'Ada Lovelace' : 'Bob Esponja',
+          full_name: uid === 'uid-1' ? 'Ada Lovelace' : 'Bob Esponja',
+        }),
+      ),
+    )
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    // Primer contacto.
+    await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
+    let dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByRole('textbox', { name: 'Nombre' })).toHaveValue('Ada Lovelace')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancelar' }))
+    // jsdom no dispara `transitionend`, así que el Modal se queda en
+    // `ant-zoom-leave` conservando `role="dialog"`. Se completa la animación
+    // para que se desmonte de verdad antes de abrir el siguiente contacto (si
+    // no, `findByRole('dialog')` sería ambiguo).
+    await waitFor(() => expect(screen.getByRole('dialog')).toHaveClass('ant-zoom-leave-active'))
+    finishModalLeave()
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // Segundo contacto: el formulario se remonta con los valores del nuevo.
+    await user.click(screen.getByRole('button', { name: 'Editar Bob Esponja' }))
+    dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByRole('textbox', { name: 'Nombre' })).toHaveValue('Bob Esponja')
   })
 })
 

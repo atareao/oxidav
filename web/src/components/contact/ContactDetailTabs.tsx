@@ -70,16 +70,24 @@ function Block({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
+/** Un bloque con la clave estable con la que se renderiza en la pila. */
+interface RenderBlock {
+  key: string
+  node: ReactNode | null
+}
+
 /** Pila vertical de bloques; devuelve `null` si no hay ninguno que pintar. */
-function renderBlocks(blocks: Array<ReactNode | null>): ReactNode | null {
-  const visible = blocks.filter((block) => block !== null && block !== undefined && block !== false)
+function renderBlocks(blocks: RenderBlock[]): ReactNode | null {
+  const visible = blocks.filter(
+    (block) => block.node !== null && block.node !== undefined && block.node !== false,
+  )
   if (visible.length === 0) {
     return null
   }
   return (
     <Flex vertical gap="middle">
-      {visible.map((block, index) => (
-        <Fragment key={index}>{block}</Fragment>
+      {visible.map((block) => (
+        <Fragment key={block.key}>{block.node}</Fragment>
       ))}
     </Flex>
   )
@@ -195,7 +203,7 @@ function addressBlock(addresses: Address[]): ReactNode {
     <Block title="Direcciones">
       <Flex vertical gap="middle">
         {present.map((address, index) => (
-          <div key={index}>
+          <div key={`${addressLines(address).join('|')}#${index}`}>
             {address.types.length > 0 || address.pref !== null ? (
               <Space wrap>
                 {address.types.map((type) => (
@@ -236,7 +244,7 @@ function mediaBlock(title: string, media: Media[]): ReactNode {
       <Space wrap>
         {media.map((item, index) => (
           <Image
-            key={index}
+            key={`${mediaSrc(item)}#${index}`}
             src={mediaSrc(item)}
             alt={`${title} ${index + 1}`}
             width={120}
@@ -259,7 +267,7 @@ function othersBlock(others: RawProperty[]): ReactNode {
     <Block title="Propiedades sin modelar">
       <Flex vertical gap="middle">
         {others.map((property, index) => (
-          <div key={index}>
+          <div key={`${property.name}#${property.group ?? ''}#${index}`}>
             <Space wrap>
               <Typography.Text strong>{property.name}</Typography.Text>
               {hasText(property.group) ? <Tag>{property.group}</Tag> : null}
@@ -320,7 +328,7 @@ export function ContactDetailTabs({ detail, collectionName }: ContactDetailTabsP
   if (hasText(detail.rev)) {
     controlRows.push({ label: 'REV', value: detail.rev })
   }
-  const control = renderBlocks([descriptionsBlock(controlRows)])
+  const control = renderBlocks([{ key: 'control', node: descriptionsBlock(controlRows) }])
   if (control !== null) {
     items.push({ key: 'control', label: 'Control', children: control })
   }
@@ -343,11 +351,11 @@ export function ContactDetailTabs({ detail, collectionName }: ContactDetailTabsP
     dateRows.push({ label: 'Aniversario', value: detail.anniversary })
   }
   const names = renderBlocks([
-    descriptionsBlock(structuredNameRows(detail.name), 'Nombre'),
-    stringBlock('Apodos', detail.nicknames),
-    mediaBlock('Fotos', detail.photos),
-    descriptionsBlock(dateRows, 'Fechas'),
-    descriptionsBlock(genderRows, 'Género'),
+    { key: 'name', node: descriptionsBlock(structuredNameRows(detail.name), 'Nombre') },
+    { key: 'nicknames', node: stringBlock('Apodos', detail.nicknames) },
+    { key: 'photos', node: mediaBlock('Fotos', detail.photos) },
+    { key: 'dates', node: descriptionsBlock(dateRows, 'Fechas') },
+    { key: 'gender', node: descriptionsBlock(genderRows, 'Género') },
   ])
   if (names !== null) {
     items.push({ key: 'names', label: 'Nombres', children: names })
@@ -355,9 +363,9 @@ export function ContactDetailTabs({ detail, collectionName }: ContactDetailTabsP
 
   // ── Contacto ──────────────────────────────────────────────────────────────
   const contact = renderBlocks([
-    labelledValueBlock('Teléfonos', detail.tels),
-    labelledValueBlock('Correos', detail.emails),
-    labelledValueBlock('Mensajería (IMPP)', detail.impps),
+    { key: 'tels', node: labelledValueBlock('Teléfonos', detail.tels) },
+    { key: 'emails', node: labelledValueBlock('Correos', detail.emails) },
+    { key: 'impps', node: labelledValueBlock('Mensajería (IMPP)', detail.impps) },
   ])
   if (contact !== null) {
     items.push({ key: 'contact', label: 'Contacto', children: contact })
@@ -365,9 +373,9 @@ export function ContactDetailTabs({ detail, collectionName }: ContactDetailTabsP
 
   // ── Direcciones ───────────────────────────────────────────────────────────
   const addresses = renderBlocks([
-    addressBlock(detail.addresses),
-    stringBlock('Coordenadas (GEO)', detail.geos),
-    stringBlock('Zonas horarias (TZ)', detail.timezones),
+    { key: 'addresses', node: addressBlock(detail.addresses) },
+    { key: 'geos', node: stringBlock('Coordenadas (GEO)', detail.geos) },
+    { key: 'timezones', node: stringBlock('Zonas horarias (TZ)', detail.timezones) },
   ])
   if (addresses !== null) {
     items.push({ key: 'addresses', label: 'Direcciones', children: addresses })
@@ -375,10 +383,10 @@ export function ContactDetailTabs({ detail, collectionName }: ContactDetailTabsP
 
   // ── Laboral ───────────────────────────────────────────────────────────────
   const work = renderBlocks([
-    stringBlock('Puestos (TITLE)', detail.titles),
-    stringBlock('Roles (ROLE)', detail.roles),
-    groupBlock('Organizaciones (ORG)', detail.organizations),
-    mediaBlock('Logos', detail.logos),
+    { key: 'titles', node: stringBlock('Puestos (TITLE)', detail.titles) },
+    { key: 'roles', node: stringBlock('Roles (ROLE)', detail.roles) },
+    { key: 'organizations', node: groupBlock('Organizaciones (ORG)', detail.organizations) },
+    { key: 'logos', node: mediaBlock('Logos', detail.logos) },
   ])
   if (work !== null) {
     items.push({ key: 'work', label: 'Laboral', children: work })
@@ -386,10 +394,10 @@ export function ContactDetailTabs({ detail, collectionName }: ContactDetailTabsP
 
   // ── Adicional ─────────────────────────────────────────────────────────────
   const additional = renderBlocks([
-    stringBlock('Notas', detail.notes),
-    groupBlock('Categorías', detail.categories),
-    stringBlock('Enlaces (URL)', detail.urls),
-    mediaBlock('Sonidos', detail.sounds),
+    { key: 'notes', node: stringBlock('Notas', detail.notes) },
+    { key: 'categories', node: groupBlock('Categorías', detail.categories) },
+    { key: 'urls', node: stringBlock('Enlaces (URL)', detail.urls) },
+    { key: 'sounds', node: mediaBlock('Sonidos', detail.sounds) },
   ])
   if (additional !== null) {
     items.push({ key: 'additional', label: 'Adicional', children: additional })
@@ -412,13 +420,13 @@ export function ContactDetailTabs({ detail, collectionName }: ContactDetailTabsP
   if (detail.updated_at > 0) {
     serverRows.push({ label: 'Actualizado', value: formatDateTime(detail.updated_at) })
   }
-  const server = renderBlocks([descriptionsBlock(serverRows)])
+  const server = renderBlocks([{ key: 'server', node: descriptionsBlock(serverRows) }])
   if (server !== null) {
     items.push({ key: 'server', label: 'Servidor', children: server })
   }
 
   // ── Otros ─────────────────────────────────────────────────────────────────
-  const others = renderBlocks([othersBlock(detail.others)])
+  const others = renderBlocks([{ key: 'others', node: othersBlock(detail.others) }])
   if (others !== null) {
     items.push({ key: 'others', label: 'Otros', children: others })
   }

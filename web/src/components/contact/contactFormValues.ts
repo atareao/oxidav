@@ -244,7 +244,7 @@ function genderFromParts(sex: string | null | undefined, identity: string | null
 /** Vista canónica de los grupos a partir del detalle cargado (valor inicial). */
 export function groupsFromDetail(detail: ContactDetail): ContactGroups {
   return {
-    fn: text(detail.fn),
+    fn: text(detail.fn ?? detail.full_name),
     name:
       detail.name === null
         ? null
@@ -447,8 +447,11 @@ export function buildCreateInput(values: ContactFormValues): CreateContactInput 
  * Comparación estructural: primitivos por valor, arrays por longitud y posición
  * (orden incluido) y objetos por nombre de clave (sin depender del orden de
  * inserción, que sí varía entre el servidor y el formulario).
+ *
+ * Exportada solo para poder cubrirla en tests unitarios; el resto del módulo la
+ * usa internamente.
  */
-function deepEqual(a: unknown, b: unknown): boolean {
+export function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) {
     return true
   }
@@ -479,10 +482,10 @@ function deepEqual(a: unknown, b: unknown): boolean {
  * - Grupos de array: un grupo vaciado se envía como `[]` (que es como se borra).
  * - `birthday`/`anniversary`: se borran enviando `''` (el servidor emite `BDAY:`,
  *   que re-parsea como vacío).
- * - `name`: si se vacía por completo se envía con los cinco componentes vacíos;
- *   no existe una forma de petición que borre el `N` entero (hueco del contrato).
- * - `gender`: el servidor rechaza un `GENDER` vacío (`400`), así que un género
- *   vaciado **no** se envía (no hay forma de borrarlo; hueco del contrato).
+ * - `name`: un `N` vaciado viaja como objeto **presente** con los cinco
+ *   componentes vacíos; el servidor lo interpreta como borrado del `N`.
+ * - `gender`: un `GENDER` vaciado viaja como `{sex:null,identity:null}`; el
+ *   servidor lo interpreta como borrado del `GENDER`.
  *
  * Devuelve un objeto vacío cuando no hay ningún cambio.
  */
@@ -491,8 +494,9 @@ export function buildUpdateInput(initial: ContactGroups, next: ContactGroups): U
   if (!deepEqual(initial.fn, next.fn) && next.fn !== null) {
     input.fn = next.fn
   }
-  if (!deepEqual(initial.name, next.name) && next.name !== null) {
-    input.name = next.name
+  if (!deepEqual(initial.name, next.name)) {
+    // Presente con los cinco componentes vacíos = borrar el `N` (contrato F22).
+    input.name = next.name ?? { family: null, given: null, additional: [], prefix: [], suffix: [] }
   }
   if (!deepEqual(initial.nicknames, next.nicknames)) {
     input.nicknames = next.nicknames
@@ -503,8 +507,9 @@ export function buildUpdateInput(initial: ContactGroups, next: ContactGroups): U
   if (!deepEqual(initial.anniversary, next.anniversary)) {
     input.anniversary = next.anniversary ?? ''
   }
-  if (!deepEqual(initial.gender, next.gender) && next.gender !== null) {
-    input.gender = next.gender
+  if (!deepEqual(initial.gender, next.gender)) {
+    // Presente con ambos nulos = borrar el `GENDER` (contrato F22).
+    input.gender = next.gender ?? { sex: null, identity: null }
   }
   if (!deepEqual(initial.tels, next.tels)) {
     input.tels = next.tels
