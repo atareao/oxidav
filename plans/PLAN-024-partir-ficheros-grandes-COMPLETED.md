@@ -103,9 +103,11 @@ f8ca2af ♻️ refactor: partir api/contacts.rs en mod/validate/edits (PLAN-024,
 
 | Antes | Después |
 |---|---|
-| `src/dav/vcf/mod.rs` **1 737** | `mod.rs` **500** (parseo + pre-paso endurecido + primitivas de línea) <br> `build.rs` **239** (composición) <br> `projection.rs` **1 036** (vista tipada de lectura) |
+| `src/dav/vcf/mod.rs` **1 737** | `mod.rs` **531** (parseo + pre-paso endurecido + primitivas de línea) <br> `build.rs` **239** (composición) <br> `projection.rs` **1 037** (vista tipada de lectura) |
 | `src/api/contacts.rs` **1 487** | `mod.rs` **628** (handlers, importación, mapeo de errores) <br> `validate.rs` **357** (validadores y topes) <br> `edits.rs` **548** (campo del DTO → propiedades de vCard) |
 | `src/dav/vcf/merge.rs` 1 196 | **sin tocar** (una responsabilidad clara) |
+
+> Las cifras son las del **árbol final**. El paso 2 dejaba `mod.rs` en 500 y el paso 3 (el parseo compartido) lo devolvió a 531: son medidas de momentos distintos, no una contradicción.
 
 ### Verificación
 
