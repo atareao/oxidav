@@ -21,7 +21,8 @@ pub mod error;
 pub mod events;
 pub mod search;
 
-use axum::routing::{get, patch};
+use axum::extract::DefaultBodyLimit;
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 
 use crate::auth::SessionUser;
@@ -87,6 +88,13 @@ pub fn router() -> Router<AppState> {
         .route(
             "/collections/{id}/contacts",
             get(contacts::list).post(contacts::create),
+        )
+        // Literal `import` wins over the `{uid}` capture (axum prioritises the
+        // static segment), so an import never lands on `get_one`. The body limit
+        // is raised **only** for this route: an import is a whole `.vcf` file.
+        .route(
+            "/collections/{id}/contacts/import",
+            post(contacts::import).layer(DefaultBodyLimit::max(contacts::MAX_IMPORT_BODY_BYTES)),
         )
         .route(
             "/collections/{id}/contacts/{uid}",

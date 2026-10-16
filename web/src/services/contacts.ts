@@ -2,14 +2,16 @@
  * Typed access to the F12 contact (card-object) REST endpoints
  * (`/api/v1/collections/{id}/contacts`).
  *
- * Mirrors {@link file://./events.ts}: the client never parses or produces
- * `.vcf` — it sends/consumes plain JSON and the backend composes the stored
- * vCard payload.
+ * Mirrors {@link file://./events.ts}: the client parses no `.vcf`. Reading and
+ * writing go through plain JSON DTOs and the backend composes the stored vCard
+ * payload; the **only** place the SPA emits vCard is the client-side export
+ * (`utils/vcf`, F22), which serialises the light listing fields.
  */
 
 import type {
   Collection,
   Contact,
+  ContactDetail,
   CreateContactInput,
   Page,
   UpdateContactInput,
@@ -103,6 +105,45 @@ export function deleteContact(
 ): Promise<void> {
   return api.delete(
     `/v1/collections/${encodeURIComponent(collectionId)}/contacts/${encodeURIComponent(uid)}`,
+    signal,
+  )
+}
+
+/**
+ * Fetch a contact's full detail (F22): every vCard group, already parsed.
+ *
+ * The listing endpoint keeps returning the light {@link Contact} DTO; only this
+ * detail endpoint exposes photos, addresses, multi-valued `TEL`/`EMAIL`… The
+ * client still never parses vCard itself.
+ */
+export function getContact(
+  collectionId: string,
+  uid: string,
+  signal?: AbortSignal,
+): Promise<ContactDetail> {
+  return api.get<ContactDetail>(
+    `/v1/collections/${encodeURIComponent(collectionId)}/contacts/${encodeURIComponent(uid)}`,
+    signal,
+  )
+}
+
+/**
+ * Import a raw `.vcf` file into an address book (F22).
+ *
+ * The body carries the file's text **verbatim** as `text/vcard` (it may hold
+ * several concatenated cards); the server splits and stores each card
+ * byte-for-byte, so nothing is lost, unlike the lossy client-side parser. The
+ * endpoint answers `201` with the created {@link Contact} DTOs.
+ */
+export async function importContacts(
+  collectionId: string,
+  vcardText: string,
+  signal?: AbortSignal,
+): Promise<Contact[]> {
+  return api.postRaw<Contact[]>(
+    `/v1/collections/${encodeURIComponent(collectionId)}/contacts/import`,
+    vcardText,
+    'text/vcard',
     signal,
   )
 }

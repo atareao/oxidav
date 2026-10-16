@@ -1,13 +1,18 @@
 /**
- * Vista Contactos (F12).
+ * Vista Contactos (F12, detalle completo en F22).
  *
  * Réplica del patrón de la vista Calendario (F11): tabla Antd con búsqueda y
  * orden, `<Drawer>` de detalle, alta/edición en `<Modal>` + `<Form>` y
  * actualizaciones optimistas con React 19 `useOptimistic` (rollback ante error).
  *
- * Añade, además, import/export `.vcf`: el export se compone en cliente a partir
- * de los DTO (helpers de `src/utils/vcf.ts`) y el import lee un fichero y crea
- * un contacto por ficha vía `POST`.
+ * El `<Drawer>` ya no pinta un `<Descriptions>` con los cuatro campos de la
+ * lista: al abrir un contacto pide su detalle completo (`useContactDetail`) y lo
+ * organiza en pestañas con `ContactDetailTabs`. La tabla sigue trabajando con el
+ * DTO ligero (de ahí salen el título y los botones Editar/Eliminar).
+ *
+ * Import/export `.vcf`: el export se compone en cliente (solo campos básicos) y
+ * la importación envía el fichero **en crudo** al servidor
+ * (`POST .../contacts/import`), que lo parsea sin pérdida; el SPA no parsea.
  *
  * Actualizaciones optimistas: cada mutación se ejecuta dentro de un
  * `startTransition`; al terminar la transición la capa optimista se reconcilia
@@ -20,7 +25,6 @@ import {
   App,
   Button,
   Card,
-  Descriptions,
   Drawer,
   Empty,
   Flex,
@@ -29,6 +33,7 @@ import {
   Modal,
   Popconfirm,
   Select,
+  Skeleton,
   Space,
   Table,
   Tooltip,
@@ -44,32 +49,32 @@ import {
   useOptimistic,
   type ChangeEvent,
 } from 'react'
+import { ContactDetailTabs } from '../components/contact/ContactDetailTabs'
+import { ContactForm } from '../components/contact/ContactForm'
+import {
+  buildCreateInput,
+  buildUpdateInput,
+  emptyFormValues,
+  groupsFromDetail,
+  groupsFromForm,
+  initialValuesFromDetail,
+  lightFieldsFromGroups,
+  type ContactFormValues,
+} from '../components/contact/contactFormValues'
+import { useContactDetail } from '../hooks/useContactDetail'
 import { useContacts } from '../hooks/useContacts'
 import { toErrorMessage } from '../services/api'
 import {
   createContact,
   deleteContact,
+  importContacts,
   listAddressbookCollections,
   updateContact,
 } from '../services/contacts'
-import type { Collection, Contact, CreateContactInput, UpdateContactInput } from '../types/api'
+import type { Collection, Contact, UpdateContactInput } from '../types/api'
 import { tempId } from '../utils/tempId'
-import {
-  downloadTextFile,
-  MAX_FILE_BYTES,
-  parseVcf,
-  serializeContactsToVcf,
-  vcardToCreateInput,
-} from '../utils/vcf'
+import { downloadTextFile, MAX_FILE_BYTES, serializeContactsToVcf } from '../utils/vcf'
 import { PAGE_GAP, fluidControlStyle } from './pageLayout'
-
-/** Shape of the `Form` values used by the create/edit modal. */
-interface ContactFormValues {
-  fn: string
-  email?: string
-  phone?: string
-  organization?: string
-}
 
 /** Fields the optimistic layer may rewrite on an existing contact. */
 type ContactChanges = Pick<Contact, 'fn' | 'email' | 'phone' | 'organization'>
@@ -97,12 +102,6 @@ function applyOptimistic(contacts: Contact[], action: OptimisticAction): Contact
 function displayName(contact: Contact): string {
   const name = contact.fn ?? contact.full_name ?? ''
   return name.trim().length > 0 ? name : '(sin nombre)'
-}
-
-/** Trim a form value to `string | undefined` (blank → omitted). */
-function optionalValue(value: string | undefined): string | undefined {
-  const trimmed = value?.trim() ?? ''
-  return trimmed.length > 0 ? trimmed : undefined
 }
 
 export function Contacts() {
@@ -185,6 +184,50 @@ export function Contacts() {
 
   const [optimisticContacts, addOptimistic] = useOptimistic(contacts, applyOptimistic)
 
+  // El `Drawer` se abre con el DTO ligero de la tabla (`detail`), pero el
+  // contenido de las pestañas sale de una petición aparte al detalle completo.
+  // El objetivo del hook es `null` mientras no haya contacto o libreta.
+  const detailTarget = useMemo(() => {
+    if (detail === null || effectiveCollectionId === null) {
+      return null
+    }
+    return { collectionId: effectiveCollectionId, uid: detail.uid }
+  }, [detail, effectiveCollectionId])
+
+  const {
+    detail: fullDetail,
+    loading: detailLoading,
+    error: detailError,
+    reload: reloadDetail,
+  } = useContactDetail(detailTarget)
+
+  // El formulario de edición necesita el detalle **completo** (el contacto
+  // ligero de la tabla no trae los grupos), así que tiene su propia petición,
+  // independiente de la del `Drawer`. En alta (`editing === null`) no pide nada.
+  const editTarget = useMemo(() => {
+    if (editing === null || effectiveCollectionId === null) {
+      return null
+    }
+    return { collectionId: effectiveCollectionId, uid: editing.uid }
+  }, [editing, effectiveCollectionId])
+
+  const {
+    detail: editDetail,
+    loading: editDetailLoading,
+    error: editDetailError,
+    reload: reloadEditDetail,
+  } = useContactDetail(editTarget)
+
+  // Nombre legible de la libreta para la pestaña «Servidor»; las colecciones ya
+  // están cargadas para el `<Select>`.
+  const detailCollectionName = useMemo(() => {
+    const collectionId = fullDetail?.collection_id ?? detail?.collection_id
+    if (collectionId === undefined || collectionId === null) {
+      return undefined
+    }
+    return collections.find((collection) => collection.id === collectionId)?.name
+  }, [collections, fullDetail, detail])
+
   const filteredContacts = useMemo(() => {
     const query = search.trim().toLowerCase()
     if (query.length === 0) {
@@ -223,99 +266,106 @@ export function Contacts() {
       if (collectionId === null) {
         return
       }
-      const email = optionalValue(values.email)
-      const phone = optionalValue(values.phone)
-      const organization = optionalValue(values.organization)
-      savingRef.current = true
-      setSaving(true)
 
-      // Always clear the in-flight flag, on success or failure.
-      const finish = () => {
-        savingRef.current = false
-        setSaving(false)
-      }
+      // Vista canónica de lo que el usuario quiere guardar, y campos ligeros
+      // derivados de ella para la capa optimista (la tabla usa el DTO ligero).
+      const nextGroups = groupsFromForm(values)
+      const light = lightFieldsFromGroups(nextGroups)
 
-      if (editing === null) {
-        const optimisticId = tempId('contact')
+      if (editing !== null) {
+        // ── Edición: PATCH por presencia ──────────────────────────────────
+        // El servidor re-renderiza las líneas de **todo** grupo presente, así
+        // que solo pueden viajar los grupos realmente cambiados; enviar uno
+        // intacto degradaría el payload que el cliente había escrito. El diff
+        // es estructural contra el detalle cargado al abrir el modal.
+        const initialGroups = editDetail === null ? null : groupsFromDetail(editDetail)
+        const input: UpdateContactInput =
+          initialGroups === null ? {} : buildUpdateInput(initialGroups, nextGroups)
+        if (Object.keys(input).length === 0) {
+          // Un `PATCH` vacío es un `400` en el servidor: ni se intenta.
+          message.info('No hay cambios que guardar')
+          return
+        }
+        const target = editing
+        savingRef.current = true
+        setSaving(true)
         startTransition(async () => {
           addOptimistic({
-            kind: 'create',
-            contact: {
-              id: optimisticId,
-              uid: optimisticId,
-              collection_id: collectionId,
-              fn: values.fn,
-              email: email ?? null,
-              phone: phone ?? null,
-              organization: organization ?? null,
-              etag: '',
-              created_at: Date.now(),
-              updated_at: Date.now(),
+            kind: 'update',
+            uid: target.uid,
+            changes: {
+              fn: light.fn,
+              email: light.email,
+              phone: light.phone,
+              organization: light.organization,
             },
           })
           try {
-            const input: CreateContactInput = { fn: values.fn }
-            if (email !== undefined) {
-              input.email = email
-            }
-            if (phone !== undefined) {
-              input.phone = phone
-            }
-            if (organization !== undefined) {
-              input.organization = organization
-            }
-            const created = await createContact(collectionId, input)
-            setContacts((previous) => [...previous, created])
+            const updated = await updateContact(collectionId, target.uid, input)
+            setContacts((previous) =>
+              previous.map((contact) => (contact.uid === target.uid ? updated : contact)),
+            )
             closeModal()
-            message.success('Contacto creado')
+            // El detalle cacheado quedó viejo tras la edición: se invalida para
+            // que, si el usuario vuelve a abrir el contacto, las pestañas del
+            // Drawer muestren el valor recién guardado en vez del anterior.
+            reloadDetail()
+            message.success('Contacto actualizado')
           } catch (error) {
-            // Rollback happens automatically when the transition ends; surface
-            // the failure with the context message API.
             message.error(toErrorMessage(error))
           } finally {
-            finish()
+            savingRef.current = false
+            setSaving(false)
           }
         })
         return
       }
 
-      const target = editing
+      // ── Alta: POST con los grupos rellenos (sin diff) ─────────────────────
+      const optimisticId = tempId('contact')
+      savingRef.current = true
+      setSaving(true)
       startTransition(async () => {
         addOptimistic({
-          kind: 'update',
-          uid: target.uid,
-          changes: {
-            fn: values.fn,
-            email: email ?? null,
-            phone: phone ?? null,
-            organization: organization ?? null,
+          kind: 'create',
+          contact: {
+            id: optimisticId,
+            uid: optimisticId,
+            collection_id: collectionId,
+            fn: light.fn,
+            email: light.email,
+            phone: light.phone,
+            organization: light.organization,
+            etag: '',
+            created_at: Date.now(),
+            updated_at: Date.now(),
           },
         })
         try {
-          const input: UpdateContactInput = { fn: values.fn }
-          if (email !== undefined) {
-            input.email = email
-          }
-          if (phone !== undefined) {
-            input.phone = phone
-          }
-          if (organization !== undefined) {
-            input.organization = organization
-          }
-          const updated = await updateContact(collectionId, target.uid, input)
-          setContacts((previous) =>
-            previous.map((contact) => (contact.uid === target.uid ? updated : contact)),
-          )
+          const created = await createContact(collectionId, buildCreateInput(values))
+          setContacts((previous) => [...previous, created])
           closeModal()
-          message.success('Contacto actualizado')
+          message.success('Contacto creado')
         } catch (error) {
+          // Rollback happens automatically when the transition ends; surface
+          // the failure with the context message API.
           message.error(toErrorMessage(error))
         } finally {
-          finish()
+          savingRef.current = false
+          setSaving(false)
         }
       })
     },
-    [addOptimistic, closeModal, editing, effectiveCollectionId, message, setContacts],
+    [
+      addOptimistic,
+      closeModal,
+      editing,
+      editDetail,
+      effectiveCollectionId,
+      message,
+      reloadDetail,
+      setContacts,
+    ],
   )
 
   const handleDelete = useCallback(
@@ -380,31 +430,18 @@ export function Contacts() {
       void (async () => {
         try {
           const text = await file.text()
-          const cards = parseVcf(text)
-          if (cards.length === 0) {
+          // La importación pasa al servidor (F22): se envía el texto **en
+          // crudo** como `text/vcard` y es el backend quien parsea y almacena
+          // cada tarjeta verbatim. El SPA no parsea vCard. La validación es
+          // atómica (o entran todas las tarjetas o ninguna), así que la
+          // respuesta trae todas las creadas o el sobre de error.
+          const created = await importContacts(collectionId, text)
+          if (created.length === 0) {
             message.warning('El archivo no contiene contactos válidos')
             return
           }
-          // Create every card concurrently and keep the successful ones, so a
-          // single rejected card does not abort the whole import. Partial
-          // results are reported as `Éxito X / Fallo Y`.
-          const results = await Promise.allSettled(
-            cards.map((card) => createContact(collectionId, vcardToCreateInput(card))),
-          )
-          const created = results.flatMap((result) =>
-            result.status === 'fulfilled' ? [result.value] : [],
-          )
-          const failed = results.length - created.length
-          if (created.length > 0) {
-            setContacts((previous) => [...previous, ...created])
-          }
-          if (failed === 0) {
-            message.success(`${created.length} contacto(s) importado(s)`)
-          } else if (created.length === 0) {
-            message.error(`No se pudo importar ningún contacto (${failed} fallo(s))`)
-          } else {
-            message.warning(`Éxito ${created.length} / Fallo ${failed}`)
-          }
+          setContacts((previous) => [...previous, ...created])
+          message.success(`${created.length} contacto(s) importado(s)`)
         } catch (error) {
           message.error(toErrorMessage(error))
         } finally {
@@ -490,16 +527,15 @@ export function Contacts() {
   const loadError = collectionsError ?? (effectiveCollectionId !== null ? contactsError : null)
 
   const formInitialValues: ContactFormValues = useMemo(() => {
-    if (editing !== null) {
-      return {
-        fn: editing.fn ?? editing.full_name ?? '',
-        email: editing.email ?? '',
-        phone: editing.phone ?? '',
-        organization: editing.organization ?? '',
-      }
+    // En edición los valores salen del **detalle** cargado (no del contacto
+    // ligero de la tabla, que no tiene los grupos). Mientras el detalle no ha
+    // llegado el `<Form>` ni se monta, así que estos valores siempre son los
+    // definitivos cuando el formulario aparece.
+    if (editing !== null && editDetail !== null) {
+      return initialValuesFromDetail(editDetail)
     }
-    return { fn: '', email: '', phone: '', organization: '' }
-  }, [editing])
+    return emptyFormValues()
+  }, [editing, editDetail])
 
   return (
     <>
@@ -551,9 +587,11 @@ export function Contacts() {
                 onChange={(event) => setSearch(event.target.value)}
                 style={fluidControlStyle}
               />
-              <Button onClick={handleExport} disabled={optimisticContacts.length === 0}>
-                Exportar .vcf
-              </Button>
+              <Tooltip title="El .vcf exportado incluye solo los campos básicos; el fichero completo vive en el servidor">
+                <Button onClick={handleExport} disabled={optimisticContacts.length === 0}>
+                  Exportar .vcf
+                </Button>
+              </Tooltip>
               <Tooltip title="Importa uno o varios contactos desde un fichero .vcf">
                 <Button onClick={handleImportClick} loading={importing} disabled={collections.length === 0}>
                   Importar .vcf
@@ -620,13 +658,23 @@ export function Contacts() {
         }
       >
         {detail !== null ? (
-          <Descriptions column={1} bordered size="small">
-            <Descriptions.Item label="Nombre">{displayName(detail)}</Descriptions.Item>
-            <Descriptions.Item label="Email">{detail.email ?? '—'}</Descriptions.Item>
-            <Descriptions.Item label="Teléfono">{detail.phone ?? '—'}</Descriptions.Item>
-            <Descriptions.Item label="Organización">{detail.organization ?? '—'}</Descriptions.Item>
-            <Descriptions.Item label="UID">{detail.uid}</Descriptions.Item>
-          </Descriptions>
+          detailError !== null ? (
+            <Alert
+              type="error"
+              showIcon
+              title="No se pudo cargar el detalle del contacto"
+              description={detailError}
+              action={
+                <Button size="small" onClick={reloadDetail}>
+                  Reintentar
+                </Button>
+              }
+            />
+          ) : detailLoading || fullDetail === null ? (
+            <Skeleton active paragraph={{ rows: 6 }} />
+          ) : (
+            <ContactDetailTabs detail={fullDetail} collectionName={detailCollectionName} />
+          )
         ) : null}
       </Drawer>
 
@@ -637,6 +685,11 @@ export function Contacts() {
         okText={editing === null ? 'Crear' : 'Guardar'}
         cancelText="Cancelar"
         confirmLoading={saving}
+        // Con el detalle de edición aún cargando el formulario no existe, así que
+        // Guardar no haría nada útil: se bloquea hasta tener los valores.
+        okButtonProps={{
+          disabled: editing !== null && (editDetailLoading || editDetail === null),
+        }}
         maskClosable={!saving}
         keyboard={!saving}
         onCancel={() => {
@@ -644,35 +697,35 @@ export function Contacts() {
             closeModal()
           }
         }}
+        // El formulario es largo: el cuerpo hace scroll dentro del modal.
+        width={720}
+        styles={{ body: { maxHeight: '65vh', overflowY: 'auto', paddingRight: 12 } }}
         destroyOnHidden
       >
-        <Form
-          form={form}
-          layout="vertical"
-          onFinish={handleSubmit}
-          initialValues={formInitialValues}
-        >
-          <Form.Item
-            name="fn"
-            label="Nombre"
-            rules={[{ required: true, message: 'Introduce un nombre' }]}
-          >
-            <Input placeholder="Nombre completo" />
-          </Form.Item>
-          <Form.Item
-            name="email"
-            label="Email"
-            rules={[{ type: 'email', message: 'Introduce un email válido' }]}
-          >
-            <Input placeholder="email@example.com" />
-          </Form.Item>
-          <Form.Item name="phone" label="Teléfono">
-            <Input placeholder="+34 600 000 000" />
-          </Form.Item>
-          <Form.Item name="organization" label="Organización">
-            <Input placeholder="Empresa" />
-          </Form.Item>
-        </Form>
+        {editing !== null && editDetailError !== null ? (
+          <Alert
+            type="error"
+            showIcon
+            title="No se pudo cargar el contacto para editar"
+            description={editDetailError}
+            action={
+              <Button size="small" onClick={reloadEditDetail}>
+                Reintentar
+              </Button>
+            }
+          />
+        ) : editing !== null && (editDetailLoading || editDetail === null) ? (
+          <Skeleton active paragraph={{ rows: 8 }} />
+        ) : (
+          <ContactForm
+            // `key` fuerza un montaje limpio al cambiar de contacto (o de
+            // edición a alta), para que `initialValues` se apliquen de nuevo.
+            key={editing?.uid ?? 'new'}
+            form={form}
+            initialValues={formInitialValues}
+            onFinish={handleSubmit}
+          />
+        )}
       </Modal>
     </>
   )

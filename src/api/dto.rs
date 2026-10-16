@@ -12,6 +12,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AppToken;
+use crate::dav::vcf::{Address as CardAddress, CardProjection, Gender as CardGender};
+use crate::dav::vcf::{MediaValue, MultiValue, RawProperty, StructuredName};
 use crate::db::models::{CalendarObject, CardObject, Collection};
 
 /// Public representation of a collection.
@@ -394,12 +396,415 @@ impl From<&CardObject> for ContactDto {
     }
 }
 
+// ---------------------------------------------------------------------------
+// F22 — full-vCard detail DTOs (contract 4 of PLAN-023)
+// ---------------------------------------------------------------------------
+
+/// The full, typed projection of a contact as returned by
+/// `GET .../contacts/{uid}`.
+///
+/// A **superset** of [`ContactDto`]: it keeps the light fields the list exposes
+/// (`id`, `uid`, `collection_id`, `fn`/`full_name`, `etag`, timestamps) and adds
+/// every group of the vCard projected by
+/// [`crate::dav::vcf::project_card`]. It deliberately still excludes
+/// `raw_payload`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContactDetailDto {
+    /// Internal card-object id (UUID).
+    pub id: String,
+    /// vCard `UID`.
+    pub uid: String,
+    /// Owning address book.
+    pub collection_id: String,
+    /// Formatted name (`FN`), exposed as the canonical `fn` field.
+    #[serde(rename = "fn")]
+    pub fn_: Option<String>,
+    /// Alias of `fn` (formatted name); always mirrors `fn`.
+    pub full_name: Option<String>,
+    /// Opaque ETag.
+    pub etag: String,
+    /// Creation time, Unix milliseconds.
+    pub created_at: i64,
+    /// Last modification time, Unix milliseconds.
+    pub updated_at: i64,
+    /// `VERSION`, verbatim.
+    pub version: Option<String>,
+    /// `REV`, verbatim.
+    pub rev: Option<String>,
+    /// Structured `N`.
+    pub name: Option<StructuredNameDto>,
+    /// `NICKNAME` occurrences.
+    pub nicknames: Vec<String>,
+    /// `PHOTO` (URI or embedded `data:` URI).
+    pub photos: Vec<MediaDto>,
+    /// `BDAY`, verbatim.
+    pub birthday: Option<String>,
+    /// `ANNIVERSARY`, verbatim.
+    pub anniversary: Option<String>,
+    /// `GENDER`.
+    pub gender: Option<GenderDto>,
+    /// `TEL` occurrences with their `TYPE`/`PREF`.
+    pub tels: Vec<LabelledValueDto>,
+    /// `EMAIL` occurrences with their `TYPE`/`PREF`.
+    pub emails: Vec<LabelledValueDto>,
+    /// `IMPP` occurrences with their `TYPE`/`PREF`.
+    pub impps: Vec<LabelledValueDto>,
+    /// `ADR` occurrences.
+    pub addresses: Vec<AddressDto>,
+    /// `GEO` occurrences.
+    pub geos: Vec<String>,
+    /// `TZ` occurrences.
+    pub timezones: Vec<String>,
+    /// `TITLE` occurrences.
+    pub titles: Vec<String>,
+    /// `ROLE` occurrences.
+    pub roles: Vec<String>,
+    /// `ORG` occurrences, one entry per line.
+    pub organizations: Vec<Vec<String>>,
+    /// `LOGO` (URI or embedded `data:` URI).
+    pub logos: Vec<MediaDto>,
+    /// `NOTE` occurrences.
+    pub notes: Vec<String>,
+    /// `CATEGORIES` occurrences, one entry per line.
+    pub categories: Vec<Vec<String>>,
+    /// `URL` occurrences.
+    pub urls: Vec<String>,
+    /// `SOUND` (URI or embedded `data:` URI).
+    pub sounds: Vec<MediaDto>,
+    /// Everything outside the modelled groups (`X-*` and RFC properties without
+    /// a dedicated tab).
+    pub others: Vec<RawPropertyDto>,
+}
+
+impl ContactDetailDto {
+    /// Build the full detail DTO from the stored row and its projection.
+    #[must_use]
+    pub fn new(object: &CardObject, projection: CardProjection) -> Self {
+        Self {
+            id: object.id.clone(),
+            uid: object.uid.clone(),
+            collection_id: object.collection_id.clone(),
+            fn_: projection.fn_.clone(),
+            full_name: projection.fn_.clone(),
+            etag: object.etag.clone(),
+            created_at: object.created_at,
+            updated_at: object.updated_at,
+            version: non_empty(projection.version),
+            rev: projection.rev,
+            name: projection.name.map(StructuredNameDto::from),
+            nicknames: projection.nicknames,
+            photos: projection.photos.into_iter().map(MediaDto::from).collect(),
+            birthday: projection.birthday,
+            anniversary: projection.anniversary,
+            gender: projection.gender.map(GenderDto::from),
+            tels: projection
+                .tels
+                .into_iter()
+                .map(LabelledValueDto::from)
+                .collect(),
+            emails: projection
+                .emails
+                .into_iter()
+                .map(LabelledValueDto::from)
+                .collect(),
+            impps: projection
+                .impps
+                .into_iter()
+                .map(LabelledValueDto::from)
+                .collect(),
+            addresses: projection
+                .addresses
+                .into_iter()
+                .map(AddressDto::from)
+                .collect(),
+            geos: projection.geos,
+            timezones: projection.timezones,
+            titles: projection.titles,
+            roles: projection.roles,
+            organizations: projection.organizations,
+            logos: projection.logos.into_iter().map(MediaDto::from).collect(),
+            notes: projection.notes,
+            categories: projection.categories,
+            urls: projection.urls,
+            sounds: projection.sounds.into_iter().map(MediaDto::from).collect(),
+            others: projection
+                .others
+                .into_iter()
+                .map(RawPropertyDto::from)
+                .collect(),
+        }
+    }
+}
+
+/// An empty `String` becomes `None` (so an absent `VERSION` is `null`, not "").
+fn non_empty(value: String) -> Option<String> {
+    if value.is_empty() { None } else { Some(value) }
+}
+
+/// The five components of a structured `N`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredNameDto {
+    /// Family name.
+    pub family: Option<String>,
+    /// Given name.
+    pub given: Option<String>,
+    /// Additional names.
+    pub additional: Vec<String>,
+    /// Honorific prefixes.
+    pub prefix: Vec<String>,
+    /// Honorific suffixes.
+    pub suffix: Vec<String>,
+}
+
+impl From<StructuredName> for StructuredNameDto {
+    fn from(name: StructuredName) -> Self {
+        Self {
+            family: name.family,
+            given: name.given,
+            additional: name.additional,
+            prefix: name.prefix,
+            suffix: name.suffix,
+        }
+    }
+}
+
+/// `GENDER`: sex code plus optional identity text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenderDto {
+    /// The sex (`M`/`F`/`O`/`N`/`U`), when present.
+    pub sex: Option<String>,
+    /// The free-text gender identity, when present.
+    pub identity: Option<String>,
+}
+
+impl From<CardGender> for GenderDto {
+    fn from(gender: CardGender) -> Self {
+        Self {
+            sex: gender.sex,
+            identity: gender.identity,
+        }
+    }
+}
+
+/// A single value with its `TYPE` parameters and `PREF`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelledValueDto {
+    /// The property value.
+    pub value: String,
+    /// `TYPE` tokens.
+    pub types: Vec<String>,
+    /// `PREF` (lower is preferred), when present.
+    pub pref: Option<u8>,
+}
+
+impl From<MultiValue> for LabelledValueDto {
+    fn from(value: MultiValue) -> Self {
+        Self {
+            value: value.value,
+            types: value.types,
+            pref: value.pref,
+        }
+    }
+}
+
+/// A structured `ADR` with its seven components, `LABEL` and parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddressDto {
+    /// Post office box.
+    pub po_box: Option<String>,
+    /// Extended address (apartment, suite…).
+    pub extended: Option<String>,
+    /// Street address.
+    pub street: Option<String>,
+    /// Locality (city).
+    pub locality: Option<String>,
+    /// Region (state or province).
+    pub region: Option<String>,
+    /// Postal code.
+    pub postal_code: Option<String>,
+    /// Country name.
+    pub country: Option<String>,
+    /// The `LABEL` parameter, when present.
+    pub label: Option<String>,
+    /// `TYPE` tokens.
+    pub types: Vec<String>,
+    /// `PREF`, when present.
+    pub pref: Option<u8>,
+}
+
+impl From<CardAddress> for AddressDto {
+    fn from(address: CardAddress) -> Self {
+        Self {
+            po_box: address.po_box,
+            extended: address.extended,
+            street: address.street,
+            locality: address.locality,
+            region: address.region,
+            postal_code: address.postal_code,
+            country: address.country,
+            label: address.label,
+            types: address.types,
+            pref: address.pref,
+        }
+    }
+}
+
+/// `PHOTO`/`LOGO`/`SOUND`: either an external URI or an embedded binary.
+///
+/// The `kind` discriminator is `"uri"` or `"data"`. The URI variant omits
+/// `media_type`/`data_uri`; the data variant omits `uri` (`skip_serializing_if`),
+/// so the SPA can branch on `kind` alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaDto {
+    /// `"uri"` or `"data"`.
+    pub kind: &'static str,
+    /// The external URI (URI variant only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    /// The media type (data variant only, when known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// The ready-to-use `data:<media-type>;base64,<…>` URI (data variant only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_uri: Option<String>,
+}
+
+impl From<MediaValue> for MediaDto {
+    fn from(value: MediaValue) -> Self {
+        match value {
+            MediaValue::Uri(uri) => Self {
+                kind: "uri",
+                uri: Some(uri),
+                media_type: None,
+                data_uri: None,
+            },
+            MediaValue::Data {
+                media_type,
+                data_uri,
+            } => Self {
+                kind: "data",
+                uri: None,
+                media_type,
+                data_uri: Some(data_uri),
+            },
+        }
+    }
+}
+
+/// A property outside the modelled groups, kept as written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawPropertyDto {
+    /// The property name (`X-ABLabel`, `PRODID`, …).
+    pub name: String,
+    /// The group prefix (`item1` in `item1.X-ABLabel`), when present.
+    pub group: Option<String>,
+    /// The property parameters as `(name, value)` pairs.
+    pub parameters: Vec<(String, String)>,
+    /// The property value.
+    pub value: String,
+}
+
+impl From<RawProperty> for RawPropertyDto {
+    fn from(property: RawProperty) -> Self {
+        Self {
+            name: property.name,
+            group: property.group,
+            parameters: property.parameters,
+            value: property.value,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// F22 — write-side inputs (contract 4 of PLAN-023)
+// ---------------------------------------------------------------------------
+
+/// Structured `N` input for a create/patch request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct StructuredNameInput {
+    /// Family name.
+    #[serde(default)]
+    pub family: Option<String>,
+    /// Given name.
+    #[serde(default)]
+    pub given: Option<String>,
+    /// Additional names.
+    #[serde(default)]
+    pub additional: Option<Vec<String>>,
+    /// Honorific prefixes.
+    #[serde(default)]
+    pub prefix: Option<Vec<String>>,
+    /// Honorific suffixes.
+    #[serde(default)]
+    pub suffix: Option<Vec<String>>,
+}
+
+/// `GENDER` input for a create/patch request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct GenderInput {
+    /// The sex (`M`/`F`/`O`/`N`/`U`).
+    #[serde(default)]
+    pub sex: Option<String>,
+    /// The free-text gender identity.
+    #[serde(default)]
+    pub identity: Option<String>,
+}
+
+/// A single value with optional `TYPE`/`PREF` for a create/patch request.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LabelledValueInput {
+    /// The property value.
+    pub value: String,
+    /// `TYPE` tokens.
+    #[serde(default)]
+    pub types: Option<Vec<String>>,
+    /// `PREF` (1..=100).
+    #[serde(default)]
+    pub pref: Option<u8>,
+}
+
+/// A structured `ADR` input for a create/patch request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct AddressInput {
+    /// Post office box.
+    #[serde(default)]
+    pub po_box: Option<String>,
+    /// Extended address.
+    #[serde(default)]
+    pub extended: Option<String>,
+    /// Street address.
+    #[serde(default)]
+    pub street: Option<String>,
+    /// Locality (city).
+    #[serde(default)]
+    pub locality: Option<String>,
+    /// Region (state or province).
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Postal code.
+    #[serde(default)]
+    pub postal_code: Option<String>,
+    /// Country name.
+    #[serde(default)]
+    pub country: Option<String>,
+    /// The `LABEL` parameter.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// `TYPE` tokens.
+    #[serde(default)]
+    pub types: Option<Vec<String>>,
+    /// `PREF` (1..=100).
+    #[serde(default)]
+    pub pref: Option<u8>,
+}
+
 /// Request body for creating a contact.
 ///
-/// The backend composes the `.vcf` stored in `raw_payload` from these fields
-/// (the client never sends vCard). `fn` (also accepted as `full_name`) is
-/// mandatory; the rest are optional. `uid` is normally minted by the server, but
-/// a client may pin one — a subsequent duplicate then conflicts (`409`).
+/// The backend composes the skeleton (`.vcf` with `UID`/`FN`) and then applies a
+/// surgical merge for every other field (the client never sends vCard). `fn`
+/// (also accepted as `full_name`) is mandatory; the rest are optional. `uid` is
+/// normally minted by the server, but a client may pin one — a subsequent
+/// duplicate then conflicts (`409`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CreateContactRequest {
     /// Formatted name (`FN`); required and non-blank. Also accepted as
@@ -418,15 +823,65 @@ pub struct CreateContactRequest {
     /// Optional client-chosen `UID`; a fresh one is minted when omitted.
     #[serde(default)]
     pub uid: Option<String>,
+    /// Structured `N`.
+    #[serde(default)]
+    pub name: Option<StructuredNameInput>,
+    /// `NICKNAME` values.
+    #[serde(default)]
+    pub nicknames: Option<Vec<String>>,
+    /// `BDAY`, as written.
+    #[serde(default)]
+    pub birthday: Option<String>,
+    /// `ANNIVERSARY`, as written.
+    #[serde(default)]
+    pub anniversary: Option<String>,
+    /// `GENDER`.
+    #[serde(default)]
+    pub gender: Option<GenderInput>,
+    /// `TEL` values.
+    #[serde(default)]
+    pub tels: Option<Vec<LabelledValueInput>>,
+    /// `EMAIL` values.
+    #[serde(default)]
+    pub emails: Option<Vec<LabelledValueInput>>,
+    /// `IMPP` values.
+    #[serde(default)]
+    pub impps: Option<Vec<LabelledValueInput>>,
+    /// `ADR` values.
+    #[serde(default)]
+    pub addresses: Option<Vec<AddressInput>>,
+    /// `GEO` values.
+    #[serde(default)]
+    pub geos: Option<Vec<String>>,
+    /// `TZ` values.
+    #[serde(default)]
+    pub timezones: Option<Vec<String>>,
+    /// `TITLE` values.
+    #[serde(default)]
+    pub titles: Option<Vec<String>>,
+    /// `ROLE` values.
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    /// `ORG` values, one entry per line.
+    #[serde(default)]
+    pub organizations: Option<Vec<Vec<String>>>,
+    /// `NOTE` values.
+    #[serde(default)]
+    pub notes: Option<Vec<String>>,
+    /// `CATEGORIES` values, one entry per line.
+    #[serde(default)]
+    pub categories: Option<Vec<Vec<String>>>,
+    /// `URL` values.
+    #[serde(default)]
+    pub urls: Option<Vec<String>>,
 }
 
 /// Request body for a partial update of a contact.
 ///
 /// Only the fields present are applied; omitted fields keep their stored value.
 /// `fn` (also accepted as `full_name`) is required to stay non-blank when
-/// supplied. The `.vcf` in `raw_payload` is recomposed from the merged fields
-/// after validation.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// supplied. The stored `raw_payload` is merged surgically after validation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct UpdateContactRequest {
     /// New formatted name, if provided. Also accepted as `full_name`.
     #[serde(default, rename = "fn", alias = "full_name")]
@@ -440,16 +895,90 @@ pub struct UpdateContactRequest {
     /// New organisation name, if provided.
     #[serde(default)]
     pub organization: Option<String>,
+    /// The `UID` is immutable: a `PATCH` carrying it is rejected with a `400`.
+    #[serde(default)]
+    pub uid: Option<String>,
+    /// New structured `N`, if provided.
+    #[serde(default)]
+    pub name: Option<StructuredNameInput>,
+    /// New `NICKNAME` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub nicknames: Option<Vec<String>>,
+    /// New `BDAY`, if provided.
+    #[serde(default)]
+    pub birthday: Option<String>,
+    /// New `ANNIVERSARY`, if provided.
+    #[serde(default)]
+    pub anniversary: Option<String>,
+    /// New `GENDER`, if provided.
+    #[serde(default)]
+    pub gender: Option<GenderInput>,
+    /// New `TEL` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub tels: Option<Vec<LabelledValueInput>>,
+    /// New `EMAIL` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub emails: Option<Vec<LabelledValueInput>>,
+    /// New `IMPP` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub impps: Option<Vec<LabelledValueInput>>,
+    /// New `ADR` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub addresses: Option<Vec<AddressInput>>,
+    /// New `GEO` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub geos: Option<Vec<String>>,
+    /// New `TZ` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub timezones: Option<Vec<String>>,
+    /// New `TITLE` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub titles: Option<Vec<String>>,
+    /// New `ROLE` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    /// New `ORG` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub organizations: Option<Vec<Vec<String>>>,
+    /// New `NOTE` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub notes: Option<Vec<String>>,
+    /// New `CATEGORIES` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub categories: Option<Vec<Vec<String>>>,
+    /// New `URL` values, if provided (`[]` deletes).
+    #[serde(default)]
+    pub urls: Option<Vec<String>>,
 }
 
 impl UpdateContactRequest {
     /// Whether the patch carries no updatable field at all.
+    ///
+    /// The immutable `uid` is deliberately **not** counted: a `PATCH` carrying
+    /// only a `uid` is rejected as a `400` (either "empty" or "uid immutable").
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.fn_.is_none()
             && self.email.is_none()
             && self.phone.is_none()
             && self.organization.is_none()
+            && self.name.is_none()
+            && self.nicknames.is_none()
+            && self.birthday.is_none()
+            && self.anniversary.is_none()
+            && self.gender.is_none()
+            && self.tels.is_none()
+            && self.emails.is_none()
+            && self.impps.is_none()
+            && self.addresses.is_none()
+            && self.geos.is_none()
+            && self.timezones.is_none()
+            && self.titles.is_none()
+            && self.roles.is_none()
+            && self.organizations.is_none()
+            && self.notes.is_none()
+            && self.categories.is_none()
+            && self.urls.is_none()
     }
 }
 

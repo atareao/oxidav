@@ -725,6 +725,71 @@ pub async fn insert_card_object(
     Ok(row)
 }
 
+/// Insert a batch of card objects in a **single transaction**.
+///
+/// Every row is inserted with a freshly computed ETag and the collection's
+/// `sync_token` is bumped (and a `sync_log` entry recorded) **once per
+/// resource**, exactly like [`insert_card_object`] — but all of it inside one
+/// transaction, so the whole batch either persists or none of it does. This is
+/// what makes `POST .../contacts/import` atomic: a duplicate `uid` aborts the
+/// transaction and leaves the table untouched.
+///
+/// # Errors
+///
+/// Returns [`DbError::Query`] on any database failure (e.g. the `(collection_id,
+/// uid)` uniqueness constraint).
+pub async fn insert_card_objects_batch(
+    pool: &SqlitePool,
+    new_cards: &[NewCardObject],
+) -> Result<Vec<CardObject>, DbError> {
+    if new_cards.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let now = now_millis();
+    let mut tx = begin_write(pool).await?;
+    let mut stored = Vec::with_capacity(new_cards.len());
+    for new in new_cards {
+        let etag = compute_etag(&new.raw_payload, now);
+        let row = sqlx::query_as::<_, CardObject>(
+            "INSERT INTO card_objects
+                (id, collection_id, uid, fn, email, phone, organization, notes,
+                 etag, raw_payload, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             RETURNING *",
+        )
+        .bind(&new.id)
+        .bind(&new.collection_id)
+        .bind(&new.uid)
+        .bind(&new.fn_)
+        .bind(&new.email)
+        .bind(&new.phone)
+        .bind(&new.organization)
+        .bind(&new.notes)
+        .bind(&etag)
+        .bind(&new.raw_payload)
+        .bind(now)
+        .bind(now)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+
+        let token = bump_sync_token(&mut tx, &row.collection_id).await?;
+        record_change(
+            &mut tx,
+            &row.collection_id,
+            &row.uid,
+            ResourceKind::Card,
+            ChangeKind::Added,
+            token,
+        )
+        .await?;
+        stored.push(row);
+    }
+    tx.commit().await.map_err(DbError::Query)?;
+    Ok(stored)
+}
+
 /// Update a card object's mutable fields, recomputing its ETag and bumping the
 /// collection's `sync_token`.
 ///
