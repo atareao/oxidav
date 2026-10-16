@@ -29,6 +29,16 @@ pila de fuentes en lugar de repetirla literalmente.
 
 ## Motivación
 
+### Enmienda por auditoría (2026-10-16)
+
+La revisión posterior detectó que la utilidad `.page` de `index.css` era **código
+muerto**: ningún elemento la aplicaba y el padding real de página lo aporta un
+`padding` inline en `web/src/components/AppLayout.tsx`. Como `--page-padding`
+solo «consumía» esa regla muerta, perpetuaba la misma fachada que F20 combate. Se
+eliminan ambas. Las variables supervivientes de `index.css` son por tanto **2**:
+`--font-sans` y `--line-height-base`. Todo lo que en este plan diga «3 variables»
+o «`--page-padding`» debe leerse con esta enmienda.
+
 ### Diagnóstico medido
 
 Inventario de las **14 variables** de `web/src/index.css`:
@@ -38,19 +48,25 @@ Inventario de las **14 variables** de `web/src/index.css`:
 | `--space-1` | 4px | nadie | MUERTA |
 | `--space-2` | 8px | nadie | MUERTA |
 | `--space-3` | 12px | nadie | MUERTA |
-| `--space-4` | 16px | `.page` (index.css:87) | viva, interna |
-| `--space-5` | 24px | `.page` @768 (index.css:92) | viva, interna |
+| `--space-4` | 16px | `.page` (index.css:87) | viva interna → **ELIMINADA** (su único consumidor, `.page`, es código muerto) |
+| `--space-5` | 24px | `.page` @768 (index.css:92) | viva interna → **ELIMINADA** (su único consumidor, `.page`, es código muerto) |
 | `--space-6` | 32px | nadie | MUERTA |
 | `--space-7` | 48px | nadie | MUERTA |
 | `--radius-sm` | 6px | nadie | MUERTA |
 | `--radius-md` | 10px | nadie | MUERTA |
 | `--radius-lg` | 14px | nadie | MUERTA |
 | `--radius-pill` | 999px | nadie | MUERTA |
-| `--font-sans` | pila system-ui… | `body` (index.css:60) | viva y DUPLICADA en TS |
+| `--font-sans` | pila system-ui… | `body` (index.css:60) | **SUPERVIVIENTE**, única declaración de la pila (el tema la referencia) |
 | `--font-mono` | pila mono… | nadie | MUERTA |
-| `--line-height-base` | 1.5 | `body` (index.css:61) | viva, interna |
+| `--line-height-base` | 1.5 | `body` (index.css:61) | **SUPERVIVIENTE** |
 
 Total: **10 muertas, 3 vivas internas, 1 viva y duplicada.**
+
+> **Destino de las supervivientes (tras la enmienda):** de las 4 variables consumidas solo
+> sobreviven **2** — `--font-sans` (única declaración de la pila de fuentes, referenciada
+> por el tema) y `--line-height-base`. `--space-4` y `--space-5` se eliminan con la utilidad
+> muerta `.page`. `--page-padding` **no existe** en el estado original: nació y murió en este
+> mismo plan.
 
 ### Hechos verificados (no suposiciones)
 
@@ -78,8 +94,10 @@ Total: **10 muertas, 3 vivas internas, 1 viva y duplicada.**
    utilidades del propio CSS y las variables que el propio CSS consume.
 2. **Invariante nuevo: ninguna variable CSS declarada sin consumidor.** Toda custom
    property de `index.css` debe aparecer al menos una vez como `var(--x)`.
-3. **Se eliminan las 10 variables muertas** y se colapsan `--space-4`/`--space-5` en una
-   única variable semántica `--page-padding`.
+3. **Se eliminan las 10 variables muertas** de la escala de espaciado, radios y mono **y
+   además** la utilidad muerta `.page` con su variable `--page-padding` y el
+   `@media (min-width: 768px)` que solo existía para ella (el padding real de página lo
+   aporta un `padding` inline en `web/src/components/AppLayout.tsx`).
 4. **La pila de fuentes vive en un solo fichero.** `--font-sans` se mantiene como única
    declaración; el tema de AntD la **referencia** con `'var(--font-sans)'`.
 5. **`color-scheme: light` por defecto se mantiene** (sigue siendo necesario: la pantalla
@@ -110,14 +128,14 @@ Total: **10 muertas, 3 vivas internas, 1 viva y duplicada.**
 - Eliminar las **10 variables muertas**: `--space-1`, `--space-2`, `--space-3`,
   `--space-6`, `--space-7`, `--radius-sm`, `--radius-md`, `--radius-lg`, `--radius-pill`,
   `--font-mono`.
-- Colapsar `--space-4` y `--space-5` en **una sola** variable semántica `--page-padding`
-  (16px), con override a 24px dentro de `@media (min-width: 768px)`; la utilidad `.page`
-  pasa a consumir `var(--page-padding)`.
+- Eliminar la utilidad `.page` (código muerto: ningún elemento la aplica) junto con su
+  variable `--page-padding` y el `@media (min-width: 768px)` que solo existía para ella; el
+  padding real de página lo aporta un `padding` inline en `web/src/components/AppLayout.tsx`.
 - Mantener `--font-sans` (única fuente de la pila de fuentes) y `--line-height-base`.
 - Mantener `color-scheme: light` por defecto (sigue siendo necesario: la pantalla de login
   se renderiza fuera del `ThemeProvider`).
-- **Resultado: en `:root` quedan exactamente 3 variables** (`--font-sans`,
-  `--line-height-base`, `--page-padding`), **todas consumidas**.
+- **Resultado: en `:root` quedan exactamente 2 variables** (`--font-sans`,
+  `--line-height-base`), **todas consumidas**.
 - Añadir un **comentario de cabecera** que declare explícitamente que **el sistema de diseño
   vivo es `theme.token` en `AuthenticatedApp.tsx`** y que `index.css` solo contiene lo que
   Ant Design no expresa (reset, `color-scheme`, utilidades y las variables que el propio CSS
@@ -190,10 +208,9 @@ Total: **10 muertas, 3 vivas internas, 1 viva y duplicada.**
 ### Fase 2 — Implementación (GREEN)
 
 - [ ] **Paso 3 (GREEN):** Editar `web/src/index.css`: eliminar las 10 variables muertas,
-      colapsar `--space-4`/`--space-5` en `--page-padding` (16px + override 24px @768) y
-      hacer que `.page` consuma `var(--page-padding)`; mantener `--font-sans`,
-      `--line-height-base` y `color-scheme: light`; añadir el comentario de cabecera.
-      Quedan exactamente 3 variables, todas consumidas. `npm run test`
+      la utilidad muerta `.page` (con `--page-padding` y su `@media`); mantener
+      `--font-sans`, `--line-height-base` y `color-scheme: light`; añadir el comentario de
+      cabecera. Quedan exactamente 2 variables, todas consumidas. `npm run test`
 - [ ] **Paso 4 (GREEN):** Editar `web/src/AuthenticatedApp.tsx`: `DESIGN_TOKENS.fontFamily`
       pasa a `'var(--font-sans)'` con el comentario de fuente única. Resto de tokens sin
       cambios. `npm run test`
@@ -219,8 +236,8 @@ Total: **10 muertas, 3 vivas internas, 1 viva y duplicada.**
 
 ## Criterios de aceptación
 
-- **`index.css` declara exactamente 3 variables** (`--font-sans`, `--line-height-base`,
-  `--page-padding`) y **todas tienen consumidor**.
+- **`index.css` declara exactamente 2 variables** (`--font-sans`, `--line-height-base`)
+  y **todas tienen consumidor**.
 - **La pila de fuentes vive en un solo fichero**: `system-ui` está en `index.css` y **no**
   en `AuthenticatedApp.tsx`; el tema usa `'var(--font-sans)'`.
 - **`theme.token` de AntD sin cambios salvo `fontFamily`**; `colorPrimary` por defecto.
@@ -245,8 +262,9 @@ Total: **10 muertas, 3 vivas internas, 1 viva y duplicada.**
 2. **Tests que leen ficheros con `fs`.** vitest corre en Node con entorno jsdom;
    `node:fs` está disponible. Mitigación: **verificarlo en la primera ejecución**
    (Paso 2).
-3. **Borrar una variable en uso.** Mitigado: solo hay **4 consumidores** y **3 sobreviven**
-   (el 4.º se colapsa en `--page-padding`).
+3. **Borrar una variable en uso.** Mitigado: de las **4 consumidas** solo **sobreviven 2**
+   (`--font-sans`, `--line-height-base`); las otras 2 (`--space-4`, `--space-5`) desaparecen
+   con la utilidad muerta `.page`, su único consumidor.
 
 ## Referencias
 
@@ -254,7 +272,8 @@ Total: **10 muertas, 3 vivas internas, 1 viva y duplicada.**
   actual; estructura y tono de la casa.
 - `plans/PLAN-019-timezone-support-COMPLETED.md` — estructura y estilo del plan.
 - `web/src/index.css` — las 14 variables (`--space-*`, `--radius-*`, `--font-*`),
-  `body` (líneas 60-61) y `.page` (líneas 87/92).
+  `body` (líneas 60-61) y `.page` (líneas 87/92, utilidad eliminada por muerta);
+  supervivientes finales: `--font-sans` y `--line-height-base`.
 - `web/src/AuthenticatedApp.tsx` — `theme.token` / `DESIGN_TOKENS` / `COMPONENT_TOKENS`.
 - `web/src/pages/pageLayout.ts` — layout de página (ritmo vertical y anchos fluidos).
 - `web/src/AuthenticatedApp.test.tsx` — aserción de `fontFamily`.
