@@ -1,4 +1,41 @@
 # Changelog
+## [0.4.0] - 2026-10-16
+
+### Bug Fixes
+
+- Media type honesto en las fotos embebidas y cobertura de render_list_property (F22)
+- Arreglos de la auditoría (N, import atómica, uid parseado, guardas y plegado) (F22)
+- Borrar N, GENDER, BDAY y ANNIVERSARY desde el PATCH (F22)
+- *(web)* Arreglos de la auditoría React (F22)
+
+### Documentation
+
+- Regenerar el changelog para 0.3.1
+- Añadir PLAN-023 (vCard completo y vista por pestañas, F22)
+- Documentación de F22 y cierre de PLAN-023
+- Añadir PLAN-024 (partir los ficheros grandes de F22)
+- Cierre de PLAN-024 y corrección del dato del baseline
+- Corregir dos cifras obsoletas del cierre de PLAN-024
+
+### Features
+
+- Detalle completo de la vCard y escritura por merge en la API (F22)
+- *(web)* Tipos, servicio y hook del detalle del contacto (F22)
+- *(web)* Pestañas del detalle del contacto (F22)
+- *(web)* Detalle real en el Drawer e importación en servidor (F22)
+- *(web)* Formulario de contacto completo con PATCH por diferencia (F22)
+
+### Refactor
+
+- Mover src/dav/vcf.rs a src/dav/vcf/ (F22)
+- Extraer la proyección a vcf/projection.rs (PLAN-024, paso 1)
+- Extraer la composición a vcf/build.rs (PLAN-024, paso 2)
+- Un solo parseo en project_card (PLAN-024, paso 3)
+- Partir api/contacts.rs en mod/validate/edits (PLAN-024, paso 4)
+
+### Testing
+
+- Contrato de la API de detalle, merge y importación (F22)
 ## [0.3.1] - 2026-10-16
 
 ### Documentation
