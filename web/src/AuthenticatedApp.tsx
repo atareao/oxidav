@@ -21,13 +21,19 @@ import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 /**
  * Design tokens shared by both colour schemes.
  *
+ * This is the project's single source of truth for the design system.
+ *
  * `colorPrimary` is deliberately absent: the plan keeps Ant Design's default
  * brand colour and only refines radii, typography, control density and spacing.
  */
 const DESIGN_TOKENS: ThemeConfig['token'] = {
   borderRadius: 10,
-  fontFamily:
-    "system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+  // The font stack is declared once, in `web/src/index.css` (`--font-sans`).
+  // Ant Design emits `font-family: var(--font-sans)`, which resolves against
+  // `:root`, so the literal stack is never repeated here.
+  // Do not hand this token to a JS consumer of a font string (e.g. a canvas
+  // `ctx.font` or `Watermark`): a CSS `var()` would not resolve there.
+  fontFamily: 'var(--font-sans)',
   fontSize: 14,
   controlHeight: 36,
   lineWidth: 1,
