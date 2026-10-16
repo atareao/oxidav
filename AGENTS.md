@@ -205,22 +205,41 @@ git checkout development && git pull origin development
 git checkout -b release/<versión>          # p. ej. release/0.2.0
 vampus upgrade --minor                      # o --major / --patch
 cargo check                                 # refresca la entrada de `oxidav` en Cargo.lock
-git commit -am "chore(release): <versión>"
+git add Cargo.toml Cargo.lock .vampus.yml   # nunca `-a`: arrastraría cambios locales ajenos
+git commit -m "chore(release): <versión>"
 git push -u origin release/<versión>
 # PR: release/<versión> -> main   (CI verde obligatorio)
 # tras mergear:
 git checkout main && git pull origin main
+git show main:Cargo.toml | grep -m1 '^version'   # guard: debe decir ya la versión NUEVA
 git tag -a v<versión> -m "<versión>" && git push origin v<versión>
 # image.yml publica vX.Y.Z, X.Y y latest
-git checkout development && git merge --ff-only origin/main && git push origin development
 ```
 
 **Gotcha del changelog (obliga a dos tandas de PR):** `git-cliff` deriva las
-secciones de los **tags**: si regeneras `CHANGELOG.md` antes de crear el tag, el
-contenido sale bajo `[unreleased]` y no como `[X.Y.Z]`. Por eso el ciclo son dos
-PR: primero el bump (`chore(release): X.Y.Z`) → `main` → tag; después
-`git-cliff --output CHANGELOG.md` en una rama nueva → `development` → `main`; y
-por último `gh release create v<versión> --notes-file <sección del changelog>`.
+secciones de los **tags**, y solo ve un tag si está **en el historial de la rama
+que lee**. Por eso la rama donde se regenera `CHANGELOG.md` debe **contener ya el
+tag nuevo**: lo que funciona —y lo que se hizo en 0.4.0 y 0.5.0— es basarla en
+`main`, que acaba de recibir el tag. Basarla en `development` **antes** de
+sincronizarlo con `main` falla **en silencio**: no hay error, pero la sección
+`[X.Y.Z]` sale **vacía** y todo cae bajo `[unreleased]`. (Si se prefiere basarla
+en `development`, hay que hacer antes el `merge --ff-only origin/main`.) El
+ciclo, entonces:
+
+```bash
+git checkout main && git pull origin main
+git checkout -b feature/changelog-<versión>
+git-cliff --output CHANGELOG.md            # con el tag ya creado
+git add CHANGELOG.md && git commit -m "docs: regenerar el changelog para <versión>"
+# PR: feature/changelog-<versión> -> main   (main exige PR y CI verde)
+# tras mergear, y solo entonces:
+git checkout development && git merge --ff-only origin/main && git push origin development
+```
+
+Nota: así `main` queda un commit **por delante del tag** (solo el changelog). Es
+lo esperado: el tag marca el código liberado y el changelog se añade después.
+
+Por último, **`gh release create v<versión> --notes-file <sección del changelog>`**.
 
 ### Antes de commitear
 Deja el árbol formateado o la CI falla:
