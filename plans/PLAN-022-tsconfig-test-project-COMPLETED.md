@@ -33,6 +33,30 @@ TypeScript** (más dos comentarios). No cambia nada de runtime.
 
 ## Motivación
 
+### Enmienda por auditoría (2026-10-16)
+
+La implementación y la auditoría posterior ajustaron estos puntos del plan; donde este
+documento diga otra cosa, **manda esta enmienda**:
+
+- **Los recuentos.** El plan habla de 13 ficheros de test y 116 tests: es la foto **previa**
+  a esta feature. Tras F21 son **14 ficheros y 124 tests**, porque el propio test de
+  invariantes es uno de ellos.
+- **El patrón `src/test/**` bastó.** No hubo que cambiarlo a `src/test/**/*`: verificado con
+  el parser de TypeScript (`setup.ts` queda fuera del proyecto de app y dentro del de test).
+- **El código de error de la mutación (a) es TS2591**, no el TS2580 que estimaba el plan:
+  `Cannot find name 'process'`. El mensaje sugiere «instalar `@types/node`», engañoso aquí:
+  ya está instalado, lo que se quitó fue su declaración en el proyecto de app.
+- **Guarda añadida por auditoría.** `readProjectConfig` ahora falla si
+  `ts.parseJsonConfigFileContent` devuelve diagnósticos —`readConfigFile` no avisa de un
+  `extends` roto, así que antes se colaba— y cachea el parseo de cada proyecto para no
+  repetirlo en cada invariante.
+- **`docs/F20-design-tokens-cleanup.md`** describe la decisión contraria: en su tabla de
+  hallazgos dice que el `tsconfig.test.json` separado «se descartó por superficie», y en
+  «Desviaciones del plan» que hubo que añadir `"node"` a `tsconfig.app.json`. Es el registro
+  histórico de F20 y **se deja como está**, pero F21 **revierte esa decisión**.
+- **`compose.yaml`** estaba modificado en el árbol de trabajo por el usuario: quedó **fuera
+  de todos los commits** de F21.
+
 ### Diagnóstico medido
 
 - `web/tsconfig.json`: estilo *solution*, con `files: []` y **2 referencias**
