@@ -154,7 +154,7 @@ describe('Contacts', () => {
     const user = userEvent.setup()
     renderContacts()
 
-    await screen.findByRole('heading', { name: /contactos/i, level: 2 })
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
     await waitFor(() => expect(listContacts).toHaveBeenCalledTimes(2))
     expect(listContacts).toHaveBeenNthCalledWith(
       1,
@@ -225,7 +225,7 @@ describe('Contacts', () => {
 
     const user = userEvent.setup()
     renderContacts()
-    await screen.findByRole('heading', { name: /contactos/i, level: 2 })
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
 
     await user.click(await screen.findByRole('button', { name: /nuevo contacto/i }))
     const dialog = await screen.findByRole('dialog')
@@ -262,7 +262,7 @@ describe('Contacts', () => {
 
     const user = userEvent.setup()
     renderContacts()
-    await screen.findByRole('heading', { name: /contactos/i, level: 2 })
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
 
     await user.click(await screen.findByRole('button', { name: /nuevo contacto/i }))
     const dialog = await screen.findByRole('dialog')
@@ -381,7 +381,7 @@ describe('Contacts', () => {
     vi.mocked(createContact).mockResolvedValue(makeContact({ uid: 'imported-1', fn: 'Imported Person' }))
 
     renderContacts()
-    await screen.findByRole('heading', { name: /contactos/i, level: 2 })
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
 
     const vcf = serializeContactsToVcf([
       {
@@ -404,6 +404,41 @@ describe('Contacts', () => {
       ),
     )
     await waitFor(() => expect(messageSuccess).toHaveBeenCalledWith('1 contacto(s) importado(s)'))
+  })
+
+  it('renderiza el Alert de error con la prop `title` (sin la deprecada `message`)', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockRejectedValue(new Error('no disponible'))
+
+    // Ant Design v6 deprecates `Alert.message` in favour of `title`; the legacy
+    // prop logs a console warning. Any such warning fails this test.
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    renderContacts()
+
+    expect(await screen.findByText('No se pudieron cargar los datos')).toBeInTheDocument()
+    const deprecatedUsages = consoleError.mock.calls
+      .flat()
+      .filter((arg) => typeof arg === 'string' && arg.includes('`message` is deprecated'))
+    expect(deprecatedUsages).toEqual([])
+    consoleError.mockRestore()
+  })
+
+  it('recarga los datos al pulsar «Reintentar» en el Alert de error', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts)
+      .mockRejectedValueOnce(new Error('no disponible'))
+      .mockResolvedValue([makeContact({ fn: 'Grace Hopper' })])
+
+    const user = userEvent.setup()
+    renderContacts()
+
+    await screen.findByText('No se pudieron cargar los datos')
+    await user.click(screen.getByRole('button', { name: 'Reintentar' }))
+
+    await waitFor(() =>
+      expect(screen.queryByText('No se pudieron cargar los datos')).not.toBeInTheDocument(),
+    )
+    expect(await screen.findByText('Grace Hopper')).toBeInTheDocument()
   })
 })
 

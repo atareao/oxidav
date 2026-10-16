@@ -24,13 +24,13 @@ import {
   Card,
   DatePicker,
   Empty,
+  Flex,
   Form,
   Input,
   Modal,
   Popconfirm,
   Select,
   Space,
-  Spin,
   Typography,
 } from 'antd'
 import dayjs from 'dayjs'
@@ -60,6 +60,7 @@ import {
   startOfMonthMs,
 } from '../utils/date'
 import { tempId } from '../utils/tempId'
+import { PAGE_GAP, fluidControlStyle } from './pageLayout'
 
 const { RangePicker } = DatePicker
 
@@ -387,190 +388,188 @@ export function Calendar() {
 
   return (
     <>
-      <Typography.Title level={2}>Calendario</Typography.Title>
+      <h1 className="sr-only">Calendario</h1>
 
-      {loadError !== null ? (
-        <Alert
-          type="error"
-          showIcon
-          message="No se pudieron cargar los datos"
-          description={loadError}
-          action={
-            <Button
-              size="small"
-              onClick={() => {
-                setCollectionsReloadToken((token) => token + 1)
-                reloadEvents()
-              }}
-            >
-              Reintentar
-            </Button>
+      <Flex vertical gap={PAGE_GAP}>
+        {loadError !== null ? (
+          <Alert
+            type="error"
+            showIcon
+            title="No se pudieron cargar los datos"
+            description={loadError}
+            action={
+              <Button
+                size="small"
+                onClick={() => {
+                  setCollectionsReloadToken((token) => token + 1)
+                  reloadEvents()
+                }}
+              >
+                Reintentar
+              </Button>
+            }
+          />
+        ) : null}
+
+        {mutationError !== null ? (
+          <Alert
+            type="error"
+            showIcon
+            closable
+            title={mutationError}
+            onClose={() => setMutationError(null)}
+          />
+        ) : null}
+
+        <Card
+          loading={loading}
+          title={formatMonthLabel(month)}
+          extra={
+            <Space wrap>
+              <Select
+                aria-label="Colección"
+                style={fluidControlStyle}
+                placeholder="Selecciona un calendario"
+                value={effectiveCollectionId ?? undefined}
+                onChange={(value: string) => setSelectedCollectionId(value)}
+                loading={collectionsLoading}
+                disabled={collections.length === 0}
+                options={collections.map((collection) => ({
+                  value: collection.id,
+                  label: collection.name,
+                }))}
+              />
+              <Button
+                aria-label="Mes anterior"
+                onClick={() => setMonth((current) => addMonths(current, -1))}
+              >
+                ‹
+              </Button>
+              <Button onClick={() => setMonth(() => new Date())}>Hoy</Button>
+              <Button
+                aria-label="Mes siguiente"
+                onClick={() => setMonth((current) => addMonths(current, 1))}
+              >
+                ›
+              </Button>
+              <Button type="primary" onClick={openCreate} disabled={effectiveCollectionId === null}>
+                Nuevo evento
+              </Button>
+            </Space>
           }
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-
-      {mutationError !== null ? (
-        <Alert
-          type="error"
-          showIcon
-          closable
-          message={mutationError}
-          onClose={() => setMutationError(null)}
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-
-      <Card
-        title={formatMonthLabel(month)}
-        extra={
-          <Space wrap>
-            <Select
-              aria-label="Colección"
-              style={{ minWidth: 200 }}
-              placeholder="Selecciona un calendario"
-              value={effectiveCollectionId ?? undefined}
-              onChange={(value: string) => setSelectedCollectionId(value)}
-              loading={collectionsLoading}
-              disabled={collections.length === 0}
-              options={collections.map((collection) => ({
-                value: collection.id,
-                label: collection.name,
-              }))}
-            />
-            <Button
-              aria-label="Mes anterior"
-              onClick={() => setMonth((current) => addMonths(current, -1))}
-            >
-              ‹
-            </Button>
-            <Button onClick={() => setMonth(() => new Date())}>Hoy</Button>
-            <Button
-              aria-label="Mes siguiente"
-              onClick={() => setMonth((current) => addMonths(current, 1))}
-            >
-              ›
-            </Button>
-            <Button type="primary" onClick={openCreate} disabled={effectiveCollectionId === null}>
-              Nuevo evento
-            </Button>
-          </Space>
-        }
-      >
-        {loading ? (
-          <div style={{ display: 'flex', justifyContent: 'center', padding: 48 }}>
-            <Spin />
-          </div>
-        ) : collections.length === 0 ? (
-          <Empty description="No hay calendarios disponibles" />
-        ) : (
-          <div style={{ overflowX: 'auto' }}>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
-                gap: 4,
-                minWidth: 700,
-              }}
-            >
-              {WEEKDAYS.map((weekday) => (
-                <div key={weekday} style={{ padding: 8, textAlign: 'center', fontWeight: 600 }}>
-                  {weekday}
-                </div>
-              ))}
-              {days.map((day) => {
-                const key = dateKey(day)
-                const dayEvents = eventsByDay.get(key) ?? []
-                const inMonth = isSameMonth(day, month)
-                return (
-                  <div
-                    key={key}
-                    style={{
-                      minHeight: 96,
-                      padding: 4,
-                      border: '1px solid rgba(128, 128, 128, 0.25)',
-                      borderRadius: 4,
-                      background: inMonth ? undefined : 'rgba(128, 128, 128, 0.08)',
-                      opacity: inMonth ? 1 : 0.6,
-                    }}
-                  >
-                    <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
-                      {formatDayLabel(day)}
-                    </div>
-                    <ul
+        >
+          {collections.length === 0 ? (
+            <Empty description="No hay calendarios disponibles" />
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(7, minmax(0, 1fr))',
+                  gap: 4,
+                  minWidth: 480,
+                }}
+              >
+                {WEEKDAYS.map((weekday) => (
+                  <div key={weekday} style={{ padding: 8, textAlign: 'center', fontWeight: 600 }}>
+                    {weekday}
+                  </div>
+                ))}
+                {days.map((day) => {
+                  const key = dateKey(day)
+                  const dayEvents = eventsByDay.get(key) ?? []
+                  const inMonth = isSameMonth(day, month)
+                  return (
+                    <div
+                      key={key}
                       style={{
-                        listStyle: 'none',
-                        margin: 0,
-                        padding: 0,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 2,
+                        minHeight: 96,
+                        padding: 4,
+                        border: '1px solid rgba(128, 128, 128, 0.25)',
+                        borderRadius: 4,
+                        background: inMonth ? undefined : 'rgba(128, 128, 128, 0.08)',
+                        opacity: inMonth ? 1 : 0.6,
                       }}
                     >
-                      {dayEvents.map((event) => (
-                        <li
-                          key={event.uid}
-                          style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}
-                        >
-                          <Button
-                            type="link"
-                            size="small"
-                            style={{
-                              padding: 0,
-                              height: 'auto',
-                              textAlign: 'left',
-                              whiteSpace: 'normal',
-                              minWidth: 0,
-                            }}
-                            onClick={() => openEdit(event)}
-                          >
-                            {formatTime(event.dtstart)} · {event.summary ?? '(sin título)'}
-                          </Button>
-                          {event.dtstart_tzid !== null ? (
-                            <Typography.Text
-                              type="secondary"
-                              style={{
-                                fontSize: 12,
-                                flex: '0 0 auto',
-                                maxWidth: 96,
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                              }}
-                            >
-                              {event.dtstart_tzid}
-                            </Typography.Text>
-                          ) : null}
-                          <Popconfirm
-                            title="Eliminar evento"
-                            description="¿Seguro que quieres eliminar este evento?"
-                            okText="Eliminar"
-                            cancelText="Cancelar"
-                            okButtonProps={{ danger: true }}
-                            onConfirm={() => handleDelete(event)}
+                      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                        {formatDayLabel(day)}
+                      </div>
+                      <ul
+                        style={{
+                          listStyle: 'none',
+                          margin: 0,
+                          padding: 0,
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 2,
+                        }}
+                      >
+                        {dayEvents.map((event) => (
+                          <li
+                            key={event.uid}
+                            style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}
                           >
                             <Button
-                              danger
-                              type="text"
+                              type="link"
                               size="small"
-                              aria-label={`Eliminar ${event.summary ?? 'evento'}`}
+                              style={{
+                                padding: 0,
+                                height: 'auto',
+                                textAlign: 'left',
+                                whiteSpace: 'normal',
+                                minWidth: 0,
+                              }}
+                              onClick={() => openEdit(event)}
                             >
-                              ✕
+                              {formatTime(event.dtstart)} · {event.summary ?? '(sin título)'}
                             </Button>
-                          </Popconfirm>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )
-              })}
+                            {event.dtstart_tzid !== null ? (
+                              <Typography.Text
+                                type="secondary"
+                                style={{
+                                  fontSize: 12,
+                                  flex: '0 0 auto',
+                                  maxWidth: 96,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {event.dtstart_tzid}
+                              </Typography.Text>
+                            ) : null}
+                            <Popconfirm
+                              title="Eliminar evento"
+                              description="¿Seguro que quieres eliminar este evento?"
+                              okText="Eliminar"
+                              cancelText="Cancelar"
+                              okButtonProps={{ danger: true }}
+                              onConfirm={() => handleDelete(event)}
+                            >
+                              <Button
+                                danger
+                                type="text"
+                                size="small"
+                                aria-label={`Eliminar ${event.summary ?? 'evento'}`}
+                              >
+                                ✕
+                              </Button>
+                            </Popconfirm>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
-          </div>
-        )}
-      </Card>
+          )}
+        </Card>
+      </Flex>
 
       <Modal
-        title={editing === null ? 'Nuevo evento' : 'Editar evento'}        open={modalOpen}
+        title={editing === null ? 'Nuevo evento' : 'Editar evento'}
+        open={modalOpen}
         onOk={() => form.submit()}
         okText={editing === null ? 'Crear' : 'Guardar'}
         cancelText="Cancelar"
