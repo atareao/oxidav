@@ -1,4 +1,28 @@
 # Changelog
+## [0.3.0] - 2026-10-16
+
+### Bug Fixes
+
+- El color-scheme del documento sigue el tema de la app, no el del SO
+- Recuperar el espaciado del aviso del modal de token creado
+
+### Documentation
+
+- Regenerate the changelog for 0.2.0
+- Record the hard-won lessons in AGENTS.md
+- Documentar F18 y levantar la limitación de zonas horarias de F07
+- Plan del rediseño UX transversal del SPA (F19)
+- Documentar F19 (rediseño UX transversal del SPA)
+- Cerrar el plan de F19 (rediseño UX transversal)
+
+### Features
+
+- Soporte de zonas horarias (TZID + VTIMEZONE) extremo a extremo
+- Sistema de diseno base del SPA (tokens y dependencia de iconos)
+- Navegación en cabecera y shell responsive (sin Sider)
+- H1 semántico oculto y retirada de los encabezados de página
+- Estados homogéneos, responsividad y Alert migrado a title
+- Título del documento por ruta y guardas de accesibilidad
 ## [0.2.0] - 2026-10-15
 
 ### Documentation
