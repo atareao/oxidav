@@ -1,17 +1,20 @@
 /**
- * Client-side vCard helpers for the Contacts view (F12).
+ * Client-side vCard helpers for the Contacts view (F12, revisado en F22).
  *
- * Export is generated locally from the contact DTOs (no server round-trip); the
- * backend remains the source of truth for the stored `raw_payload`, but the SPA
- * needs to offer a portable `.vcf` download of the current listing. Import reads
- * a `.vcf` file and yields field tuples that the page turns into `POST` calls.
+ * Solo queda el **export**: se compone localmente a partir de los DTO de la
+ * lista (sin ida al servidor) para ofrecer una descarga `.vcf` portable de los
+ * contactos visibles. Es **lossy** por diseño: vCard 3.0 con los cinco campos
+ * básicos que expone el DTO (`FN`, `EMAIL`, `TEL`, `ORG`, `UID`); el fichero
+ * **completo** (fotos, direcciones, multivalor, `X-*`…) vive en el servidor y se
+ * obtiene por CardDAV. Esta limitación está documentada y es consciente: no se
+ * duplica el RFC 6350 en el navegador.
  *
- * Scope is deliberately small (vCard 3.0, the fields the DTO exposes: `FN`,
- * `EMAIL`, `TEL`, `ORG`, `UID`): it is a convenience interchange format, not a
- * full RFC 6350 parser.
+ * La **importación ya no pasa por el cliente** (F22): la vista envía el texto
+ * del fichero en crudo al servidor (`POST .../contacts/import`), que lo parsea
+ * sin pérdida. Por eso aquí ya no hay parser.
  */
 
-import type { Contact, CreateContactInput } from '../types/api'
+import type { Contact } from '../types/api'
 
 const CRLF = '\r\n'
 
@@ -72,15 +75,6 @@ export type VCardSource = Pick<
   'uid' | 'fn' | 'full_name' | 'email' | 'phone' | 'organization'
 >
 
-/** A parsed contact, ready to be sent as {@link CreateContactInput}. */
-export interface ParsedVCard {
-  fn: string
-  email: string | null
-  phone: string | null
-  organization: string | null
-  uid: string | null
-}
-
 /** Escape a value for a vCard property (RFC 6350 §3.4). */
 function escapeValue(value: string): string {
   return value
@@ -88,20 +82,6 @@ function escapeValue(value: string): string {
     .replace(/\r\n|\r|\n/g, '\\n')
     .replace(/,/g, '\\,')
     .replace(/;/g, '\\;')
-}
-
-/**
- * Reverse {@link escapeValue} in a **single pass**.
- *
- * A chained implementation is order-dependent and corrupts any value holding a
- * literal backslash followed by an escaped character (`C:\new` exports as
- * `C:\\new` and would unfold back to a newline). Matching the whole escape
- * (`\` + one of `\ n N , ;`) at once keeps the round-trip lossless.
- */
-function unescapeValue(value: string): string {
-  return value.replace(/\\([\\nN,;])/g, (_match, escaped: string) =>
-    escaped === 'n' || escaped === 'N' ? '\n' : escaped,
-  )
 }
 
 /**
@@ -136,87 +116,6 @@ export function serializeContactsToVcf(contacts: readonly VCardSource[]): string
       return lines.map(foldLine).join(CRLF)
     })
     .join(CRLF)
-}
-
-/**
- * Parse a vCard document into field tuples.
- *
- * Unfolds continuation lines (a CRLF/LF followed by a space or tab) and keeps
- * the first value seen for multi-valued properties (`EMAIL`, `TEL`).
- */
-export function parseVcf(text: string): ParsedVCard[] {
-  const unfolded = text.replace(/\r\n[ \t]/g, '').replace(/\n[ \t]/g, '')
-  const cards: ParsedVCard[] = []
-  let current: ParsedVCard | null = null
-
-  for (const rawLine of unfolded.split(/\r\n|\n|\r/)) {
-    const line = rawLine.trim()
-    if (line.length === 0) {
-      continue
-    }
-    const upper = line.toUpperCase()
-    if (upper === 'BEGIN:VCARD') {
-      current = { fn: '', email: null, phone: null, organization: null, uid: null }
-      continue
-    }
-    if (upper === 'END:VCARD') {
-      if (current !== null && current.fn.trim().length > 0) {
-        cards.push(current)
-      }
-      current = null
-      continue
-    }
-    if (current === null) {
-      continue
-    }
-
-    const separator = line.indexOf(':')
-    if (separator === -1) {
-      continue
-    }
-    const property = line.slice(0, separator).split(';')[0]?.toUpperCase() ?? ''
-    const value = unescapeValue(line.slice(separator + 1))
-
-    switch (property) {
-      case 'FN':
-        current.fn = value
-        break
-      case 'EMAIL':
-        current.email ??= value
-        break
-      case 'TEL':
-        current.phone ??= value
-        break
-      case 'ORG':
-        current.organization ??= value
-        break
-      case 'UID':
-        current.uid = value
-        break
-      default:
-        break
-    }
-  }
-
-  return cards
-}
-
-/** Convert a parsed card into the API create payload (blank fields omitted). */
-export function vcardToCreateInput(card: ParsedVCard): CreateContactInput {
-  const input: CreateContactInput = { fn: card.fn.trim() }
-  if (card.email !== null && card.email !== '') {
-    input.email = card.email
-  }
-  if (card.phone !== null && card.phone !== '') {
-    input.phone = card.phone
-  }
-  if (card.organization !== null && card.organization !== '') {
-    input.organization = card.organization
-  }
-  if (card.uid !== null && card.uid !== '') {
-    input.uid = card.uid
-  }
-  return input
 }
 
 /** Trigger a client-side text download (e.g. the exported `.vcf`). */
