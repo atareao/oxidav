@@ -203,6 +203,29 @@ pub fn render_uri_property(name: &str, value: &str, types: &[String], pref: Opti
     format!("{}{}:{}", name.trim(), params, value)
 }
 
+/// Renderiza una propiedad de **lista** (`CATEGORIES`): los elementos se unen con
+/// `,` **sin escapar** (el separador de la lista), pero dentro de cada elemento se
+/// aplica el escape de texto de RFC 6350 §3.4 (`\`, `,` y `;`), de modo que una
+/// coma interna no se confunda con un separador. Devuelve cadena vacía cuando los
+/// parámetros son inválidos.
+#[must_use]
+pub fn render_list_property(
+    name: &str,
+    values: &[String],
+    types: &[String],
+    pref: Option<u8>,
+) -> String {
+    let Some(params) = render_parameters(types, pref) else {
+        return String::new();
+    };
+    let value = values
+        .iter()
+        .map(|element| escape_text(element))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{}{}:{}", name.trim(), params, value)
+}
+
 /// Máximo de *tokens* `TYPE` admitidos por propiedad.
 const MAX_TYPES: usize = 8;
 /// Longitud máxima de un *token* `TYPE`.
