@@ -2,7 +2,7 @@
  * Shared Suspense fallback for lazy-loaded routes.
  *
  * Used both at the top level (`App.tsx`, for the layout-less `/login` and
- * `/callback` routes) and inside `AppLayout` (so the Sider/Header shell stays
+ * `/callback` routes) and inside `AppLayout` (so the header shell stays
  * visible while a protected page chunk loads). Announced to assistive tech via
  * `role="status"` + `aria-label`.
  */

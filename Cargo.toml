@@ -1,6 +1,6 @@
 [package]
 name = "oxidav"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # Guarantees `web/dist` exists at compile time for `rust-embed` (F15).
 build = "build.rs"
@@ -100,6 +100,15 @@ percent-encoding = "2"
 # `serde`/`language-tags`/`mime` integrations; only the RFC 6350 parser core is
 # pulled. `parse_loose` tolerates cards whose individual properties are invalid.
 vcard4 = { version = "0.7", default-features = false }
+# Timezone support: IANA TZID handling (validation + offsets) for the
+# denormalised `dtstart_tzid`/`dtend_tzid` columns. Pure Rust, no OpenSSL.
+chrono-tz = "0.10"
+# F18: `VTIMEZONE` derivation needs to build a `chrono::DateTime` to sample a
+# zone's offset through `chrono_tz::Tz`'s `chrono::TimeZone` impl (chrono-tz
+# 0.10 does not expose its transition tables). `chrono` 0.4 is already in the
+# tree via `icalendar`; declaring it directly adds no new crate and keeps the
+# static-musl / no-OpenSSL property intact.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # `tower::ServiceExt::oneshot` is only needed by the router integration tests.

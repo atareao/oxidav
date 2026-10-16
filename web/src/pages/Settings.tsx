@@ -22,6 +22,7 @@ import {
   Card,
   Descriptions,
   Empty,
+  Flex,
   Form,
   Input,
   Modal,
@@ -46,6 +47,7 @@ import {
   type CreateCollectionInput,
 } from '../services/collections'
 import type { Collection, CollectionType } from '../types/api'
+import { PAGE_GAP } from './pageLayout'
 
 /** Shape of the create-collection `Form`. */
 interface CreateCollectionFormValues {
@@ -299,68 +301,69 @@ export function Settings() {
 
   return (
     <>
-      <Typography.Title level={2}>Ajustes</Typography.Title>
+      <h1 className="sr-only">Ajustes</h1>
 
-      {error !== null && !loading ? (
-        <Alert
-          type="error"
-          showIcon
-          title="No se pudieron cargar los datos"
-          description={error}
-          action={
-            <Button size="small" onClick={() => setReloadToken((token) => token + 1)}>
-              Reintentar
+      <Flex vertical gap={PAGE_GAP}>
+        {error !== null && !loading ? (
+          <Alert
+            type="error"
+            showIcon
+            title="No se pudieron cargar los datos"
+            description={error}
+            action={
+              <Button size="small" onClick={() => setReloadToken((token) => token + 1)}>
+                Reintentar
+              </Button>
+            }
+          />
+        ) : null}
+
+        <Card title="Perfil">
+          <Descriptions column={1} size="small">
+            <Descriptions.Item label="Usuario">
+              <Typography.Text code data-testid="profile-user">
+                {loading ? '…' : (username ?? '—')}
+              </Typography.Text>
+            </Descriptions.Item>
+          </Descriptions>
+        </Card>
+
+        <Card title="Apariencia">
+          <Space align="center" wrap>
+            <Typography.Text>Tema</Typography.Text>
+            <Segmented<ThemeMode>
+              aria-label="Tema"
+              value={mode}
+              onChange={handleModeChange}
+              options={[
+                { label: 'Claro', value: 'light' },
+                { label: 'Oscuro', value: 'dark' },
+              ]}
+            />
+          </Space>
+        </Card>
+
+        <Card
+          title="Colecciones"
+          extra={
+            <Button type="primary" onClick={openCreate}>
+              Crear colección
             </Button>
           }
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-
-      <Card title="Perfil" style={{ marginBottom: 16 }}>
-        <Descriptions column={1} size="small">
-          <Descriptions.Item label="Usuario">
-            <Typography.Text code data-testid="profile-user">
-              {loading ? '…' : (username ?? '—')}
-            </Typography.Text>
-          </Descriptions.Item>
-        </Descriptions>
-      </Card>
-
-      <Card title="Apariencia" style={{ marginBottom: 16 }}>
-        <Space align="center" wrap>
-          <Typography.Text>Tema</Typography.Text>
-          <Segmented<ThemeMode>
-            aria-label="Tema"
-            value={mode}
-            onChange={handleModeChange}
-            options={[
-              { label: 'Claro', value: 'light' },
-              { label: 'Oscuro', value: 'dark' },
-            ]}
+        >
+          <Table<Collection>
+            rowKey="id"
+            columns={columns}
+            dataSource={collections}
+            loading={loading}
+            pagination={{ pageSize: 20, showSizeChanger: false }}
+            locale={{
+              emptyText: <Empty description="No hay colecciones" />,
+            }}
+            scroll={{ x: 'max-content' }}
           />
-        </Space>
-      </Card>
-
-      <Card
-        title="Colecciones"
-        extra={
-          <Button type="primary" onClick={openCreate}>
-            Crear colección
-          </Button>
-        }
-      >
-        <Table<Collection>
-          rowKey="id"
-          columns={columns}
-          dataSource={collections}
-          loading={loading}
-          pagination={{ pageSize: 20, showSizeChanger: false }}
-          locale={{
-            emptyText: <Empty description="No hay colecciones" />,
-          }}
-          scroll={{ x: 'max-content' }}
-        />
-      </Card>
+        </Card>
+      </Flex>
 
       <Modal
         title="Crear colección"

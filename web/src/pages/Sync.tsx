@@ -22,6 +22,7 @@ import {
   Card,
   Descriptions,
   Empty,
+  Flex,
   Form,
   Input,
   Modal,
@@ -41,6 +42,7 @@ import {
 import { toErrorMessage } from '../services/api'
 import type { AppToken, CreatedAppToken } from '../types/api'
 import { copyToClipboard } from '../utils/clipboard'
+import { PAGE_GAP } from './pageLayout'
 
 /** Shape of the create-token `Form`. */
 interface CreateTokenFormValues {
@@ -248,102 +250,103 @@ export function Sync() {
 
   return (
     <>
-      <Typography.Title level={2}>Sincronización y dispositivos</Typography.Title>
+      <h1 className="sr-only">Sincronización y dispositivos</h1>
 
-      {error !== null ? (
-        <Alert
-          type="error"
-          showIcon
-          title="No se pudieron cargar los datos"
-          description={error}
-          action={
-            <Button size="small" onClick={() => setReloadToken((token) => token + 1)}>
-              Reintentar
+      <Flex vertical gap={PAGE_GAP}>
+        {error !== null ? (
+          <Alert
+            type="error"
+            showIcon
+            title="No se pudieron cargar los datos"
+            description={error}
+            action={
+              <Button size="small" onClick={() => setReloadToken((token) => token + 1)}>
+                Reintentar
+              </Button>
+            }
+          />
+        ) : null}
+
+        <Card title="URLs DAV">
+          <Typography.Paragraph type="secondary">
+            Configura estos servidores en tus clientes CalDAV/CardDAV. La autenticación es
+            <Typography.Text strong> Basic Auth</Typography.Text>: usa tu usuario y un token de
+            aplicación (sección «Tokens de aplicación») como contraseña.
+          </Typography.Paragraph>
+          <Descriptions column={1} bordered size="small">
+            <Descriptions.Item label="CalDAV">
+              <Space wrap>
+                <Typography.Text code data-testid="caldav-url">
+                  {caldav}
+                </Typography.Text>
+                <Button
+                  size="small"
+                  aria-label="Copiar URL CalDAV"
+                  onClick={() => {
+                    void handleCopy(caldav)
+                  }}
+                >
+                  Copiar
+                </Button>
+              </Space>
+            </Descriptions.Item>
+            <Descriptions.Item label="CardDAV">
+              <Space wrap>
+                <Typography.Text code data-testid="carddav-url">
+                  {carddav}
+                </Typography.Text>
+                <Button
+                  size="small"
+                  aria-label="Copiar URL CardDAV"
+                  onClick={() => {
+                    void handleCopy(carddav)
+                  }}
+                >
+                  Copiar
+                </Button>
+              </Space>
+            </Descriptions.Item>
+          </Descriptions>
+        </Card>
+
+        <Card title="Cómo conectar tus dispositivos">
+          <Typography.Paragraph>
+            <Typography.Text strong>iPhone / iPad (iOS):</Typography.Text> Ajustes → Apps → Calendario →
+            Cuentas → Añadir cuenta → Otra → «Añadir cuenta CalDAV». Introduce la URL CalDAV, tu usuario
+            y el token como contraseña. Para contactos, repite con «Añadir cuenta CardDAV».
+          </Typography.Paragraph>
+          <Typography.Paragraph>
+            <Typography.Text strong>Android (DAVx⁵):</Typography.Text> Añade una cuenta, elige «Iniciar
+            sesión con URL y usuario», pega la URL CalDAV o CardDAV, tu usuario y el token.
+          </Typography.Paragraph>
+          <Typography.Paragraph style={{ marginBottom: 0 }}>
+            <Typography.Text strong>Thunderbird:</Typography.Text> Añade un calendario o una libreta de
+            direcciones «en la red», introduce la URL correspondiente y selecciona autenticación básica
+            con tu usuario y el token.
+          </Typography.Paragraph>
+        </Card>
+
+        <Card
+          title="Tokens de aplicación"
+          extra={
+            <Button type="primary" onClick={() => setCreateOpen(true)}>
+              Crear token
             </Button>
           }
-          style={{ marginBottom: 16 }}
-        />
-      ) : null}
-
-      <Card title="URLs DAV" style={{ marginBottom: 16 }}>
-        <Typography.Paragraph type="secondary">
-          Configura estos servidores en tus clientes CalDAV/CardDAV. La autenticación es
-          <Typography.Text strong> Basic Auth</Typography.Text>: usa tu usuario y un token de
-          aplicación (sección «Tokens de aplicación») como contraseña.
-        </Typography.Paragraph>
-        <Descriptions column={1} bordered size="small">
-          <Descriptions.Item label="CalDAV">
-            <Space wrap>
-              <Typography.Text code data-testid="caldav-url">
-                {caldav}
-              </Typography.Text>
-              <Button
-                size="small"
-                aria-label="Copiar URL CalDAV"
-                onClick={() => {
-                  void handleCopy(caldav)
-                }}
-              >
-                Copiar
-              </Button>
-            </Space>
-          </Descriptions.Item>
-          <Descriptions.Item label="CardDAV">
-            <Space wrap>
-              <Typography.Text code data-testid="carddav-url">
-                {carddav}
-              </Typography.Text>
-              <Button
-                size="small"
-                aria-label="Copiar URL CardDAV"
-                onClick={() => {
-                  void handleCopy(carddav)
-                }}
-              >
-                Copiar
-              </Button>
-            </Space>
-          </Descriptions.Item>
-        </Descriptions>
-      </Card>
-
-      <Card title="Cómo conectar tus dispositivos" style={{ marginBottom: 16 }}>
-        <Typography.Paragraph>
-          <Typography.Text strong>iPhone / iPad (iOS):</Typography.Text> Ajustes → Apps → Calendario →
-          Cuentas → Añadir cuenta → Otra → «Añadir cuenta CalDAV». Introduce la URL CalDAV, tu usuario
-          y el token como contraseña. Para contactos, repite con «Añadir cuenta CardDAV».
-        </Typography.Paragraph>
-        <Typography.Paragraph>
-          <Typography.Text strong>Android (DAVx⁵):</Typography.Text> Añade una cuenta, elige «Iniciar
-          sesión con URL y usuario», pega la URL CalDAV o CardDAV, tu usuario y el token.
-        </Typography.Paragraph>
-        <Typography.Paragraph style={{ marginBottom: 0 }}>
-          <Typography.Text strong>Thunderbird:</Typography.Text> Añade un calendario o una libreta de
-          direcciones «en la red», introduce la URL correspondiente y selecciona autenticación básica
-          con tu usuario y el token.
-        </Typography.Paragraph>
-      </Card>
-
-      <Card
-        title="Tokens de aplicación"
-        extra={
-          <Button type="primary" onClick={() => setCreateOpen(true)}>
-            Crear token
-          </Button>
-        }
-      >
-        <Table<AppToken>
-          rowKey="id"
-          columns={columns}
-          dataSource={tokens}
-          loading={loading}
-          pagination={{ pageSize: 20, showSizeChanger: false }}
-          locale={{
-            emptyText: <Empty description="No hay tokens de aplicación" />,
-          }}
-          scroll={{ x: 'max-content' }}
-        />
-      </Card>
+        >
+          <Table<AppToken>
+            rowKey="id"
+            columns={columns}
+            dataSource={tokens}
+            loading={loading}
+            pagination={{ pageSize: 20, showSizeChanger: false }}
+            locale={{
+              emptyText: <Empty description="No hay tokens de aplicación" />,
+            }}
+            scroll={{ x: 'max-content' }}
+          />
+        </Card>
+      </Flex>
 
       <Modal
         title="Crear token de aplicación"
@@ -406,9 +409,9 @@ export function Sync() {
           <Alert
             type="warning"
             showIcon
+            style={{ marginBottom: 16 }}
             title="Este token no volverá a mostrarse"
             description="Cópialo ahora y guárdalo en un lugar seguro. Si lo pierdes, revócalo y crea otro."
-            style={{ marginBottom: 16 }}
           />
           <Typography.Paragraph type="secondary">
             Token de «{created.name}»

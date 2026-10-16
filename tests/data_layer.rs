@@ -58,6 +58,8 @@ fn new_event(id: &str, collection_id: &str, uid: &str, summary: &str) -> NewCale
         description: Some("descripcion de prueba".to_string()),
         dtstart: Some(1_700_000_000_000),
         dtend: Some(1_700_000_600_000),
+        dtstart_tzid: None,
+        dtend_tzid: None,
         rrule: None,
         raw_payload: format!("BEGIN:VCALENDAR\nSUMMARY:{summary}\nEND:VCALENDAR"),
     }
@@ -343,6 +345,8 @@ async fn update_trigger_refreshes_index_without_duplicates() {
             description: Some("descripcion de prueba".to_string()),
             dtstart: created.dtstart,
             dtend: created.dtend,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nSUMMARY:delta epsilon zeta\nEND:VCALENDAR".to_string(),
         },
@@ -1250,6 +1254,8 @@ async fn calendar_writes_record_log_entries_and_advance_token_atomically() {
             description: Some("descripcion de prueba".to_string()),
             dtstart: created.dtstart,
             dtend: created.dtend,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nSUMMARY:beta\nEND:VCALENDAR".to_string(),
         },
@@ -1368,6 +1374,8 @@ async fn changes_since_returns_only_newer_changes_in_order_with_tombstones() {
             description: None,
             dtstart: first.dtstart,
             dtend: first.dtend,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nSUMMARY:gamma\nEND:VCALENDAR".to_string(),
         },
@@ -1565,4 +1573,52 @@ async fn deleting_a_collection_cascades_to_sync_log() {
         1,
         "only c2's single entry remains — no orphaned garbage"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F18 — IANA timezone (`dtstart_tzid`/`dtend_tzid`) persistence
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn calendar_object_tzid_columns_round_trip_through_sqlite() {
+    let pool = fresh_pool("tzid").await;
+    create_collection(
+        &pool,
+        &new_collection("c1", "user-a", CollectionKind::Calendar),
+    )
+    .await
+    .expect("collection");
+
+    // Without a tzid the new columns stay NULL and read back as `None`.
+    let plain = insert_calendar_object(&pool, &new_event("e1", "c1", "uid-1", "sin zona"))
+        .await
+        .expect("insert plain");
+    assert_eq!(plain.dtstart_tzid, None);
+    assert_eq!(plain.dtend_tzid, None);
+
+    // With a tzid it round-trips byte-for-byte.
+    let mut anchored = new_event("e2", "c1", "uid-2", "con zona");
+    anchored.dtstart_tzid = Some("Europe/Madrid".to_string());
+    anchored.dtend_tzid = Some("Europe/Madrid".to_string());
+    let stored = insert_calendar_object(&pool, &anchored)
+        .await
+        .expect("insert anchored");
+    assert_eq!(stored.dtstart_tzid.as_deref(), Some("Europe/Madrid"));
+    assert_eq!(stored.dtend_tzid.as_deref(), Some("Europe/Madrid"));
+
+    // Re-read through a fresh query, so this is genuinely the stored column and
+    // not the struct we just handed to the insert.
+    let reloaded = get_calendar_object(&pool, "c1", "uid-2")
+        .await
+        .expect("get anchored")
+        .expect("anchored row");
+    assert_eq!(reloaded.dtstart_tzid.as_deref(), Some("Europe/Madrid"));
+    assert_eq!(reloaded.dtend_tzid.as_deref(), Some("Europe/Madrid"));
+
+    let reloaded_plain = get_calendar_object(&pool, "c1", "uid-1")
+        .await
+        .expect("get plain")
+        .expect("plain row");
+    assert_eq!(reloaded_plain.dtstart_tzid, None);
+    assert_eq!(reloaded_plain.dtend_tzid, None);
 }

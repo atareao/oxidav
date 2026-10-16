@@ -16,7 +16,7 @@ use oxidav::auth::{TokenError, verify_app_token};
 use oxidav::config::Config;
 use oxidav::db::init_pool;
 use oxidav::db::models::{NewCalendarObject, NewCardObject};
-use oxidav::db::{insert_calendar_object, insert_card_object};
+use oxidav::db::{get_calendar_object, insert_calendar_object, insert_card_object};
 use oxidav::router::{AppState, build_router, offline_pool};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -518,6 +518,8 @@ async fn api_collections_delete_cascades_and_is_not_idempotent() {
             description: None,
             dtstart: Some(1_700_000_000_000),
             dtend: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -648,6 +650,8 @@ async fn seed_events(pool: &SqlitePool, collection_id: &str, n: usize) {
                 description: None,
                 dtstart: Some(1_700_000_000_000),
                 dtend: None,
+                dtstart_tzid: None,
+                dtend_tzid: None,
                 rrule: None,
                 raw_payload: format!("BEGIN:VCALENDAR\nSUMMARY:reunion {i}\nEND:VCALENDAR"),
             },
@@ -684,6 +688,8 @@ async fn search_events_endpoint_is_scoped_and_ranked() {
             description: None,
             dtstart: Some(1_700_000_000_000),
             dtend: Some(1_700_000_600_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nSECRET-A\nEND:VCALENDAR".to_string(),
         },
@@ -700,6 +706,8 @@ async fn search_events_endpoint_is_scoped_and_ranked() {
             description: None,
             dtstart: None,
             dtend: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -717,6 +725,8 @@ async fn search_events_endpoint_is_scoped_and_ranked() {
             description: None,
             dtstart: None,
             dtend: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -873,6 +883,8 @@ async fn search_short_query_returns_empty_list() {
             description: None,
             dtstart: None,
             dtend: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -1016,6 +1028,8 @@ async fn search_hostile_query_never_returns_500() {
             description: None,
             dtstart: None,
             dtend: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -1130,6 +1144,8 @@ async fn search_aggregate_returns_both_sets() {
             description: None,
             dtstart: None,
             dtend: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -1380,6 +1396,173 @@ async fn events_validation_rejects_bad_input() {
     // The stored event is untouched by the rejected patch.
     let (_, one) = env.call(Method::GET, &one_uri, Some(&token), None).await;
     assert_eq!(one["rrule"], Value::Null);
+}
+
+/// F18 Pasos 15–17 — a `tzid` anchors an event to an IANA zone end to end: an
+/// unknown zone is a `400`, a valid one is stored canonically and exposed, a
+/// `PATCH` that only changes the zone is accepted, and the ms instants are
+/// untouched throughout.
+#[tokio::test]
+async fn events_tzid_is_validated_canonicalised_and_exposed() {
+    let env = TestEnv::new("events-tzid").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let base = format!("/api/v1/collections/{cid}/events");
+
+    // An unknown zone is rejected with the uniform `400` envelope.
+    let (status, value) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({
+                "summary": "x",
+                "dtstart": 1_700_000_000_000_i64,
+                "tzid": "Mars/Olympus",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown tzid -> {value}");
+    assert_eq!(value["error"]["code"], "validation");
+
+    // A valid zone is stored (canonically) and exposed; the instants are the
+    // same UTC milliseconds as before.
+    let (status, created) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({
+                "summary": "Reunión",
+                "dtstart": 1_700_000_000_000_i64,
+                "dtend": 1_700_000_600_000_i64,
+                "tzid": "Europe/Madrid",
+                "uid": "evt-tz-1",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(created["dtstart_tzid"], "Europe/Madrid");
+    assert_eq!(created["dtend_tzid"], "Europe/Madrid");
+    assert_eq!(created["dtstart"], 1_700_000_000_000_i64);
+    assert_eq!(created["dtend"], 1_700_000_600_000_i64);
+
+    let one_uri = format!("{base}/evt-tz-1");
+    let (status, one) = env.call(Method::GET, &one_uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(one["dtstart_tzid"], "Europe/Madrid");
+    assert_eq!(one["dtstart"], 1_700_000_000_000_i64);
+
+    // A `PATCH` that only changes the zone must be accepted (it is not "empty")
+    // and replaces both anchors.
+    let (status, patched) = env
+        .call(
+            Method::PATCH,
+            &one_uri,
+            Some(&token),
+            Some(json!({ "tzid": "Asia/Tokyo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "tzid-only patch failed: {patched}");
+    assert_eq!(patched["dtstart_tzid"], "Asia/Tokyo");
+    assert_eq!(patched["dtend_tzid"], "Asia/Tokyo");
+    assert_eq!(
+        patched["dtstart"], 1_700_000_000_000_i64,
+        "a zone change must not move the instant"
+    );
+
+    // An invalid zone on `PATCH` is a `400` that leaves the event untouched.
+    let (status, value) = env
+        .call(
+            Method::PATCH,
+            &one_uri,
+            Some(&token),
+            Some(json!({ "tzid": "Mars/Olympus" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "bad patch tzid -> {value}");
+    let (_, after) = env.call(Method::GET, &one_uri, Some(&token), None).await;
+    assert_eq!(after["dtstart_tzid"], "Asia/Tokyo");
+}
+
+/// F18 review — an absurd instant (`i64` extremes) is rejected with the uniform
+/// `400` instead of being handed to the composition path, with or without a
+/// `tzid`.
+#[tokio::test]
+async fn events_reject_out_of_range_instants() {
+    let env = TestEnv::new("events-range").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let base = format!("/api/v1/collections/{cid}/events");
+
+    let cases = [
+        (
+            "dtstart i64::MAX",
+            json!({ "summary": "x", "dtstart": i64::MAX }),
+        ),
+        (
+            "dtstart i64::MIN",
+            json!({ "summary": "x", "dtstart": i64::MIN }),
+        ),
+        (
+            "dtend absurd",
+            json!({ "summary": "x", "dtstart": 1_700_000_000_000_i64, "dtend": i64::MAX }),
+        ),
+        (
+            "dtstart absurd with tzid",
+            json!({ "summary": "x", "dtstart": i64::MAX, "tzid": "Europe/Madrid" }),
+        ),
+    ];
+
+    for (label, body) in cases {
+        let (status, value) = env
+            .call(Method::POST, &base, Some(&token), Some(body))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "case: {label} -> {value}");
+        assert_eq!(value["error"]["code"], "validation", "case: {label}");
+    }
+
+    // Nothing was persisted by the rejected requests.
+    let (_, list) = env.call(Method::GET, &base, Some(&token), None).await;
+    assert_eq!(list.as_array().map(Vec::len), Some(0));
+}
+
+/// F18 Paso 17 — regression: without `tzid` the event keeps the pre-F18
+/// behaviour — the anchors are `null` and the composed `.ics` carries no
+/// `VTIMEZONE` block.
+#[tokio::test]
+async fn events_without_tzid_keep_the_utc_behaviour() {
+    let env = TestEnv::new("events-no-tzid").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let base = format!("/api/v1/collections/{cid}/events");
+
+    let (status, created) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({
+                "summary": "Sin zona",
+                "dtstart": 1_700_000_000_000_i64,
+                "uid": "evt-no-tz",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(created["dtstart_tzid"], Value::Null);
+    assert_eq!(created["dtend_tzid"], Value::Null);
+
+    let stored = get_calendar_object(&env.pool, &cid, "evt-no-tz")
+        .await
+        .expect("query")
+        .expect("persisted");
+    assert!(stored.dtstart_tzid.is_none());
+    assert!(
+        !stored.raw_payload.contains("VTIMEZONE"),
+        "no zone anchor must mean no VTIMEZONE: {}",
+        stored.raw_payload
+    );
 }
 
 /// Tarea 4 — a collection that is missing, foreign or not a `calendar` is a

@@ -182,7 +182,7 @@ describe('Sync', () => {
 
     const user = setupUser()
     renderSync()
-    await screen.findByRole('heading', { name: /sincronización/i, level: 2 })
+    await screen.findByRole('heading', { name: /sincronización/i, level: 1 })
 
     await user.click(screen.getByRole('button', { name: 'Crear token' }))
     const createDialog = await screen.findByRole('dialog')
@@ -225,5 +225,24 @@ describe('Sync', () => {
     expect(revokeAppToken).toHaveBeenCalledWith('t1')
     await waitFor(() => expect(screen.queryByText('Móvil')).not.toBeInTheDocument())
     expect(messageSuccess).toHaveBeenCalledWith('Token revocado')
+  })
+
+  it('recarga los datos al pulsar «Reintentar» en el Alert de error', async () => {
+    vi.mocked(listAppTokens)
+      .mockRejectedValueOnce(new Error('no disponible'))
+      .mockResolvedValue([makeToken({ id: 't1', name: 'Móvil' })])
+    vi.mocked(getCurrentUser).mockResolvedValue({ sub: 'alice' })
+
+    const user = userEvent.setup()
+    renderSync()
+
+    await screen.findByText('No se pudieron cargar los datos')
+    await user.click(screen.getByRole('button', { name: 'Reintentar' }))
+
+    await waitFor(() =>
+      expect(screen.queryByText('No se pudieron cargar los datos')).not.toBeInTheDocument(),
+    )
+    expect(await screen.findByText('Móvil')).toBeInTheDocument()
+    expect(listAppTokens).toHaveBeenCalledTimes(2)
   })
 })

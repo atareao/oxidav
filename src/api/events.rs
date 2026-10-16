@@ -34,7 +34,9 @@
 //!
 //! `summary` must be present and non-blank; `dtstart` is required; a `dtend`
 //! earlier than `dtstart` is rejected. Blank `description`/`rrule` values are
-//! normalised away (so `""` clears an optional field on `PATCH`). Because
+//! normalised away (so `""` clears an optional field on `PATCH`). An optional
+//! `tzid` (F18) must be a known IANA zone — resolved and stored in its canonical
+//! form; see [`validate_tzid`]. Because
 //! `RRULE` is emitted verbatim into the stored `.ics`, it is additionally
 //! restricted to the RFC 5545 RECUR alphabet (no control characters), which
 //! prevents iCalendar content-line injection. Failures use the F06 [`ApiError`]
@@ -51,7 +53,8 @@ use serde::Deserialize;
 
 use crate::auth::SessionUser;
 use crate::dav::common::new_id;
-use crate::dav::ics::{EventFields, build_ics};
+use crate::dav::ics::{EventFields, build_ics, supported_instant_range_ms};
+use crate::dav::vtimezone;
 use crate::db::models::{CalendarObjectUpdate, CollectionKind, NewCalendarObject};
 use crate::db::{
     Collection, DbError, clamp_collection_limit, clamp_offset, delete_calendar_object,
@@ -152,7 +155,9 @@ pub async fn list(
 /// `POST /api/v1/collections/{id}/events` — create an event.
 ///
 /// The `.ics` is composed from the JSON fields and stored in `raw_payload`; a
-/// fresh `id` and `uid` are minted unless the client pins a `uid`.
+/// fresh `id` and `uid` are minted unless the client pins a `uid`. An optional
+/// `tzid` anchors the event to an IANA zone (both `DTSTART` and `DTEND`), so the
+/// `.ics` carries `TZID=` parameters plus a `VTIMEZONE` block.
 ///
 /// # Errors
 ///
@@ -175,6 +180,7 @@ pub async fn create(
         MAX_DESCRIPTION_LEN,
     )?;
     let rrule = validate_rrule(request.rrule.as_deref())?;
+    let tzid = validate_tzid(request.tzid.as_deref())?;
     validate_range(request.dtstart, request.dtend)?;
 
     let collection = calendar_collection(&state, &id, &user.sub).await?;
@@ -190,6 +196,8 @@ pub async fn create(
         description: description.clone(),
         dtstart_ms: request.dtstart,
         dtend_ms: request.dtend,
+        dtstart_tzid: tzid.clone(),
+        dtend_tzid: tzid.clone(),
         rrule: rrule.clone(),
         dtstamp_ms: now_millis(),
     };
@@ -202,6 +210,8 @@ pub async fn create(
         description,
         dtstart: Some(request.dtstart),
         dtend: request.dtend,
+        dtstart_tzid: tzid.clone(),
+        dtend_tzid: tzid,
         rrule,
         raw_payload: build_ics(&fields),
     };
@@ -237,6 +247,11 @@ pub async fn get_one(
 /// Only the supplied fields are applied; the `.ics` is recomposed from the
 /// merged values and a fresh ETag is written. A patch with no updatable field is
 /// a `400` (it would otherwise silently refresh `updated_at`).
+///
+/// A supplied `tzid` re-anchors **both** `DTSTART` and `DTEND` to that zone; an
+/// absent `tzid` leaves the stored anchors untouched. There is deliberately no
+/// way to *clear* the zone through a `PATCH` (an absent field means "do not
+/// change", the same MVP limitation as the other optional fields).
 ///
 /// # Errors
 ///
@@ -282,12 +297,27 @@ pub async fn update(
     let dtend = request.dtend.or(existing.dtend);
     validate_range(dtstart, dtend)?;
 
+    // A `tzid` in the patch replaces **both** anchors with the same canonical
+    // zone; an absent `tzid` leaves each anchor untouched (there is no way to
+    // clear a zone through a `PATCH`). Preserving the two stored anchors
+    // independently keeps a DAV-created event (which may carry distinct
+    // `DTSTART`/`DTEND` zones) intact across an unrelated `PATCH`.
+    let (dtstart_tzid, dtend_tzid) = match request.tzid.as_deref() {
+        Some(raw) => {
+            let tzid = validate_tzid(Some(raw))?;
+            (tzid.clone(), tzid)
+        }
+        None => (existing.dtstart_tzid.clone(), existing.dtend_tzid.clone()),
+    };
+
     let fields = EventFields {
         uid: existing.uid.clone(),
         summary: summary.clone(),
         description: description.clone(),
         dtstart_ms: dtstart,
         dtend_ms: dtend,
+        dtstart_tzid: dtstart_tzid.clone(),
+        dtend_tzid: dtend_tzid.clone(),
         rrule: rrule.clone(),
         dtstamp_ms: now_millis(),
     };
@@ -297,6 +327,8 @@ pub async fn update(
         description,
         dtstart: Some(dtstart),
         dtend,
+        dtstart_tzid,
+        dtend_tzid,
         rrule,
         raw_payload: build_ics(&fields),
     };
@@ -431,6 +463,29 @@ fn validate_rrule(raw: Option<&str>) -> Result<Option<String>, ApiError> {
     Ok(Some(value.to_string()))
 }
 
+/// Validate and canonicalise an optional IANA time-zone name (`tzid`).
+///
+/// `None` means "no anchor" (the event stays in UTC, the pre-F18 behaviour).
+/// When a value is supplied it must name a real IANA zone — checked with
+/// [`vtimezone::is_valid_tzid`] — otherwise the request is rejected with
+/// [`ApiError::Validation`] (`400`). The **canonical** zone name
+/// ([`vtimezone::canonical_tzid`]) is returned rather than the string the client
+/// sent, so an alias is always persisted under its canonical identifier and the
+/// stored `TZID=` parameter can never disagree with the `VTIMEZONE` block.
+fn validate_tzid(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    if !vtimezone::is_valid_tzid(value) {
+        return Err(ApiError::Validation(format!(
+            "La zona horaria `{value}` no es un identificador IANA válido"
+        )));
+    }
+    // `is_valid_tzid` guarantees `parse_tzid` yields a zone.
+    let tz = vtimezone::parse_tzid(value).expect("is_valid_tzid implies a parseable zone");
+    Ok(Some(vtimezone::canonical_tzid(tz).to_string()))
+}
+
 /// Validate a client-supplied `uid`: non-blank, bounded, and free of control
 /// characters or `/` (which would break the resource URL).
 fn validate_uid(raw: &str) -> Result<String, ApiError> {
@@ -453,14 +508,38 @@ fn validate_uid(raw: &str) -> Result<String, ApiError> {
     Ok(uid.to_string())
 }
 
-/// Reject an end instant earlier than its start instant.
+/// Reject an inverted range and any instant outside the representable calendar
+/// range.
+///
+/// The instant sanity bound
+/// ([`supported_instant_range_ms`](crate::dav::ics::supported_instant_range_ms))
+/// is a security boundary, not cosmetics: `dtstart`/`dtend` are arbitrary `i64`
+/// milliseconds supplied by the client, and a value such as `i64::MAX` cannot be
+/// rendered as an iCalendar date-time nor projected into a zone — it would be
+/// handed to [`build_ics`] (and, with a `tzid`, to the [`vtimezone`]
+/// composition). Rejecting it here (`400`) keeps that impossible input away from
+/// the composition path. The bound is exactly the parser's four-digit-year range,
+/// so the REST API and the DAV `PUT` path accept the same instants.
 fn validate_range(dtstart: i64, dtend: Option<i64>) -> Result<(), ApiError> {
-    if let Some(end) = dtend
-        && end < dtstart
-    {
-        return Err(ApiError::Validation(
-            "El fin no puede ser anterior al inicio".to_string(),
-        ));
+    let (min_ms, max_ms) = supported_instant_range_ms();
+    check_instant(dtstart, "dtstart", min_ms, max_ms)?;
+    if let Some(end) = dtend {
+        check_instant(end, "dtend", min_ms, max_ms)?;
+        if end < dtstart {
+            return Err(ApiError::Validation(
+                "El fin no puede ser anterior al inicio".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject an instant outside the half-open supported range `[min_ms, max_ms)`.
+fn check_instant(ms: i64, field: &str, min_ms: i64, max_ms: i64) -> Result<(), ApiError> {
+    if ms < min_ms || ms >= max_ms {
+        return Err(ApiError::Validation(format!(
+            "El campo `{field}` está fuera del rango de fechas admitido (años 1 a 9999)"
+        )));
     }
     Ok(())
 }
@@ -615,6 +694,22 @@ mod tests {
     }
 
     #[test]
+    fn validate_range_rejects_out_of_range_instants() {
+        for ms in [i64::MAX, i64::MIN] {
+            assert!(matches!(
+                validate_range(ms, None),
+                Err(ApiError::Validation(_)),
+            ));
+            assert!(matches!(
+                validate_range(1_700_000_000_000, Some(ms)),
+                Err(ApiError::Validation(_)),
+            ));
+        }
+        // A same-day 2024 range stays valid.
+        assert!(validate_range(1_700_000_000_000, Some(1_700_000_600_000)).is_ok());
+    }
+
+    #[test]
     fn validate_uid_rejects_blank_and_slashes() {
         assert!(matches!(validate_uid("  "), Err(ApiError::Validation(_))));
         assert!(matches!(validate_uid("a/b"), Err(ApiError::Validation(_))));
@@ -629,6 +724,7 @@ mod tests {
             dtstart: None,
             dtend: None,
             rrule: None,
+            tzid: None,
         };
         assert!(empty.is_empty());
         let non_empty = UpdateEventRequest {
@@ -637,7 +733,37 @@ mod tests {
             dtstart: None,
             dtend: None,
             rrule: None,
+            tzid: None,
         };
         assert!(!non_empty.is_empty());
+        // A patch that only changes the zone is *not* empty (F18): it must be
+        // accepted rather than rejected as "no field to update".
+        let tzid_only = UpdateEventRequest {
+            summary: None,
+            description: None,
+            dtstart: None,
+            dtend: None,
+            rrule: None,
+            tzid: Some("Europe/Madrid".to_string()),
+        };
+        assert!(!tzid_only.is_empty());
+    }
+
+    #[test]
+    fn validate_tzid_accepts_canonical_names_and_rejects_unknown() {
+        assert_eq!(validate_tzid(None).ok(), Some(None));
+        assert_eq!(
+            validate_tzid(Some("Europe/Madrid")).ok(),
+            Some(Some("Europe/Madrid".to_string()))
+        );
+        // An alias resolves to its canonical identifier.
+        assert_eq!(
+            validate_tzid(Some("UTC")).ok(),
+            Some(Some("UTC".to_string()))
+        );
+        assert!(matches!(
+            validate_tzid(Some("Mars/Olympus")),
+            Err(ApiError::Validation(_))
+        ));
     }
 }

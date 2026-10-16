@@ -210,4 +210,23 @@ describe('Settings', () => {
     await waitFor(() => expect(screen.queryByText('Personal')).not.toBeInTheDocument())
     expect(messageSuccess).toHaveBeenCalledWith('Colección eliminada')
   })
+
+  it('recarga los datos al pulsar «Reintentar» en el Alert de error', async () => {
+    vi.mocked(listCollections)
+      .mockRejectedValueOnce(new Error('no disponible'))
+      .mockResolvedValue([makeCollection({ id: 'c1', name: 'Personal' })])
+    vi.mocked(getCurrentUser).mockResolvedValue({ sub: 'alice' })
+
+    const user = userEvent.setup()
+    renderSettings()
+
+    await screen.findByText('No se pudieron cargar los datos')
+    await user.click(screen.getByRole('button', { name: 'Reintentar' }))
+
+    await waitFor(() =>
+      expect(screen.queryByText('No se pudieron cargar los datos')).not.toBeInTheDocument(),
+    )
+    expect(await screen.findByText('Personal')).toBeInTheDocument()
+    expect(listCollections).toHaveBeenCalledTimes(2)
+  })
 })

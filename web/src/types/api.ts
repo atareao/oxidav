@@ -33,6 +33,12 @@ export interface Page<T> {
  *
  * `summary` / `dtstart` etc. are nullable because the column may be absent;
  * `uid` is unique within a collection.
+ *
+ * `dtstart`/`dtend` remain Unix epoch **milliseconds** (the single source of
+ * truth for the instant). The optional `dtstart_tzid`/`dtend_tzid` are IANA
+ * time-zone names (e.g. `"Europe/Madrid"`) the event is *anchored* to, so a
+ * recurrence repeats in local wall-clock time instead of drifting across a DST
+ * change. `null` means the event carries no zone (the pre-F18 behaviour).
  */
 export interface CalendarEvent {
   id: string
@@ -42,6 +48,10 @@ export interface CalendarEvent {
   description: string | null
   dtstart: number | null
   dtend: number | null
+  /** IANA time zone anchoring `dtstart`, or `null` when the event has none. */
+  dtstart_tzid: string | null
+  /** IANA time zone anchoring `dtend`, or `null` when the event has none. */
+  dtend_tzid: string | null
   rrule: string | null
   etag: string
   created_at: number
@@ -56,6 +66,8 @@ export interface CreateEventInput {
   dtend?: number
   rrule?: string
   uid?: string
+  /** IANA time zone to anchor the event to (e.g. `"Europe/Madrid"`); omit for none. */
+  tzid?: string
 }
 
 /** Request body for a partial update of a calendar event (`PATCH .../events/{uid}`). */
@@ -65,6 +77,13 @@ export interface UpdateEventInput {
   dtstart?: number
   dtend?: number
   rrule?: string
+  /**
+   * IANA time zone to anchor the event to, e.g. `"Europe/Madrid"`. On a
+   * `PATCH`, an absent `tzid` means "keep the current zone" — the zone cannot be
+   * removed with a patch. To preserve an existing anchor, the client must send
+   * it back explicitly (the server does not re-derive it from `dtstart`).
+   */
+  tzid?: string
 }
 
 /**

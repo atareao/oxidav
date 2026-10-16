@@ -1,10 +1,51 @@
+/*
+ * OxiDav — sistema de diseño base (F19).
+ *
+ * Este fichero solo aporta lo que Ant Design no cubre: un pequeño conjunto de
+ * variables CSS (espaciado, tipografía, radios), un reset mínimo y unas pocas
+ * utilidades reutilizables por las páginas.
+ *
+ * `color-scheme` declara el modo que el navegador debe usar para el chrome
+ * nativo (scrollbars, controles de formulario, fondo del canvas). El valor por
+ * defecto es `light` porque la pantalla de login se renderiza *fuera* del
+ * `ThemeProvider`; cuando el provider está montado, `ThemeContext` empuja el
+ * modo real de la app sobre `<html>` y lo sobrescribe. Deliberadamente **no**
+ * se usa `light dark`, que dejaría la decisión a `prefers-color-scheme` (el
+ * sistema operativo) e ignoraría el conmutador de la app.
+ */
+
 :root {
-  color-scheme: light dark;
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
+  color-scheme: light;
+
+  /* Escala de espaciado (múltiplos de 4 px). */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* Radios. */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* Tipografía. */
+  --font-sans:
+    system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+  --line-height-base: 1.5;
 }
 
-* {
+/* Reset mínimo. */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -13,4 +54,41 @@ body,
 #root {
   margin: 0;
   min-height: 100vh;
+}
+
+body {
+  font-family: var(--font-sans);
+  line-height: var(--line-height-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Utilidades. */
+
+/*
+ * `sr-only` oculta visualmente un elemento sin sacarlo del árbol de
+ * accesibilidad: lo siguen leyendo los lectores de pantalla. Lo usan las
+ * páginas de la Fase 4 para su `h1` semántico.
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Contenedor de página: ancho completo con padding consistente. */
+.page {
+  padding: var(--space-4);
+}
+
+@media (min-width: 768px) {
+  .page {
+    padding: var(--space-5);
+  }
 }

@@ -7,7 +7,7 @@
  * `loggingOut` es `true`, para evitar dobles pulsaciones.
  */
 
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
@@ -30,6 +30,20 @@ function renderWithAuth(value: AuthContextValue) {
   )
 }
 
+function renderAt(path: string, value: AuthContextValue = authValue()) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <ThemeProvider>
+        <AuthContext.Provider value={value}>
+          <AppLayout>
+            <div>contenido</div>
+          </AppLayout>
+        </AuthContext.Provider>
+      </ThemeProvider>
+    </MemoryRouter>,
+  )
+}
+
 function authValue(overrides: Partial<AuthContextValue> = {}): AuthContextValue {
   return {
     user: { sub: 'u1', email: 'a@b.c', name: 'Lorenzo' },
@@ -41,6 +55,25 @@ function authValue(overrides: Partial<AuthContextValue> = {}): AuthContextValue 
 }
 
 const originalLocation = window.location
+const originalMatchMedia = window.matchMedia
+
+/**
+ * Simulate a phone-sized viewport so `Grid.useBreakpoint()` reports `xs: true`
+ * (the default test stub reports every breakpoint as `false`, i.e. desktop).
+ */
+function useMobileViewport() {
+  window.matchMedia = (query: string): MediaQueryList =>
+    ({
+      matches: query.includes('max-width'),
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }) as MediaQueryList
+}
 
 function stubLocation() {
   const location = {
@@ -63,6 +96,7 @@ function stubLocation() {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  window.matchMedia = originalMatchMedia
   Object.defineProperty(window, 'location', {
     configurable: true,
     writable: true,
@@ -130,6 +164,105 @@ describe('AppLayout — control de cierre de sesión', () => {
     await user.click(await screen.findByRole('button', { name: /cerrar sesión/i }))
 
     await waitFor(() => expect(location.href).toBe('https://idp.example/logout'))
+  })
+})
+
+describe('AppLayout — navegación del encabezado', () => {
+  const NAV_LABELS = [/calendario/i, /contactos/i, /sincronización/i, /ajustes/i] as const
+
+  it('muestra los 4 items de navegación y marca el activo según la ruta', () => {
+    renderAt('/contacts')
+
+    const nav = screen.getByRole('navigation', { name: /principal/i })
+    for (const label of NAV_LABELS) {
+      expect(within(nav).getByRole('menuitem', { name: label })).toBeInTheDocument()
+    }
+
+    expect(within(nav).getByRole('menuitem', { name: /contactos/i })).toHaveClass(
+      'ant-menu-item-selected',
+    )
+    expect(within(nav).getByRole('menuitem', { name: /calendario/i })).not.toHaveClass(
+      'ant-menu-item-selected',
+    )
+  })
+
+  it('en móvil, el botón hamburguesa abre el Drawer con los mismos items', async () => {
+    useMobileViewport()
+    const user = userEvent.setup()
+    renderAt('/calendar')
+
+    // The inline desktop navigation is not rendered on small screens.
+    expect(screen.queryByRole('navigation', { name: /principal/i })).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: /abrir menú/i }))
+
+    const drawerNav = await screen.findByRole('navigation', { name: /principal/i })
+    for (const label of NAV_LABELS) {
+      expect(within(drawerNav).getByRole('menuitem', { name: label })).toBeInTheDocument()
+    }
+  })
+})
+
+describe('AppLayout — contratos de regresión', () => {
+  it('mantiene el control de cierre de sesión en loading y disabled bajo loggingOut', () => {
+    renderWithAuth(authValue({ loggingOut: true }))
+
+    const button = screen.getByRole('button', { name: /cerrar sesión/i })
+    expect(button).toHaveAttribute('title', 'Cerrar sesión')
+    expect(button).toBeDisabled()
+  })
+
+  it('se renderiza sin <AuthProvider> y sin control de cierre de sesión', () => {
+    render(
+      <MemoryRouter>
+        <ThemeProvider>
+          <AppLayout>
+            <div>contenido</div>
+          </AppLayout>
+        </ThemeProvider>
+      </MemoryRouter>,
+    )
+
+    expect(screen.getByText('contenido')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /cerrar sesión/i })).toBeNull()
+  })
+})
+
+describe('AppLayout — título del documento por ruta', () => {
+  const originalTitle = document.title
+
+  afterEach(() => {
+    document.title = originalTitle
+  })
+
+  it.each([
+    ['/calendar', 'Calendario · OxiDav'],
+    ['/contacts', 'Contactos · OxiDav'],
+    ['/sync', 'Sincronización · OxiDav'],
+    ['/settings', 'Ajustes · OxiDav'],
+    ['/unknown', 'OxiDav'],
+  ])('con la ruta %s el título es «%s»', (path, expected) => {
+    renderAt(path)
+
+    expect(document.title).toBe(expected)
+  })
+
+  it('restaura el título base al desmontar', () => {
+    const { unmount } = renderAt('/calendar')
+    expect(document.title).toBe('Calendario · OxiDav')
+
+    unmount()
+
+    expect(document.title).toBe('OxiDav')
+  })
+})
+
+describe('AppLayout — botones de solo icono', () => {
+  it('los controles de tema y cierre de sesión exponen aria-label', () => {
+    renderAt('/calendar')
+
+    expect(screen.getByRole('button', { name: /cambiar tema/i })).toHaveAttribute('aria-label')
+    expect(screen.getByRole('button', { name: /cerrar sesión/i })).toHaveAttribute('aria-label')
   })
 })
 

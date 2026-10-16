@@ -16,6 +16,7 @@ pub mod carddav;
 pub(crate) mod common;
 pub mod ics;
 pub mod vcf;
+pub mod vtimezone;
 pub mod xml;
 
 use axum::Router;
