@@ -3,8 +3,7 @@
 //! Each test opens its own throwaway file-backed database under
 //! `/tmp/opencode` (never `data/oxidav.db`), so tests are isolated and repeatable.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
 
 use oxidav::db::models::{
     CalendarObjectUpdate, CardObjectUpdate, ChangeKind, CollectionKind, NewCalendarObject,
@@ -22,21 +21,11 @@ use oxidav::db::{
 };
 use sqlx::SqlitePool;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Build a unique `sqlite://` DSN pointing at a throwaway file under `/tmp/opencode`.
-fn temp_db_url(tag: &str) -> String {
-    let dir = PathBuf::from("/tmp/opencode/oxidav-tests");
-    std::fs::create_dir_all(&dir).expect("create temp test dir");
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("{tag}-{}-{n}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    format!("sqlite://{}", path.display())
-}
-
 /// Open a fresh templess pool with the schema applied.
 async fn fresh_pool(tag: &str) -> SqlitePool {
-    init_pool(&temp_db_url(tag)).await.expect("init_pool")
+    init_pool(&common::temp_db_url("data", tag))
+        .await
+        .expect("init_pool")
 }
 
 fn new_collection(id: &str, user: &str, kind: CollectionKind) -> NewCollection {
@@ -172,7 +161,7 @@ async fn migration_creates_tables_and_indexes() {
 
 #[tokio::test]
 async fn migration_is_idempotent() {
-    let url = temp_db_url("idempotent");
+    let url = common::temp_db_url("data", "idempotent");
     let first = init_pool(&url).await.expect("first init");
     drop(first);
     // Re-running the migrator over the same database must not fail.
@@ -1192,7 +1181,7 @@ async fn sync_log_rows(
 
 #[tokio::test]
 async fn migration_creates_sync_log_and_indexes_idempotently() {
-    let url = temp_db_url("sync-log-schema");
+    let url = common::temp_db_url("data", "sync-log-schema");
     let pool = init_pool(&url).await.expect("init");
     drop(pool);
 

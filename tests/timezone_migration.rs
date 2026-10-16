@@ -27,9 +27,9 @@
 //! connections observe the migrated schema) and keeps the assertions below about
 //! the *database*, not about `sqlx`'s statement cache.
 
-use std::path::PathBuf;
+mod common;
+
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxidav::db::search::search_events;
 use oxidav::db::{NewCalendarObject, get_calendar_object, insert_calendar_object};
@@ -43,18 +43,6 @@ const APP_TOKENS: &str = include_str!("../migrations/0002_app_tokens.sql");
 const SYNC_LOG: &str = include_str!("../migrations/0003_sync_log.sql");
 /// The migration under test (the one that adds `dtstart_tzid`/`dtend_tzid`).
 const TIMEZONE: &str = include_str!("../migrations/0004_timezone.sql");
-
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// A throwaway file-backed database under `/tmp/opencode` (never `data/oxidav.db`).
-fn temp_db_url(tag: &str) -> String {
-    let dir = PathBuf::from("/tmp/opencode/oxidav-tests");
-    std::fs::create_dir_all(&dir).expect("create temp test dir");
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("timezone-{tag}-{}-{n}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    format!("sqlite://{}", path.display())
-}
 
 /// A raw pool (no migrator) so the legacy schema can be replayed file by file.
 async fn open(url: &str) -> SqlitePool {
@@ -124,7 +112,7 @@ async fn fts_summaries(pool: &SqlitePool, needle: &str) -> Vec<String> {
 
 #[tokio::test]
 async fn migration_preserves_preexisting_row_and_keeps_fts_search_working() {
-    let url = temp_db_url("preserve");
+    let url = common::temp_db_url("timezone", "preserve");
     let pool = open(&url).await;
     seed_legacy_schema(&pool).await;
     seed_legacy_data(&pool).await;
@@ -175,7 +163,7 @@ async fn migration_preserves_preexisting_row_and_keeps_fts_search_working() {
 
 #[tokio::test]
 async fn migration_allows_inserting_and_reading_back_a_tzid() {
-    let url = temp_db_url("tzid");
+    let url = common::temp_db_url("timezone", "tzid");
     let pool = open(&url).await;
     seed_legacy_schema(&pool).await;
     seed_legacy_data(&pool).await;
@@ -221,7 +209,7 @@ async fn migration_allows_inserting_and_reading_back_a_tzid() {
 
 #[tokio::test]
 async fn alter_table_keeps_external_content_fts_update_trigger_consistent() {
-    let url = temp_db_url("update-trigger");
+    let url = common::temp_db_url("timezone", "update-trigger");
     let pool = open(&url).await;
     seed_legacy_schema(&pool).await;
     seed_legacy_data(&pool).await;
