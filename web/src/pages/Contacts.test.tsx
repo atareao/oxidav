@@ -24,12 +24,14 @@ import {
   CONTACTS_PAGE_SIZE,
   createContact,
   deleteContact,
+  getContact,
+  importContacts,
   listAddressbookCollections,
   listContacts,
   updateContact,
 } from '../services/contacts'
-import type { Collection, Contact } from '../types/api'
-import { parseVcf, serializeContactsToVcf } from '../utils/vcf'
+import type { Collection, Contact, ContactDetail } from '../types/api'
+import { serializeContactsToVcf } from '../utils/vcf'
 import { Contacts } from './Contacts'
 
 vi.mock('../services/collections', () => ({
@@ -47,6 +49,10 @@ vi.mock('../services/contacts', () => ({
   createContact: vi.fn(),
   updateContact: vi.fn(),
   deleteContact: vi.fn(),
+  // F22: el detalle (para el Drawer) y la importación en servidor. Si faltan,
+  // los tests existentes revientan al llamar a `undefined`.
+  getContact: vi.fn(),
+  importContacts: vi.fn(),
 }))
 
 const addressBook: Collection = {
@@ -76,6 +82,48 @@ function makeContact(overrides: Partial<Contact> = {}): Contact {
 }
 
 /**
+ * Detalle completo mínimo (proyección F22) para mockear `getContact`. Cada test
+ * lo completa con `overrides`; los arrays van vacíos para que el Drawer no
+ * pinte pestañas de más.
+ */
+function makeDetail(overrides: Partial<ContactDetail> = {}): ContactDetail {
+  return {
+    id: 'c1',
+    uid: 'uid-1',
+    collection_id: addressBook.id,
+    fn: 'Ada Lovelace',
+    full_name: 'Ada Lovelace',
+    etag: 'etag-1',
+    created_at: 0,
+    updated_at: 0,
+    version: '4.0',
+    rev: null,
+    name: null,
+    nicknames: [],
+    photos: [],
+    birthday: null,
+    anniversary: null,
+    gender: null,
+    tels: [],
+    emails: [],
+    impps: [],
+    addresses: [],
+    geos: [],
+    timezones: [],
+    titles: [],
+    roles: [],
+    organizations: [],
+    logos: [],
+    notes: [],
+    categories: [],
+    urls: [],
+    sounds: [],
+    others: [],
+    ...overrides,
+  }
+}
+
+/**
  * Espías sobre la API de mensajes que `App.useApp()` publica en su contexto:
  * la misma instancia que consume la vista (en lugar del export estático
  * `message`). Mockear el hook mantiene ese contrato bajo test sin ensuciar el
@@ -98,7 +146,7 @@ function renderContacts() {
     },
   } as unknown as ReturnType<typeof App.useApp>)
 
-  render(
+  return render(
     <App>
       <Contacts />
     </App>,
@@ -197,6 +245,7 @@ describe('Contacts', () => {
   it('abre el detalle con el teclado al activar el botón Ver', async () => {
     vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
     vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    vi.mocked(getContact).mockResolvedValue(makeDetail({ uid: 'uid-1' }))
 
     const user = userEvent.setup()
     renderContacts()
@@ -209,8 +258,66 @@ describe('Contacts', () => {
     await user.keyboard('{Enter}')
 
     const drawer = await screen.findByRole('dialog')
-    // El UID sólo aparece en el Drawer de detalle (no en la tabla).
-    expect(within(drawer).getByText('uid-1')).toBeInTheDocument()
+    expect(getContact).toHaveBeenCalledWith(addressBook.id, 'uid-1', expect.anything())
+    // El UID aparece primero en la pestaña «Control», ya con el detalle cargado.
+    expect(await within(drawer).findByText('uid-1')).toBeInTheDocument()
+  })
+
+  it('muestra un esqueleto de carga y luego las pestañas del contacto', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    let resolveDetail!: (value: ContactDetail) => void
+    vi.mocked(getContact).mockReturnValue(
+      new Promise<ContactDetail>((resolve) => {
+        resolveDetail = resolve
+      }),
+    )
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.click(screen.getByRole('button', { name: 'Ver Ada Lovelace' }))
+
+    // Carga: el Drawer está abierto pero aún no hay pestañas. El Drawer se
+    // monta en un portal (document.body), así que el esqueleto se busca dentro.
+    const drawer = await screen.findByRole('dialog')
+    expect(getContact).toHaveBeenCalledWith(addressBook.id, 'uid-1', expect.anything())
+    await waitFor(() => expect(drawer.querySelector('.ant-skeleton')).not.toBeNull())
+    expect(within(drawer).queryByRole('tab')).not.toBeInTheDocument()
+
+    await act(async () => {
+      resolveDetail(makeDetail({ uid: 'uid-1', fn: 'Ada Lovelace' }))
+    })
+
+    // Contenido: la pestaña «Control» (activa por defecto) y el UID completo.
+    expect(await within(drawer).findByRole('tab', { name: 'Control' })).toBeInTheDocument()
+    expect(await within(drawer).findByText('uid-1')).toBeInTheDocument()
+  })
+
+  it('muestra el error del detalle y lo recarga con «Reintentar»', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    vi.mocked(getContact)
+      .mockRejectedValueOnce(new Error('detalle no disponible'))
+      .mockResolvedValue(makeDetail({ uid: 'uid-1', fn: 'Ada Lovelace' }))
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.click(screen.getByRole('button', { name: 'Ver Ada Lovelace' }))
+
+    const drawer = await screen.findByRole('dialog')
+    expect(
+      await within(drawer).findByText('No se pudo cargar el detalle del contacto'),
+    ).toBeInTheDocument()
+    expect(within(drawer).getByText('detalle no disponible')).toBeInTheDocument()
+
+    await user.click(within(drawer).getByRole('button', { name: 'Reintentar' }))
+
+    expect(await within(drawer).findByText('uid-1')).toBeInTheDocument()
+    expect(getContact).toHaveBeenCalledTimes(2)
   })
 
   it('crea un contacto con estado optimista y lo consolida al resolver la API', async () => {
@@ -375,35 +482,91 @@ describe('Contacts', () => {
     expect(messageSuccess).toHaveBeenCalledWith('Contactos exportados')
   })
 
-  it('importa un fichero .vcf creando un contacto por ficha', async () => {
+  it('importa un fichero .vcf enviando el texto en crudo al servidor (sin parseo en cliente)', async () => {
     vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
     vi.mocked(listContacts).mockResolvedValue([])
-    vi.mocked(createContact).mockResolvedValue(makeContact({ uid: 'imported-1', fn: 'Imported Person' }))
+    vi.mocked(importContacts).mockResolvedValue([
+      makeContact({ uid: 'imported-1', fn: 'Imported Person' }),
+    ])
 
     renderContacts()
     await screen.findByRole('heading', { name: /contactos/i, level: 1 })
 
-    const vcf = serializeContactsToVcf([
-      {
-        uid: 'vcf-1',
-        fn: 'Imported Person',
-        email: 'imported@example.com',
-        phone: null,
-        organization: null,
-      },
-    ])
+    // Texto de una vCard que el parser cliente antiguo no habría conservado
+    // (PHOTO embebida y `X-ABLabel`): el servidor lo recibe byte a byte.
+    const vcf = [
+      'BEGIN:VCARD',
+      'VERSION:4.0',
+      'UID:vcf-1',
+      'FN:Imported Person',
+      'EMAIL:imported@example.com',
+      'PHOTO:data:image/png;base64,AAAA',
+      'X-ABLabel:Amigo',
+      'END:VCARD',
+      '',
+    ].join('\r\n')
     const file = new File([vcf], 'contactos.vcf', { type: 'text/vcard' })
 
     const input = screen.getByLabelText('Importar archivo .vcf')
     fireEvent.change(input, { target: { files: [file] } })
 
-    await waitFor(() =>
-      expect(createContact).toHaveBeenCalledWith(
-        addressBook.id,
-        expect.objectContaining({ fn: 'Imported Person', email: 'imported@example.com' }),
-      ),
-    )
+    await waitFor(() => expect(importContacts).toHaveBeenCalledWith(addressBook.id, vcf))
+    // El SPA ya no crea un contacto por ficha: lo hace el servidor de una vez.
+    expect(createContact).not.toHaveBeenCalled()
     await waitFor(() => expect(messageSuccess).toHaveBeenCalledWith('1 contacto(s) importado(s)'))
+  })
+
+  it('muestra el mensaje del sobre de error si falla la importación en servidor', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([])
+    vi.mocked(importContacts).mockRejectedValue(new Error('una tarjeta no es válida'))
+
+    renderContacts()
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
+
+    const vcf = 'BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Rota\r\nEND:VCARD\r\n'
+    const file = new File([vcf], 'contactos.vcf', { type: 'text/vcard' })
+
+    fireEvent.change(screen.getByLabelText('Importar archivo .vcf'), {
+      target: { files: [file] },
+    })
+
+    await waitFor(() => expect(messageError).toHaveBeenCalledWith('una tarjeta no es válida'))
+    expect(messageSuccess).not.toHaveBeenCalled()
+  })
+
+  it('explica en un tooltip que el .vcf exportado solo incluye los campos básicos', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.hover(screen.getByRole('button', { name: /exportar/i }))
+
+    expect(
+      await screen.findByText(
+        'El .vcf exportado incluye solo los campos básicos; el fichero completo vive en el servidor',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('muestra el nombre de la libreta (no el id) en la pestaña «Servidor»', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    vi.mocked(getContact).mockResolvedValue(makeDetail({ uid: 'uid-1', collection_id: addressBook.id }))
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.click(screen.getByRole('button', { name: 'Ver Ada Lovelace' }))
+    const drawer = await screen.findByRole('dialog')
+    await user.click(await within(drawer).findByRole('tab', { name: 'Servidor' }))
+
+    expect(await within(drawer).findByText(addressBook.name)).toBeInTheDocument()
+    expect(within(drawer).queryByText(addressBook.id)).not.toBeInTheDocument()
   })
 
   it('renderiza el Alert de error con la prop `title` (sin la deprecada `message`)', async () => {
@@ -443,7 +606,7 @@ describe('Contacts', () => {
 })
 
 describe('vcf helpers', () => {
-  it('redondea la serialización y el parseo', () => {
+  it('escapa los caracteres especiales al serializar', () => {
     const content = serializeContactsToVcf([
       {
         uid: 'u1',
@@ -454,37 +617,30 @@ describe('vcf helpers', () => {
       },
     ])
 
-    const parsed = parseVcf(content)
-    expect(parsed).toHaveLength(1)
-    expect(parsed[0]?.fn).toBe('Ada Lovelace')
-    expect(parsed[0]?.email).toBe('ada@example.com')
-    expect(parsed[0]?.organization).toBe('Engines; Ltd, Co')
+    expect(content).toContain('BEGIN:VCARD')
+    expect(content).toContain('VERSION:3.0')
+    expect(content).toContain('FN:Ada Lovelace')
+    expect(content).toContain('EMAIL:ada@example.com')
+    // `;` y `,` se escapan (RFC 6350 §3.4) para no romper el valor estructurado.
+    expect(content).toContain('ORG:Engines\\; Ltd\\, Co')
+    expect(content).toContain('END:VCARD')
   })
 
-  it('redondea el .vcf conservando barras invertidas (rutas Windows y DOM\\user)', () => {
-    const source = [
+  it('duplica las barras invertidas y escapa los saltos de línea', () => {
+    const content = serializeContactsToVcf([
       {
         uid: 'win-1',
         fn: 'DOM\\user',
-        email: 'dom@example.com',
-        phone: null,
-        organization: 'C:\\new',
-      },
-      {
-        uid: 'win-2',
-        fn: 'Ada Lovelace',
         email: null,
         phone: null,
-        organization: 'C:\\Users\\ada',
+        // Nueva línea real → `\n` literal en la salida.
+        organization: 'C:\\Users\nada',
       },
-    ]
+    ])
 
-    const parsed = parseVcf(serializeContactsToVcf(source))
-
-    expect(parsed).toHaveLength(2)
-    expect(parsed[0]?.fn).toBe('DOM\\user')
-    expect(parsed[0]?.organization).toBe('C:\\new')
-    expect(parsed[1]?.organization).toBe('C:\\Users\\ada')
+    // `\` → `\\` para que el valor no se confunda con una secuencia de escape.
+    expect(content).toContain('FN:DOM\\\\user')
+    expect(content).toContain('ORG:C:\\\\Users\\nada')
   })
 
   it('pliega las líneas a 75 octetos (RFC 6350) sin cortar el texto', () => {
@@ -502,7 +658,8 @@ describe('vcf helpers', () => {
     }
     // Existe al menos una línea de continuación (prefijada con un espacio).
     expect(physicalLines.some((line) => line.startsWith(' '))).toBe(true)
-    // El valor se reconstruye sin pérdida al desplegar.
-    expect(parseVcf(content)[0]?.fn).toBe(longName)
+    // Al desplegar (quitar CRLF + espacio) el valor se reconstruye sin pérdida.
+    const unfolded = content.replace(/\r\n[ \t]/g, '')
+    expect(unfolded).toContain(`FN:${longName}`)
   })
 })

@@ -251,6 +251,26 @@ describe('ContactDetailTabs', () => {
     expect(container.querySelector('img[src="x"]')).toBeNull()
   })
 
+  it('muestra el nombre de la libreta en «Servidor» cuando se pasa `collectionName`', async () => {
+    const user = userEvent.setup()
+    render(<ContactDetailTabs detail={makeDetail()} collectionName="Personal" />)
+
+    await user.click(screen.getByRole('tab', { name: 'Servidor' }))
+
+    // El nombre legible sustituye al id opaco de la colección.
+    expect(await screen.findByText('Personal')).toBeInTheDocument()
+    expect(screen.queryByText('ab-1')).not.toBeInTheDocument()
+  })
+
+  it('cae al id de la colección cuando no se pasa `collectionName`', async () => {
+    const user = userEvent.setup()
+    render(<ContactDetailTabs detail={makeDetail()} />)
+
+    await user.click(screen.getByRole('tab', { name: 'Servidor' }))
+
+    expect(await screen.findByText('ab-1')).toBeInTheDocument()
+  })
+
   it('formatea `created_at`/`updated_at` (epoch ms) como el resto de la app', async () => {
     const user = userEvent.setup()
     const instant = Date.UTC(2026, 0, 2, 10, 30)

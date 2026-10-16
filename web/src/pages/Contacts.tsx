@@ -1,13 +1,18 @@
 /**
- * Vista Contactos (F12).
+ * Vista Contactos (F12, detalle completo en F22).
  *
  * Réplica del patrón de la vista Calendario (F11): tabla Antd con búsqueda y
  * orden, `<Drawer>` de detalle, alta/edición en `<Modal>` + `<Form>` y
  * actualizaciones optimistas con React 19 `useOptimistic` (rollback ante error).
  *
- * Añade, además, import/export `.vcf`: el export se compone en cliente a partir
- * de los DTO (helpers de `src/utils/vcf.ts`) y el import lee un fichero y crea
- * un contacto por ficha vía `POST`.
+ * El `<Drawer>` ya no pinta un `<Descriptions>` con los cuatro campos de la
+ * lista: al abrir un contacto pide su detalle completo (`useContactDetail`) y lo
+ * organiza en pestañas con `ContactDetailTabs`. La tabla sigue trabajando con el
+ * DTO ligero (de ahí salen el título y los botones Editar/Eliminar).
+ *
+ * Import/export `.vcf`: el export se compone en cliente (solo campos básicos) y
+ * la importación envía el fichero **en crudo** al servidor
+ * (`POST .../contacts/import`), que lo parsea sin pérdida; el SPA no parsea.
  *
  * Actualizaciones optimistas: cada mutación se ejecuta dentro de un
  * `startTransition`; al terminar la transición la capa optimista se reconcilia
@@ -20,7 +25,6 @@ import {
   App,
   Button,
   Card,
-  Descriptions,
   Drawer,
   Empty,
   Flex,
@@ -29,6 +33,7 @@ import {
   Modal,
   Popconfirm,
   Select,
+  Skeleton,
   Space,
   Table,
   Tooltip,
@@ -44,23 +49,20 @@ import {
   useOptimistic,
   type ChangeEvent,
 } from 'react'
+import { ContactDetailTabs } from '../components/contact/ContactDetailTabs'
+import { useContactDetail } from '../hooks/useContactDetail'
 import { useContacts } from '../hooks/useContacts'
 import { toErrorMessage } from '../services/api'
 import {
   createContact,
   deleteContact,
+  importContacts,
   listAddressbookCollections,
   updateContact,
 } from '../services/contacts'
 import type { Collection, Contact, CreateContactInput, UpdateContactInput } from '../types/api'
 import { tempId } from '../utils/tempId'
-import {
-  downloadTextFile,
-  MAX_FILE_BYTES,
-  parseVcf,
-  serializeContactsToVcf,
-  vcardToCreateInput,
-} from '../utils/vcf'
+import { downloadTextFile, MAX_FILE_BYTES, serializeContactsToVcf } from '../utils/vcf'
 import { PAGE_GAP, fluidControlStyle } from './pageLayout'
 
 /** Shape of the `Form` values used by the create/edit modal. */
@@ -184,6 +186,33 @@ export function Contacts() {
   } = useContacts(effectiveCollectionId)
 
   const [optimisticContacts, addOptimistic] = useOptimistic(contacts, applyOptimistic)
+
+  // El `Drawer` se abre con el DTO ligero de la tabla (`detail`), pero el
+  // contenido de las pestañas sale de una petición aparte al detalle completo.
+  // El objetivo del hook es `null` mientras no haya contacto o libreta.
+  const detailTarget = useMemo(() => {
+    if (detail === null || effectiveCollectionId === null) {
+      return null
+    }
+    return { collectionId: effectiveCollectionId, uid: detail.uid }
+  }, [detail, effectiveCollectionId])
+
+  const {
+    detail: fullDetail,
+    loading: detailLoading,
+    error: detailError,
+    reload: reloadDetail,
+  } = useContactDetail(detailTarget)
+
+  // Nombre legible de la libreta para la pestaña «Servidor»; las colecciones ya
+  // están cargadas para el `<Select>`.
+  const detailCollectionName = useMemo(() => {
+    const collectionId = fullDetail?.collection_id ?? detail?.collection_id
+    if (collectionId === undefined || collectionId === null) {
+      return undefined
+    }
+    return collections.find((collection) => collection.id === collectionId)?.name
+  }, [collections, fullDetail, detail])
 
   const filteredContacts = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -380,31 +409,18 @@ export function Contacts() {
       void (async () => {
         try {
           const text = await file.text()
-          const cards = parseVcf(text)
-          if (cards.length === 0) {
+          // La importación pasa al servidor (F22): se envía el texto **en
+          // crudo** como `text/vcard` y es el backend quien parsea y almacena
+          // cada tarjeta verbatim. El SPA no parsea vCard. La validación es
+          // atómica (o entran todas las tarjetas o ninguna), así que la
+          // respuesta trae todas las creadas o el sobre de error.
+          const created = await importContacts(collectionId, text)
+          if (created.length === 0) {
             message.warning('El archivo no contiene contactos válidos')
             return
           }
-          // Create every card concurrently and keep the successful ones, so a
-          // single rejected card does not abort the whole import. Partial
-          // results are reported as `Éxito X / Fallo Y`.
-          const results = await Promise.allSettled(
-            cards.map((card) => createContact(collectionId, vcardToCreateInput(card))),
-          )
-          const created = results.flatMap((result) =>
-            result.status === 'fulfilled' ? [result.value] : [],
-          )
-          const failed = results.length - created.length
-          if (created.length > 0) {
-            setContacts((previous) => [...previous, ...created])
-          }
-          if (failed === 0) {
-            message.success(`${created.length} contacto(s) importado(s)`)
-          } else if (created.length === 0) {
-            message.error(`No se pudo importar ningún contacto (${failed} fallo(s))`)
-          } else {
-            message.warning(`Éxito ${created.length} / Fallo ${failed}`)
-          }
+          setContacts((previous) => [...previous, ...created])
+          message.success(`${created.length} contacto(s) importado(s)`)
         } catch (error) {
           message.error(toErrorMessage(error))
         } finally {
@@ -551,9 +567,11 @@ export function Contacts() {
                 onChange={(event) => setSearch(event.target.value)}
                 style={fluidControlStyle}
               />
-              <Button onClick={handleExport} disabled={optimisticContacts.length === 0}>
-                Exportar .vcf
-              </Button>
+              <Tooltip title="El .vcf exportado incluye solo los campos básicos; el fichero completo vive en el servidor">
+                <Button onClick={handleExport} disabled={optimisticContacts.length === 0}>
+                  Exportar .vcf
+                </Button>
+              </Tooltip>
               <Tooltip title="Importa uno o varios contactos desde un fichero .vcf">
                 <Button onClick={handleImportClick} loading={importing} disabled={collections.length === 0}>
                   Importar .vcf
@@ -620,13 +638,23 @@ export function Contacts() {
         }
       >
         {detail !== null ? (
-          <Descriptions column={1} bordered size="small">
-            <Descriptions.Item label="Nombre">{displayName(detail)}</Descriptions.Item>
-            <Descriptions.Item label="Email">{detail.email ?? '—'}</Descriptions.Item>
-            <Descriptions.Item label="Teléfono">{detail.phone ?? '—'}</Descriptions.Item>
-            <Descriptions.Item label="Organización">{detail.organization ?? '—'}</Descriptions.Item>
-            <Descriptions.Item label="UID">{detail.uid}</Descriptions.Item>
-          </Descriptions>
+          detailError !== null ? (
+            <Alert
+              type="error"
+              showIcon
+              title="No se pudo cargar el detalle del contacto"
+              description={detailError}
+              action={
+                <Button size="small" onClick={reloadDetail}>
+                  Reintentar
+                </Button>
+              }
+            />
+          ) : detailLoading || fullDetail === null ? (
+            <Skeleton active paragraph={{ rows: 6 }} />
+          ) : (
+            <ContactDetailTabs detail={fullDetail} collectionName={detailCollectionName} />
+          )
         ) : null}
       </Drawer>
 

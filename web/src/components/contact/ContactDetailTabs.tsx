@@ -47,6 +47,12 @@ interface ScalarRow {
 export interface ContactDetailTabsProps {
   /** Proyección completa del contacto, ya derivada por el servidor. */
   detail: ContactDetail
+  /**
+   * Nombre legible de la libreta del contacto (F22), resuelto por la página a
+   * partir de las colecciones ya cargadas. Si no llega, la pestaña «Servidor»
+   * cae al identificador opaco de {@link ContactDetail.collection_id}.
+   */
+  collectionName?: string
 }
 
 /** ¿El valor es texto no vacío? (guarda de tipo para filtrar arrays). */
@@ -297,7 +303,7 @@ function structuredNameRows(name: StructuredName | null): ScalarRow[] {
   return rows
 }
 
-export function ContactDetailTabs({ detail }: ContactDetailTabsProps) {
+export function ContactDetailTabs({ detail, collectionName }: ContactDetailTabsProps) {
   const items: TabItem[] = []
 
   // ── Control ───────────────────────────────────────────────────────────────
@@ -395,7 +401,8 @@ export function ContactDetailTabs({ detail }: ContactDetailTabsProps) {
     serverRows.push({ label: 'ETag', value: detail.etag })
   }
   if (hasText(detail.collection_id)) {
-    serverRows.push({ label: 'Colección', value: detail.collection_id })
+    // El nombre legible manda cuando la página lo conoce; si no, el id opaco.
+    serverRows.push({ label: 'Colección', value: collectionName ?? detail.collection_id })
   }
   // `0` es un centinela de "sin marca de tiempo" (epoch 1970 no es real aquí);
   // solo se pinta la fecha cuando hay un instante de verdad.
