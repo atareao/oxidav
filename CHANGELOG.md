@@ -1,4 +1,28 @@
 # Changelog
+## [0.3.1] - 2026-10-16
+
+### Documentation
+
+- Regenerar el changelog para 0.3.0
+- Añadir PLAN-021 (limpieza de tokens de diseño, F20)
+- Enmendar PLAN-021 tras la auditoría (F20)
+- Documentar F20 y dar PLAN-021 por cerrado
+- Corregir los enlaces obsoletos a los planes de origen en F17–F19
+- Añadir PLAN-022 (proyecto de TypeScript para los tests, F21)
+- Actualizar los comentarios que citaban la configuración anterior (F21)
+- Documentar F21 y dar PLAN-022 por cerrado
+- Registrar en PLAN-022 la enmienda por auditoría (F21)
+
+### Refactor
+
+- Fuente única de tokens y limpieza del CSS muerto (F20)
+- Separar el proyecto de TypeScript de los tests (F21)
+
+### Testing
+
+- Invariantes de tokens y pila de fuentes única (F20)
+- Invariantes de la separación de proyectos de TypeScript (F21)
+- Exigir que los tsconfig parseen sin diagnósticos (F21)
 ## [0.3.0] - 2026-10-16
 
 ### Bug Fixes
