@@ -413,3 +413,22 @@ Implementación mínima para pasar los tests anteriores, en el orden de los cont
 - `src/dav/vcf.rs` (parseo y composición actuales), `src/api/contacts.rs` (escritura actual), `src/api/dto.rs`, `migrations/0001_init.sql`, `src/db/mod.rs:180` (`compute_etag`).
 - `web/src/pages/Contacts.tsx`, `web/src/utils/vcf.ts`, `web/src/types/api.ts`, `web/src/hooks/useContacts.ts`.
 - `plans/PLAN-009-carddav-core-COMPLETED.md` (CardDAV), `plans/PLAN-013-contacts-view-COMPLETED.md` (vista de contactos), `plans/PLAN-021-design-tokens-cleanup-COMPLETED.md` y `plans/PLAN-022-tsconfig-test-project-COMPLETED.md` (formato y convenciones recientes).
+
+---
+
+## Enmienda de cierre (F22 completada)
+
+Registro de todo lo que la implementación **contradijo, precisó o añadió** respecto a lo previsto en este plan. Se conserva el plan original sin reescribir: la historia de la decisión está en los commits.
+
+- **Decisión 11 (el DTO de detalle es superconjunto del ligero) — REVERTIDA.** El DTO implementado **omite** `email`, `phone` y `organization` para no duplicar el dato (`email` vs `emails[0].value`). El SPA es el único consumidor y usa los arrays. Aceptado y documentado en `docs/F22-full-vcard-support.md`.
+- **`StructuredName.additional/prefix/suffix` son listas** (`Vec<String>`), no `Option<String>`: en RFC 6350 son componentes múltiples. El plan estaba equivocado.
+- **Las sub-listas del `N` se separan con coma sin escapar** (RFC 6350 §6.2.2) — caso que el plan no cubría y que producía un `N` no conforme.
+- **`VERSION`, `REV`, `BDAY` y `ANNIVERSARY` se leen verbatim de las líneas crudas**, porque el modelo tipado normaliza y llega a falsear (`BDAY:--0203` → `00000203`). No estaba previsto.
+- **Los `TYPE` se proyectan sin el prefijo `X-`** que añade el `Display` de `vcard4`. No estaba previsto.
+- **Borrado de objetos y textos opcionales**: un grupo presente y **totalmente vacío** (`{}`, `[]`, `""`) **borra** la propiedad. Es una extensión explícita de la decisión 7, que no decía cómo borrar `N` o `GENDER`.
+- **La importación es atómica de verdad** (una transacción y prevalidación de duplicados): el plan pedía guardar verbatim, no dejaba claro el comportamiento ante un `uid` repetido.
+- **El primitivo `merge_properties` impone la decisión 4** (ignora ediciones de `UID`/`VERSION`/`BEGIN`/`END` con `debug_assert`), en lugar de dejarla solo al llamante.
+- **Las líneas insertadas por el merge se pliegan a 75 octetos** (RFC 6350 §3.2), como hacía `build_vcf`.
+- **El límite de cuerpo de 16 MiB se aplica solo a la ruta de importación**, no globalmente.
+- **Bundle**: +78 277 B (+6,2 %) sobre la línea base de F21.
+- **Diferido por recomendación de las auditorías**: partir `src/dav/vcf/mod.rs` (1 714 líneas) y `src/api/contacts.rs` (1 321), y evitar el doble parseo de `project_card`.
