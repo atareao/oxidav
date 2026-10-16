@@ -6,7 +6,7 @@
  * global de 401 que emite el cliente HTTP y expone `logout()`.
  *
  * No hay tokens en el cliente: la cookie de sesión viaja sola con
- * `credentials: "include"`. Ver `plans/PLAN-018-oidc-valet-parity.md`.
+ * `credentials: "include"`. Ver `plans/PLAN-018-oidc-valet-parity-COMPLETED.md`.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'

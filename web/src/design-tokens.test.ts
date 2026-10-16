@@ -6,8 +6,8 @@
  * vuelva: ninguna custom property sin consumidor y una sola fuente para la pila
  * de fuentes.
  *
- * Leen los fuentes con `node:fs`, por eso `tsconfig.app.json` declara los tipos
- * de `node`: el único código que los necesita son estas pruebas.
+ * Leen los fuentes con `node:fs`; los tipos de `node` los declara
+ * `tsconfig.test.json` (F21), no el proyecto de la aplicación.
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs'
