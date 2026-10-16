@@ -72,17 +72,35 @@ async function parseError(response: Response): Promise<ApiError> {
 
 export interface RequestOptions {
   method?: string
+  /** JSON body: serialized with `JSON.stringify` and `Content-Type: application/json`. */
   body?: unknown
+  /**
+   * Raw (non-JSON) body sent verbatim, e.g. a `text/vcard` import (F22).
+   * Mutually exclusive with `body`; `contentType` sets its `Content-Type`.
+   */
+  rawBody?: string
+  /** `Content-Type` used with `rawBody` (defaults to `text/plain`). */
+  contentType?: string
   signal?: AbortSignal
 }
 
 /** Build the request `Headers`. No `Authorization`: auth travels in the cookie. */
 function buildHeaders(options: RequestOptions): Headers {
   const headers = new Headers({ Accept: 'application/json' })
-  if (options.body !== undefined) {
+  if (options.rawBody !== undefined) {
+    headers.set('Content-Type', options.contentType ?? 'text/plain')
+  } else if (options.body !== undefined) {
     headers.set('Content-Type', 'application/json')
   }
   return headers
+}
+
+/** Serialize the request body: raw verbatim, or JSON for the object form. */
+function serializeBody(options: RequestOptions): string | undefined {
+  if (options.rawBody !== undefined) {
+    return options.rawBody
+  }
+  return options.body !== undefined ? JSON.stringify(options.body) : undefined
 }
 
 /** Perform one `fetch`, mapping network/abort failures onto an {@link ApiError}. */
@@ -91,7 +109,7 @@ async function send(path: string, options: RequestOptions): Promise<Response> {
     return await fetch(`${API_BASE_URL}${path}`, {
       method: options.method ?? 'GET',
       headers: buildHeaders(options),
-      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      body: serializeBody(options),
       signal: options.signal,
       // La cookie de sesión `HttpOnly` solo viaja si se incluyen credenciales.
       credentials: 'include',
@@ -140,6 +158,9 @@ export const api = {
   get: <T>(path: string, signal?: AbortSignal): Promise<T> => request<T>(path, { signal }),
   post: <T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> =>
     request<T>(path, { method: 'POST', body, signal }),
+  /** `POST` with a raw (non-JSON) body and an explicit `Content-Type` (F22). */
+  postRaw: <T>(path: string, body: string, contentType: string, signal?: AbortSignal): Promise<T> =>
+    request<T>(path, { method: 'POST', rawBody: body, contentType, signal }),
   patch: <T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> =>
     request<T>(path, { method: 'PATCH', body, signal }),
   delete: (path: string, signal?: AbortSignal): Promise<void> =>
