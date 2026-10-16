@@ -695,6 +695,9 @@ describe('Contacts', () => {
     await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
     const dialog = await screen.findByRole('dialog')
     await within(dialog).findByRole('textbox', { name: 'Nombre' })
+    // F23: los teléfonos viven en la pestaña «Contacto»; sin activarla el panel
+    // inactivo está `hidden` y testing-library no expone sus campos.
+    await user.click(within(dialog).getByRole('tab', { name: 'Contacto' }))
 
     const firstValue = within(dialog).getByDisplayValue('+111')
     await user.clear(firstValue)
@@ -731,6 +734,8 @@ describe('Contacts', () => {
     await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
     const dialog = await screen.findByRole('dialog')
     await within(dialog).findByRole('textbox', { name: 'Nombre' })
+    // F23: el grupo de teléfonos vive en la pestaña «Contacto».
+    await user.click(within(dialog).getByRole('tab', { name: 'Contacto' }))
 
     // Quitar la única fila deja el grupo vacío → `[]`, que es como se borra.
     await user.click(within(dialog).getByRole('button', { name: 'Quitar Teléfono 1' }))
@@ -773,6 +778,8 @@ describe('Contacts', () => {
     await user.click(await screen.findByRole('button', { name: /nuevo contacto/i }))
     const dialog = await screen.findByRole('dialog')
     await user.type(within(dialog).getByRole('textbox', { name: 'Nombre' }), 'Grace Hopper')
+    // F23: añadir teléfonos exige la pestaña «Contacto» activa.
+    await user.click(within(dialog).getByRole('tab', { name: 'Contacto' }))
 
     await user.click(within(dialog).getByRole('button', { name: 'Añadir teléfono' }))
     const row = await screen.findByTestId('contact-labelled-row')
@@ -804,6 +811,8 @@ describe('Contacts', () => {
     await user.click(await screen.findByRole('button', { name: /nuevo contacto/i }))
     const dialog = await screen.findByRole('dialog')
     await user.type(within(dialog).getByRole('textbox', { name: 'Nombre' }), 'Grace Hopper')
+    // F23: los correos viven en la pestaña «Contacto».
+    await user.click(within(dialog).getByRole('tab', { name: 'Contacto' }))
 
     await user.click(within(dialog).getByRole('button', { name: 'Añadir correo' }))
     const row = await screen.findByTestId('contact-labelled-row')
@@ -864,6 +873,8 @@ describe('Contacts', () => {
     await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
     const dialog = await screen.findByRole('dialog')
     await within(dialog).findByRole('textbox', { name: 'Nombre' })
+    // F23: las direcciones viven en la pestaña «Direcciones».
+    await user.click(within(dialog).getByRole('tab', { name: 'Direcciones' }))
 
     await user.click(within(dialog).getByRole('button', { name: 'Quitar dirección 2' }))
     await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
