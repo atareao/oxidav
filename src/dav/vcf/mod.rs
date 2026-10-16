@@ -44,6 +44,8 @@
 //!   card); 3.0-only quirks that the crate cannot tokenise are tolerated by
 //!   `parse_loose`.
 
+pub mod merge;
+
 use std::borrow::Cow;
 
 use vcard4::property::{Property, TextOrUriProperty};
