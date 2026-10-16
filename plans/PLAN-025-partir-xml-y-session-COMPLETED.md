@@ -95,3 +95,56 @@ Los commits son `refactor` → **patch** en `git-cliff`. Si se entrega solo, la 
 ## Verificación y reporte
 
 Reporta: la ruta final del fichero escrito, su `wc -l`, `grep -c "^## "`, y el nombre del fichero en `plans/`. **No ejecutes git** (no tienes shell): yo commiteo.
+
+---
+
+## Cierre (PLAN-025 completado)
+
+Los movimientos se hicieron en **seis commits**, cada uno verificado antes del siguiente:
+
+```
+c1f1c27 📝 docs: añadir PLAN-025 (partir dav/xml.rs y auth/session.rs)
+95414a5 ♻️ refactor: extraer la serialización a dav/xml/write.rs (paso 1)
+98e3813 ♻️ refactor: extraer el parseo a dav/xml/parse.rs (paso 2)
+62c430b ♻️ refactor: extraer la configuración a auth/session/config.rs (paso 3)
+393ea51 ♻️ refactor: extraer el bloque OIDC a auth/session/oidc.rs (paso 4a)
+8ed41c3 ♻️ refactor: extraer los tokens propios a auth/session/tokens.rs (paso 4b)
+```
+
+### Resultado
+
+| Antes | Después |
+|---|---|
+| `src/dav/xml.rs` **1 499** (26 tests) | `mod.rs` **298** (constantes, `DavNs`, `XmlError`, modelos) · `write.rs` **341** (serialización) · `parse.rs` **888** (lectura) |
+| `src/auth/session.rs` **2 014** (28 tests) | `mod.rs` **89** (fachada: constantes, `AuthError`, reexportaciones) · `config.rs` **424** (política fail-closed) · `tokens.rs` **499** (JWT propio, `state`/`nonce`, `StateStore`) · `oidc.rs` **1 091** (el IdP: discovery, JWKS, exchange, `id_token`) |
+
+### Verificación
+
+- **551 pasando / 0 fallando** y **298** en `--lib`, idénticos antes y después de cada paso; **cero tests perdidos**: los 26 de `xml/` repartidos 2/4/20 y los 28 de `auth/session/` en 1/11/13/3. Frontend **19 ficheros / 174 tests** verde (no se tocó).
+- `fmt`, `clippy -D warnings`, `typecheck` y `lint` limpios.
+- **Movimiento puro comprobado, no supuesto**: la región de escritura de `xml` es **byte a byte idéntica** (168 líneas); la del parseo también (588 líneas, con la única diferencia de dos `pub(super)` necesarios); la configuración de `AuthConfig` idéntica, con solo `same_origin` ampliando visibilidad; y **los ocho símbolos del bloque OIDC —`OidcCache`, `oidc_cache`, `clear_caches`, `read_limited_json`, `discover`, `fetch_jwks`, `exchange_code` y `validate_id_token`— son idénticos cuerpo a cuerpo**, con las TTL de los cachés clavadas en 300 s y el multiconjunto de líneas explicado al 100 %.
+- **La superficie pública de la crate, comparada entera antes y después**: 23 items con `diff` vacío en `auth::session` y en `dav::xml`. Es la prueba de que un refactor de librería no rompió su API, y no la da ningún test.
+- **Los 44 tests de `auth::session` y los 18 de `tests/auth.rs`** (los de `wiremock` que limpian los cachés antes de ejercitar discovery/JWKS/`id_token`) verdes: la cobertura del fichero más delicado.
+- **End-to-end por HTTP real**: `healthz` 200, SPA 200, 404 JSON y 401 en `PROPFIND` sin credenciales; y **con un app token creado por la API** (`POST /api/v1/app-tokens`, que existe y funciona en modo dev): un `PROPFIND` `allprop` → **207** con `multistatus`; un `PROPFIND` con `<D:prop>` concreta → **207** con un `200 OK` **y** un `404 Not Found` para la prop inexistente (parseo del cuerpo + serialización de los propstat); un `REPORT sync-collection` con `Depth: 0` → **207** con `sync-token`; el mismo con `Depth: 1` → **400** con la regla de RFC 6578 §3.2 (comportamiento deliberado y documentado en `src/dav/common.rs`, no una regresión); y XML mal formado → **400** JSON con «cuerpo PROPFIND inválido». **Cero panics.**
+
+### Desviaciones del plan
+
+1. **El paso 4 se hizo en dos movimientos** (`oidc.rs` primero, `tokens.rs` después) en vez de uno. El plan los agrupaba; partirlo permite localizar un fallo en el fichero más sensible del repo, y empezar por el IdP deja el bloque de cachés verificado antes de tocar nada más.
+2. **`validate_id_token`, `IdTokenClaims` y `build_end_session_url` fueron a `oidc.rs`**, no a `tokens.rs` (el plan lo admitía): validan un token **emitido por el IdP** usando la caché de JWKS y cierran el SSO en el proveedor. El corte quedó: *nuestros tokens* vs *lo que habla con el IdP*.
+3. **`ParseMkcalendar` viajó con la sección de lectura**: físicamente vivía *dentro* de ella (entre `element_texts` y `parse_mkcalendar`), así que se movió con el resto y se reexporta desde `mod.rs`.
+4. **Los tamaños estimados fallaron en varios sitios y se dicen**: `parse.rs` quedó en 888 (el plan estimaba 650–800: la sección de lectura es mayor de lo que supuse); `session/mod.rs` en 89 (decía 250–400: al salir todo a `tokens`/`oidc` casi solo quedan `AuthError` y las constantes); `config.rs` en 424 (decía 200–300); y `oidc.rs` en 1 091 (decía 400–550) — **pero solo 403 líneas son producción**: el resto son los 19 tests con sus fixtures PEM de RSA y los `wiremock`. Ninguno es relleno: es el movimiento exacto.
+
+### Un error mío, cazado por la verificación
+
+Al repartir el módulo indiqué que `ID_TOKEN_LEEWAY_SECS` quedara en `pub(super)` **y era `pub`**: forma parte de la superficie pública de la crate, así que esa línea la rompía. No lo detectó ningún test —nada dentro del repo la usa—; lo detectó **comparar la superficie `pub` entera antes y después**, que devolvió un `diff` de exactamente una línea. Corregido y re-verificado (23 items, `diff` vacío).
+
+En el mismo paso, un `git add` con una ruta inexistente (`session.rs`, ya movida) **falló entero** y produjo un commit vacío (`3d69c41`: solo el rename, sin contenido), que se enmendó a `62c430b`. Lección: `git add` con una ruta que no existe no da un aviso parcial, **no stagea nada**.
+
+### Fuera de alcance (sin tocar)
+
+`src/dav/vcf/` y `src/api/contacts/` (recién partidos) y el frontend. Ninguna dependencia ni feature nueva: `jsonwebtoken` sigue con `rust_crypto` y el binario musl estático sin OpenSSL, intacto.
+
+### Versionado
+
+Los commits son `refactor` → **patch**: entregado solo, la próxima versión es **0.4.1**.
+
