@@ -132,13 +132,14 @@ function makeDetail(overrides: Partial<ContactDetail> = {}): ContactDetail {
 const messageSuccess = vi.fn()
 const messageError = vi.fn()
 const messageWarning = vi.fn()
+const messageInfo = vi.fn()
 
 function renderContacts() {
   vi.spyOn(App, 'useApp').mockReturnValue({
     message: {
       success: messageSuccess,
       error: messageError,
-      info: vi.fn(),
+      info: messageInfo,
       warning: messageWarning,
       loading: vi.fn(),
       open: vi.fn(),
@@ -392,6 +393,8 @@ describe('Contacts', () => {
   it('revierte la edición optimista si la API falla al actualizar', async () => {
     vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
     vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    // Editar ahora carga el detalle completo para poblar el formulario.
+    vi.mocked(getContact).mockResolvedValue(makeDetail({ uid: 'uid-1', fn: 'Ada Lovelace' }))
     let rejectUpdate!: (reason: unknown) => void
     vi.mocked(updateContact).mockReturnValue(
       new Promise<Contact>((_resolve, reject) => {
@@ -405,7 +408,7 @@ describe('Contacts', () => {
 
     await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
     const dialog = await screen.findByRole('dialog')
-    const nameInput = within(dialog).getByRole('textbox', { name: 'Nombre' })
+    const nameInput = await within(dialog).findByRole('textbox', { name: 'Nombre' })
     await user.clear(nameInput)
     await user.type(nameInput, 'Ada Byron')
     await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
@@ -602,6 +605,191 @@ describe('Contacts', () => {
       expect(screen.queryByText('No se pudieron cargar los datos')).not.toBeInTheDocument(),
     )
     expect(await screen.findByText('Grace Hopper')).toBeInTheDocument()
+  })
+
+  it('solo envía los grupos modificados al editar (preserva el resto del payload)', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    // Detalle estilo Apple: varios TEL/EMAIL con TYPE/PREF, notas y propiedades
+    // sin modelar conviviendo. Cambiar solo el nombre no debe tocar nada de eso.
+    vi.mocked(getContact).mockResolvedValue(
+      makeDetail({
+        uid: 'uid-1',
+        fn: 'Ada Lovelace',
+        tels: [
+          { value: '+34600000000', types: ['cell'], pref: 1 },
+          { value: '+34910000000', types: ['work', 'voice'], pref: null },
+        ],
+        emails: [{ value: 'ada@example.com', types: ['home'], pref: null }],
+        notes: ['Nota que no se toca'],
+        others: [{ name: 'X-ABLabel', group: 'item1', parameters: [], value: 'Amigo' }],
+      }),
+    )
+    vi.mocked(updateContact).mockResolvedValue(makeContact({ fn: 'Ada Byron' }))
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
+    const dialog = await screen.findByRole('dialog')
+    const nameInput = await within(dialog).findByRole('textbox', { name: 'Nombre' })
+    await user.clear(nameInput)
+    await user.type(nameInput, 'Ada Byron')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    // El cuerpo es **exactamente** `{ fn }`: ni `tels`, ni `emails`, ni `notes`.
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(addressBook.id, 'uid-1', { fn: 'Ada Byron' }),
+    )
+    expect(updateContact).toHaveBeenCalledTimes(1)
+  })
+
+  it('envía el array completo de teléfonos al cambiar uno', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    vi.mocked(getContact).mockResolvedValue(
+      makeDetail({
+        uid: 'uid-1',
+        fn: 'Ada Lovelace',
+        tels: [
+          { value: '+111', types: ['home'], pref: null },
+          { value: '+222', types: ['work'], pref: 1 },
+        ],
+      }),
+    )
+    vi.mocked(updateContact).mockResolvedValue(makeContact({ fn: 'Ada Lovelace' }))
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByRole('textbox', { name: 'Nombre' })
+
+    const firstValue = within(dialog).getByDisplayValue('+111')
+    await user.clear(firstValue)
+    await user.type(firstValue, '+999')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    // El grupo presente sustituye **todas** sus apariciones: viajan los dos TEL.
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(addressBook.id, 'uid-1', {
+        tels: [
+          { value: '+999', types: ['home'], pref: null },
+          { value: '+222', types: ['work'], pref: 1 },
+        ],
+      }),
+    )
+  })
+
+  it('borra un grupo al vaciar todas sus filas', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    vi.mocked(getContact).mockResolvedValue(
+      makeDetail({
+        uid: 'uid-1',
+        fn: 'Ada Lovelace',
+        tels: [{ value: '+111', types: [], pref: null }],
+      }),
+    )
+    vi.mocked(updateContact).mockResolvedValue(makeContact({ fn: 'Ada Lovelace' }))
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByRole('textbox', { name: 'Nombre' })
+
+    // Quitar la única fila deja el grupo vacío → `[]`, que es como se borra.
+    await user.click(within(dialog).getByRole('button', { name: 'Quitar Teléfono' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(addressBook.id, 'uid-1', { tels: [] }),
+    )
+  })
+
+  it('no lanza petición si no hay cambios que guardar', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([makeContact({ fn: 'Ada Lovelace' })])
+    vi.mocked(getContact).mockResolvedValue(makeDetail({ uid: 'uid-1', fn: 'Ada Lovelace' }))
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByText('Ada Lovelace')
+
+    await user.click(screen.getByRole('button', { name: 'Editar Ada Lovelace' }))
+    const dialog = await screen.findByRole('dialog')
+    await within(dialog).findByRole('textbox', { name: 'Nombre' })
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    // Un `PATCH` vacío sería un `400`: se avisa y no se llama a la API.
+    await waitFor(() => expect(messageInfo).toHaveBeenCalledWith('No hay cambios que guardar'))
+    expect(updateContact).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('envía un teléfono nuevo bien formado con TYPE y PREF al crear', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([])
+    vi.mocked(createContact).mockResolvedValue(makeContact({ fn: 'Grace Hopper' }))
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
+
+    await user.click(await screen.findByRole('button', { name: /nuevo contacto/i }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByRole('textbox', { name: 'Nombre' }), 'Grace Hopper')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Añadir teléfono' }))
+    const row = await screen.findByTestId('contact-labelled-row')
+    await user.type(within(row).getByRole('textbox', { name: 'Teléfono valor' }), '+34600000000')
+    const types = within(row).getByRole('combobox', { name: 'Tipos' })
+    await user.click(types)
+    await user.type(types, 'work{Enter}')
+    await user.type(within(row).getByRole('spinbutton', { name: 'PREF' }), '1')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+    await waitFor(() =>
+      expect(createContact).toHaveBeenCalledWith(addressBook.id, {
+        fn: 'Grace Hopper',
+        tels: [{ value: '+34600000000', types: ['work'], pref: 1 }],
+      }),
+    )
+  })
+
+  it('envía los grupos rellenos al crear y nunca los escalares heredados', async () => {
+    vi.mocked(listAddressbookCollections).mockResolvedValue([addressBook])
+    vi.mocked(listContacts).mockResolvedValue([])
+    vi.mocked(createContact).mockResolvedValue(makeContact({ fn: 'Grace Hopper' }))
+
+    const user = userEvent.setup()
+    renderContacts()
+    await screen.findByRole('heading', { name: /contactos/i, level: 1 })
+
+    await user.click(await screen.findByRole('button', { name: /nuevo contacto/i }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByRole('textbox', { name: 'Nombre' }), 'Grace Hopper')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Añadir correo' }))
+    const row = await screen.findByTestId('contact-labelled-row')
+    await user.type(within(row).getByRole('textbox', { name: 'Correo valor' }), 'grace@example.com')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+    // Exactamente el grupo `emails`; **nunca** `email`/`phone`/`organization`.
+    await waitFor(() =>
+      expect(createContact).toHaveBeenCalledWith(addressBook.id, {
+        fn: 'Grace Hopper',
+        emails: [{ value: 'grace@example.com', types: [], pref: null }],
+      }),
+    )
   })
 })
 

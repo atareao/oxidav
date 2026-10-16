@@ -50,6 +50,17 @@ import {
   type ChangeEvent,
 } from 'react'
 import { ContactDetailTabs } from '../components/contact/ContactDetailTabs'
+import { ContactForm } from '../components/contact/ContactForm'
+import {
+  buildCreateInput,
+  buildUpdateInput,
+  emptyFormValues,
+  groupsFromDetail,
+  groupsFromForm,
+  initialValuesFromDetail,
+  lightFieldsFromGroups,
+  type ContactFormValues,
+} from '../components/contact/contactFormValues'
 import { useContactDetail } from '../hooks/useContactDetail'
 import { useContacts } from '../hooks/useContacts'
 import { toErrorMessage } from '../services/api'
@@ -60,18 +71,10 @@ import {
   listAddressbookCollections,
   updateContact,
 } from '../services/contacts'
-import type { Collection, Contact, CreateContactInput, UpdateContactInput } from '../types/api'
+import type { Collection, Contact, UpdateContactInput } from '../types/api'
 import { tempId } from '../utils/tempId'
 import { downloadTextFile, MAX_FILE_BYTES, serializeContactsToVcf } from '../utils/vcf'
 import { PAGE_GAP, fluidControlStyle } from './pageLayout'
-
-/** Shape of the `Form` values used by the create/edit modal. */
-interface ContactFormValues {
-  fn: string
-  email?: string
-  phone?: string
-  organization?: string
-}
 
 /** Fields the optimistic layer may rewrite on an existing contact. */
 type ContactChanges = Pick<Contact, 'fn' | 'email' | 'phone' | 'organization'>
@@ -99,12 +102,6 @@ function applyOptimistic(contacts: Contact[], action: OptimisticAction): Contact
 function displayName(contact: Contact): string {
   const name = contact.fn ?? contact.full_name ?? ''
   return name.trim().length > 0 ? name : '(sin nombre)'
-}
-
-/** Trim a form value to `string | undefined` (blank → omitted). */
-function optionalValue(value: string | undefined): string | undefined {
-  const trimmed = value?.trim() ?? ''
-  return trimmed.length > 0 ? trimmed : undefined
 }
 
 export function Contacts() {
@@ -204,6 +201,23 @@ export function Contacts() {
     reload: reloadDetail,
   } = useContactDetail(detailTarget)
 
+  // El formulario de edición necesita el detalle **completo** (el contacto
+  // ligero de la tabla no trae los grupos), así que tiene su propia petición,
+  // independiente de la del `Drawer`. En alta (`editing === null`) no pide nada.
+  const editTarget = useMemo(() => {
+    if (editing === null || effectiveCollectionId === null) {
+      return null
+    }
+    return { collectionId: effectiveCollectionId, uid: editing.uid }
+  }, [editing, effectiveCollectionId])
+
+  const {
+    detail: editDetail,
+    loading: editDetailLoading,
+    error: editDetailError,
+    reload: reloadEditDetail,
+  } = useContactDetail(editTarget)
+
   // Nombre legible de la libreta para la pestaña «Servidor»; las colecciones ya
   // están cargadas para el `<Select>`.
   const detailCollectionName = useMemo(() => {
@@ -252,99 +266,105 @@ export function Contacts() {
       if (collectionId === null) {
         return
       }
-      const email = optionalValue(values.email)
-      const phone = optionalValue(values.phone)
-      const organization = optionalValue(values.organization)
-      savingRef.current = true
-      setSaving(true)
 
-      // Always clear the in-flight flag, on success or failure.
-      const finish = () => {
-        savingRef.current = false
-        setSaving(false)
-      }
+      // Vista canónica de lo que el usuario quiere guardar, y campos ligeros
+      // derivados de ella para la capa optimista (la tabla usa el DTO ligero).
+      const nextGroups = groupsFromForm(values)
+      const light = lightFieldsFromGroups(nextGroups)
 
-      if (editing === null) {
-        const optimisticId = tempId('contact')
+      if (editing !== null) {
+        // ── Edición: PATCH por presencia ──────────────────────────────────
+        // El servidor re-renderiza las líneas de **todo** grupo presente, así
+        // que solo pueden viajar los grupos realmente cambiados; enviar uno
+        // intacto degradaría el payload que el cliente había escrito. El diff
+        // es estructural contra el detalle cargado al abrir el modal.
+        const initialGroups = editDetail === null ? null : groupsFromDetail(editDetail)
+        const input: UpdateContactInput =
+          initialGroups === null ? {} : buildUpdateInput(initialGroups, nextGroups)
+        if (Object.keys(input).length === 0) {
+          // Un `PATCH` vacío es un `400` en el servidor: ni se intenta.
+          message.info('No hay cambios que guardar')
+          return
+        }
+        const target = editing
+        savingRef.current = true
+        setSaving(true)
         startTransition(async () => {
           addOptimistic({
-            kind: 'create',
-            contact: {
-              id: optimisticId,
-              uid: optimisticId,
-              collection_id: collectionId,
-              fn: values.fn,
-              email: email ?? null,
-              phone: phone ?? null,
-              organization: organization ?? null,
-              etag: '',
-              created_at: Date.now(),
-              updated_at: Date.now(),
+            kind: 'update',
+            uid: target.uid,
+            changes: {
+              fn: light.fn,
+              email: light.email,
+              phone: light.phone,
+              organization: light.organization,
             },
           })
           try {
-            const input: CreateContactInput = { fn: values.fn }
-            if (email !== undefined) {
-              input.email = email
-            }
-            if (phone !== undefined) {
-              input.phone = phone
-            }
-            if (organization !== undefined) {
-              input.organization = organization
-            }
-            const created = await createContact(collectionId, input)
-            setContacts((previous) => [...previous, created])
+            const updated = await updateContact(collectionId, target.uid, input)
+            setContacts((previous) =>
+              previous.map((contact) => (contact.uid === target.uid ? updated : contact)),
+            )
             closeModal()
-            message.success('Contacto creado')
+            // El detalle cacheado quedó viejo tras la edición: se invalida para
+            // que reabrir (o seguir viendo) el contacto lo vuelva a pedir.
+            reloadDetail()
+            message.success('Contacto actualizado')
           } catch (error) {
-            // Rollback happens automatically when the transition ends; surface
-            // the failure with the context message API.
             message.error(toErrorMessage(error))
           } finally {
-            finish()
+            savingRef.current = false
+            setSaving(false)
           }
         })
         return
       }
 
-      const target = editing
+      // ── Alta: POST con los grupos rellenos (sin diff) ─────────────────────
+      const optimisticId = tempId('contact')
+      savingRef.current = true
+      setSaving(true)
       startTransition(async () => {
         addOptimistic({
-          kind: 'update',
-          uid: target.uid,
-          changes: {
-            fn: values.fn,
-            email: email ?? null,
-            phone: phone ?? null,
-            organization: organization ?? null,
+          kind: 'create',
+          contact: {
+            id: optimisticId,
+            uid: optimisticId,
+            collection_id: collectionId,
+            fn: light.fn,
+            email: light.email,
+            phone: light.phone,
+            organization: light.organization,
+            etag: '',
+            created_at: Date.now(),
+            updated_at: Date.now(),
           },
         })
         try {
-          const input: UpdateContactInput = { fn: values.fn }
-          if (email !== undefined) {
-            input.email = email
-          }
-          if (phone !== undefined) {
-            input.phone = phone
-          }
-          if (organization !== undefined) {
-            input.organization = organization
-          }
-          const updated = await updateContact(collectionId, target.uid, input)
-          setContacts((previous) =>
-            previous.map((contact) => (contact.uid === target.uid ? updated : contact)),
-          )
+          const created = await createContact(collectionId, buildCreateInput(values))
+          setContacts((previous) => [...previous, created])
           closeModal()
-          message.success('Contacto actualizado')
+          message.success('Contacto creado')
         } catch (error) {
+          // Rollback happens automatically when the transition ends; surface
+          // the failure with the context message API.
           message.error(toErrorMessage(error))
         } finally {
-          finish()
+          savingRef.current = false
+          setSaving(false)
         }
       })
     },
-    [addOptimistic, closeModal, editing, effectiveCollectionId, message, setContacts],
+    [
+      addOptimistic,
+      closeModal,
+      editing,
+      editDetail,
+      effectiveCollectionId,
+      message,
+      reloadDetail,
+      setContacts,
+    ],
   )
 
   const handleDelete = useCallback(
@@ -506,16 +526,15 @@ export function Contacts() {
   const loadError = collectionsError ?? (effectiveCollectionId !== null ? contactsError : null)
 
   const formInitialValues: ContactFormValues = useMemo(() => {
-    if (editing !== null) {
-      return {
-        fn: editing.fn ?? editing.full_name ?? '',
-        email: editing.email ?? '',
-        phone: editing.phone ?? '',
-        organization: editing.organization ?? '',
-      }
+    // En edición los valores salen del **detalle** cargado (no del contacto
+    // ligero de la tabla, que no tiene los grupos). Mientras el detalle no ha
+    // llegado el `<Form>` ni se monta, así que estos valores siempre son los
+    // definitivos cuando el formulario aparece.
+    if (editing !== null && editDetail !== null) {
+      return initialValuesFromDetail(editDetail)
     }
-    return { fn: '', email: '', phone: '', organization: '' }
-  }, [editing])
+    return emptyFormValues()
+  }, [editing, editDetail])
 
   return (
     <>
@@ -672,35 +691,35 @@ export function Contacts() {
             closeModal()
           }
         }}
+        // El formulario es largo: el cuerpo hace scroll dentro del modal.
+        width={720}
+        styles={{ body: { maxHeight: '65vh', overflowY: 'auto', paddingRight: 12 } }}
         destroyOnHidden
       >
-        <Form
-          form={form}
-          layout="vertical"
-          onFinish={handleSubmit}
-          initialValues={formInitialValues}
-        >
-          <Form.Item
-            name="fn"
-            label="Nombre"
-            rules={[{ required: true, message: 'Introduce un nombre' }]}
-          >
-            <Input placeholder="Nombre completo" />
-          </Form.Item>
-          <Form.Item
-            name="email"
-            label="Email"
-            rules={[{ type: 'email', message: 'Introduce un email válido' }]}
-          >
-            <Input placeholder="email@example.com" />
-          </Form.Item>
-          <Form.Item name="phone" label="Teléfono">
-            <Input placeholder="+34 600 000 000" />
-          </Form.Item>
-          <Form.Item name="organization" label="Organización">
-            <Input placeholder="Empresa" />
-          </Form.Item>
-        </Form>
+        {editing !== null && editDetailError !== null ? (
+          <Alert
+            type="error"
+            showIcon
+            title="No se pudo cargar el contacto para editar"
+            description={editDetailError}
+            action={
+              <Button size="small" onClick={reloadEditDetail}>
+                Reintentar
+              </Button>
+            }
+          />
+        ) : editing !== null && (editDetailLoading || editDetail === null) ? (
+          <Skeleton active paragraph={{ rows: 8 }} />
+        ) : (
+          <ContactForm
+            // `key` fuerza un montaje limpio al cambiar de contacto (o de
+            // edición a alta), para que `initialValues` se apliquen de nuevo.
+            key={editing?.uid ?? 'new'}
+            form={form}
+            initialValues={formInitialValues}
+            onFinish={handleSubmit}
+          />
+        )}
       </Modal>
     </>
   )
