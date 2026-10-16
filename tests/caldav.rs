@@ -9,8 +9,7 @@
 //! raw methods via [`Method::from_bytes`] (the server registers the routes with
 //! `any()`, exactly as a native client would exercise them).
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, Response, StatusCode, header};
@@ -24,24 +23,12 @@ use oxidav::router::{AppState, build_router};
 use sqlx::SqlitePool;
 use tower::ServiceExt;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// The Pocket ID `sub` the test app token is minted for.
 const SUB: &str = "user-a";
 
 /// The subject the REST API assumes when auth is disabled
 /// ([`oxidav::auth::SessionUser::dev`]).
 const DEV_SUB: &str = "dev";
-
-/// A throwaway file-backed DSN under `/tmp/opencode` (never `data/oxidav.db`).
-fn temp_db_url(tag: &str) -> String {
-    let dir = PathBuf::from("/tmp/opencode/oxidav-tests");
-    std::fs::create_dir_all(&dir).expect("create temp test dir");
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("caldav-{tag}-{}-{n}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    format!("sqlite://{}", path.display())
-}
 
 /// The application router, its pool and the Basic credentials of a valid token.
 struct TestEnv {
@@ -62,7 +49,9 @@ async fn test_env(tag: &str) -> TestEnv {
 /// round-trip must authenticate the DAV side — and own the collection — as
 /// `"dev"` to make both surfaces address the same identity.
 async fn test_env_for(tag: &str, sub: &str) -> TestEnv {
-    let pool: SqlitePool = init_pool(&temp_db_url(tag)).await.expect("init_pool");
+    let pool: SqlitePool = init_pool(&common::temp_db_url("caldav", tag))
+        .await
+        .expect("init_pool");
     let (_id, token) = create_app_token(&pool, sub, "dav client")
         .await
         .expect("create app token");

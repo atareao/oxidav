@@ -4,9 +4,9 @@
 //! Each test uses a throwaway file-backed database under `/tmp/opencode` (never
 //! `data/oxidav.db`), mirroring the F03 test conventions.
 
-use std::path::PathBuf;
+mod common;
+
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use oxidav::db::init_pool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -16,20 +16,9 @@ use sqlx::{Executor, SqlitePool};
 /// migrator's version-tracking table.
 const MIGRATION: &str = include_str!("../migrations/0002_app_tokens.sql");
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn temp_db_url(tag: &str) -> String {
-    let dir = PathBuf::from("/tmp/opencode/oxidav-tests");
-    std::fs::create_dir_all(&dir).expect("create temp test dir");
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("app-tokens-{tag}-{}-{n}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    format!("sqlite://{}", path.display())
-}
-
 /// A raw pool (no migrator) so we can execute the migration file directly.
 async fn raw_pool(tag: &str) -> SqlitePool {
-    let url = temp_db_url(tag);
+    let url = common::temp_db_url("app-tokens", tag);
     let options = SqliteConnectOptions::from_str(&url)
         .expect("valid dsn")
         .create_if_missing(true);
@@ -111,7 +100,7 @@ async fn migration_is_idempotent() {
 #[tokio::test]
 async fn init_pool_applies_app_tokens_migration() {
     // Through the real migrator (which applies 0001 then 0002), the table exists.
-    let pool = init_pool(&temp_db_url("via-migrator"))
+    let pool = init_pool(&common::temp_db_url("app-tokens", "via-migrator"))
         .await
         .expect("init_pool");
 

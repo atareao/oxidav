@@ -3,8 +3,8 @@
 //! All tests run against throwaway file-backed databases under `/tmp/opencode`
 //! and never touch the network.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+mod common;
+
 use std::time::{Duration, Instant};
 
 use oxidav::auth::app_tokens::{
@@ -14,19 +14,10 @@ use oxidav::auth::app_tokens::{
 use oxidav::db::init_pool;
 use sqlx::SqlitePool;
 
-static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn temp_db_url(tag: &str) -> String {
-    let dir = PathBuf::from("/tmp/opencode/oxidav-tests");
-    std::fs::create_dir_all(&dir).expect("create temp test dir");
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = dir.join(format!("tokens-{tag}-{}-{n}.db", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    format!("sqlite://{}", path.display())
-}
-
 async fn fresh_pool(tag: &str) -> SqlitePool {
-    init_pool(&temp_db_url(tag)).await.expect("init_pool")
+    init_pool(&common::temp_db_url("tokens", tag))
+        .await
+        .expect("init_pool")
 }
 
 async fn stored_hash(pool: &SqlitePool, id: &str) -> String {
