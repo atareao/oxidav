@@ -14,9 +14,12 @@ use axum::http::{Method, Request, StatusCode, header};
 use oxidav::auth::session::{AuthConfig, Claims, SESSION_COOKIE_NAME, emit_session};
 use oxidav::auth::{TokenError, verify_app_token};
 use oxidav::config::Config;
+use oxidav::dav::vcf::parse_vcf;
 use oxidav::db::init_pool;
 use oxidav::db::models::{NewCalendarObject, NewCardObject};
-use oxidav::db::{get_calendar_object, insert_calendar_object, insert_card_object};
+use oxidav::db::{
+    get_calendar_object, get_card_object, insert_calendar_object, insert_card_object,
+};
 use oxidav::router::{AppState, build_router, offline_pool};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -161,6 +164,49 @@ impl TestEnv {
             // A non-JSON body is a contract regression (every endpoint must
             // answer JSON): fail loudly with the raw body instead of masking it
             // as `Null`.
+            serde_json::from_slice(&bytes).unwrap_or_else(|err| {
+                panic!(
+                    "response body is not valid JSON ({err}); raw body: {}",
+                    String::from_utf8_lossy(&bytes)
+                )
+            })
+        };
+        (status, value)
+    }
+
+    /// Issue a request with a raw, non-JSON body and decode the JSON response.
+    ///
+    /// Used by the F22 `POST .../contacts/import` endpoint, whose contract is
+    /// `Content-Type: text/vcard` with the `.vcf` as the raw body.
+    async fn call_body(
+        &self,
+        method: Method,
+        uri: &str,
+        token: Option<&str>,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, content_type);
+        if let Some(token) = token {
+            builder = builder.header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"));
+        }
+        let request = builder.body(Body::from(body)).expect("build request");
+        let response = self
+            .app
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("send request");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
             serde_json::from_slice(&bytes).unwrap_or_else(|err| {
                 panic!(
                     "response body is not valid JSON ({err}); raw body: {}",
@@ -2604,4 +2650,744 @@ async fn app_tokens_error_envelope_leaks_nothing() {
         !rendered.contains("database") && !rendered.contains("Query"),
         "internal detail leaked: {rendered}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F22 — full vCard support (contracts 4–7 of PLAN-023).
+//
+// RED: these integration tests pin the JSON contract the API layer must grow
+// (`ContactDetailDto`, the structured request fields, the surgical property
+// merge and the `text/vcard` import endpoint). They are HTTP + JSON only: the
+// sole crate-internal import is the already-public `parse_vcf`.
+// ---------------------------------------------------------------------------
+
+/// Base64 body of a tiny JPEG, exactly as macOS Contacts writes an embedded
+/// `PHOTO` (`PHOTO;ENCODING=b;TYPE=JPEG:<base64>`).
+const APPLE_PHOTO_B64: &str = "/9j/4AAQSkZJRgABAQAAAQ==";
+
+/// An Apple-style vCard, stored verbatim as CardDAV would store it.
+///
+/// `FN` is deliberately the **last** content line before `END:VCARD`: the merge
+/// moves an edited property to just before the terminator, so this seed makes
+/// "replace the `FN` line in place" and "the merge output" byte-identical.
+fn apple_card() -> String {
+    let lines: Vec<String> = vec![
+        "BEGIN:VCARD".to_string(),
+        "VERSION:4.0".to_string(),
+        "UID:apple-uid@oxidav".to_string(),
+        format!("PHOTO;ENCODING=b;TYPE=JPEG:{APPLE_PHOTO_B64}"),
+        "BDAY:--0203".to_string(),
+        "item1.TEL;TYPE=cell:+34600000000".to_string(),
+        "item1.X-ABLabel:iPhone".to_string(),
+        "X-SOCIALPROFILE;TYPE=home:https://example.com/ada".to_string(),
+        "REV:20240115T101530Z".to_string(),
+        "NICKNAME:Ada".to_string(),
+        "N:Lovelace;Ada;;;".to_string(),
+        "ORG:Analytical Engines".to_string(),
+        "EMAIL:ada@example.com".to_string(),
+        "ADR;TYPE=home:;;221B Baker St;London;;NW1;UK".to_string(),
+        "NOTE:first line of a folded".to_string(),
+        " note that continues here".to_string(),
+        "FN:Ada Lovelace".to_string(),
+        "END:VCARD".to_string(),
+    ];
+    lines.join("\r\n") + "\r\n"
+}
+
+/// A card with several multi-value groups and `FN` last, for the merge tests.
+fn multi_card() -> String {
+    [
+        "BEGIN:VCARD",
+        "VERSION:4.0",
+        "UID:multi-uid@oxidav",
+        "TEL;TYPE=cell:+34600000001",
+        "TEL;TYPE=work:+34900000002",
+        "EMAIL;TYPE=home:multi@example.com",
+        "EMAIL;TYPE=work:multi@work.example",
+        "ADR;TYPE=home:;;1 Home St;Madrid;;28001;ES",
+        "ADR;TYPE=work:;;2 Work Ave;Madrid;;28002;ES",
+        "FN:Multi Person",
+        "END:VCARD",
+    ]
+    .join("\r\n")
+        + "\r\n"
+}
+
+/// A minimal, well-formed card.
+fn plain_card(uid: &str, formatted_name: &str) -> String {
+    format!("BEGIN:VCARD\r\nVERSION:4.0\r\nUID:{uid}\r\nFN:{formatted_name}\r\nEND:VCARD\r\n")
+}
+
+/// A large valid card whose `NOTE` is folded at 74 octets per physical line.
+fn big_card(index: usize, note_len: usize) -> String {
+    let repeated = "0123456789".repeat(note_len / 10 + 1);
+    let note = &repeated[..note_len];
+    let mut out = String::new();
+    out.push_str("BEGIN:VCARD\r\nVERSION:4.0\r\n");
+    out.push_str(&format!("UID:big-{index}@oxidav\r\nFN:Big {index}\r\n"));
+    for (i, chunk) in note.as_bytes().chunks(74).enumerate() {
+        let chunk = std::str::from_utf8(chunk).expect("ascii note");
+        if i == 0 {
+            out.push_str(&format!("NOTE:{chunk}\r\n"));
+        } else {
+            out.push_str(&format!(" {chunk}\r\n"));
+        }
+    }
+    out.push_str("END:VCARD\r\n");
+    out
+}
+
+/// Seed a `card_objects` row with a raw payload, verbatim (as CardDAV does).
+async fn seed_card(env: &TestEnv, collection_id: &str, id: &str, uid: &str, raw: &str) {
+    insert_card_object(
+        &env.pool,
+        &NewCardObject {
+            id: id.to_string(),
+            collection_id: collection_id.to_string(),
+            uid: uid.to_string(),
+            fn_: None,
+            email: None,
+            phone: None,
+            organization: None,
+            notes: None,
+            raw_payload: raw.to_string(),
+        },
+    )
+    .await
+    .expect("seed card");
+}
+
+/// Read the stored `raw_payload` of a card.
+async fn stored_raw(env: &TestEnv, collection_id: &str, uid: &str) -> String {
+    get_card_object(&env.pool, collection_id, uid)
+        .await
+        .expect("read card")
+        .expect("card exists")
+        .raw_payload
+}
+
+/// Invariant (decision 1): the denormalised columns equal `parse_vcf(raw_payload)`.
+async fn assert_columns_agree(env: &TestEnv, collection_id: &str, uid: &str) {
+    let row = get_card_object(&env.pool, collection_id, uid)
+        .await
+        .expect("read card")
+        .expect("card exists");
+    let parsed = parse_vcf(&row.raw_payload).expect("payload parses");
+    assert_eq!(row.fn_.as_deref(), Some(parsed.fn_.as_str()));
+    assert_eq!(row.email, parsed.email);
+    assert_eq!(row.phone, parsed.phone);
+    assert_eq!(row.organization, parsed.organization);
+    assert_eq!(row.notes, parsed.notes);
+}
+
+/// Criterio de aceptación 1 — un `PATCH` de `fn` sobre una tarjeta importada por
+/// CardDAV deja el `raw_payload` **idéntico** salvo la línea `FN`.
+#[tokio::test]
+async fn carddav_imported_contact_survives_a_name_patch() {
+    let env = TestEnv::new("f22-preserve").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    let original = apple_card();
+    seed_card(&env, &cid, "card-apple", "apple-uid@oxidav", &original).await;
+
+    let uri = format!("/api/v1/collections/{cid}/contacts/apple-uid@oxidav");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "fn": "Ada King" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let raw = stored_raw(&env, &cid, "apple-uid@oxidav").await;
+    let expected = original.replace("FN:Ada Lovelace", "FN:Ada King");
+    assert_eq!(raw, expected, "the PATCH did not preserve the payload");
+
+    // (a) PHOTO byte-for-byte, (b) BDAY not normalised to a synthetic year,
+    // (c) the grouped label survives, (d) the folded NOTE is not unfolded.
+    assert!(
+        raw.contains(&format!("PHOTO;ENCODING=b;TYPE=JPEG:{APPLE_PHOTO_B64}")),
+        "PHOTO changed: {raw}"
+    );
+    assert!(raw.contains("BDAY:--0203"), "BDAY changed: {raw}");
+    assert!(!raw.contains("00000203"), "BDAY was normalised: {raw}");
+    assert!(raw.contains("item1.X-ABLabel:iPhone"), "label lost: {raw}");
+    assert!(
+        raw.contains("item1.TEL;TYPE=cell:+34600000000"),
+        "grouped TEL lost: {raw}"
+    );
+    assert!(
+        raw.contains("NOTE:first line of a folded\r\n note that continues here"),
+        "the folded NOTE was unfolded: {raw}"
+    );
+}
+
+/// Criterio de aceptación 2 — el `GET` de detalle devuelve todos los grupos.
+#[tokio::test]
+async fn contact_detail_returns_every_group() {
+    let env = TestEnv::new("f22-detail").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    seed_card(&env, &cid, "card-apple", "apple-uid@oxidav", &apple_card()).await;
+
+    let uri = format!("/api/v1/collections/{cid}/contacts/apple-uid@oxidav");
+    let (status, d) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "detail failed: {d}");
+
+    assert_eq!(d["id"], "card-apple");
+    assert_eq!(d["uid"], "apple-uid@oxidav");
+    assert_eq!(d["collection_id"], cid);
+    assert_eq!(d["fn"], "Ada Lovelace");
+    assert_eq!(d["full_name"], "Ada Lovelace");
+    assert!(d["etag"].as_str().is_some_and(|e| !e.is_empty()));
+    assert!(d["created_at"].is_i64());
+    assert!(d["updated_at"].is_i64());
+    assert_eq!(d["version"], "4.0");
+    assert_eq!(d["rev"], "20240115T101530Z");
+
+    assert_eq!(d["name"]["family"], "Lovelace");
+    assert_eq!(d["name"]["given"], "Ada");
+    assert_eq!(d["name"]["additional"], json!([]));
+    assert_eq!(d["name"]["prefix"], json!([]));
+    assert_eq!(d["name"]["suffix"], json!([]));
+
+    assert_eq!(d["nicknames"], json!(["Ada"]));
+
+    let photo = &d["photos"][0];
+    assert_eq!(photo["kind"], "data");
+    assert_eq!(photo["media_type"], "image/jpeg");
+    assert_eq!(
+        photo["data_uri"],
+        format!("data:image/jpeg;base64,{APPLE_PHOTO_B64}")
+    );
+    assert!(photo.get("uri").is_none(), "the data variant must omit uri");
+
+    assert_eq!(d["birthday"], "--0203");
+    assert_eq!(d["anniversary"], Value::Null);
+    assert_eq!(d["gender"], Value::Null);
+
+    let tel = &d["tels"][0];
+    assert_eq!(tel["value"], "+34600000000");
+    assert_eq!(tel["types"], json!(["cell"]));
+    assert_eq!(tel["pref"], Value::Null);
+
+    assert_eq!(d["emails"][0]["value"], "ada@example.com");
+    assert_eq!(d["impps"], json!([]));
+    let address = &d["addresses"][0];
+    assert_eq!(address["street"], "221B Baker St");
+    assert_eq!(address["locality"], "London");
+    assert_eq!(address["country"], "UK");
+    assert_eq!(address["types"], json!(["home"]));
+    assert_eq!(d["geos"], json!([]));
+    assert_eq!(d["timezones"], json!([]));
+    assert_eq!(d["titles"], json!([]));
+    assert_eq!(d["roles"], json!([]));
+    assert_eq!(d["organizations"], json!([["Analytical Engines"]]));
+    assert_eq!(d["logos"], json!([]));
+    assert_eq!(
+        d["notes"],
+        json!(["first line of a foldednote that continues here"])
+    );
+    assert_eq!(d["categories"], json!([]));
+    assert_eq!(d["urls"], json!([]));
+    assert_eq!(d["sounds"], json!([]));
+
+    let others = d["others"].as_array().expect("others array");
+    let label = others
+        .iter()
+        .find(|property| property["name"] == "X-ABLabel")
+        .expect("X-ABLabel must reach `others`");
+    assert_eq!(label["group"], "item1");
+    assert_eq!(label["value"], "iPhone");
+    assert_eq!(label["parameters"], json!([]));
+    let social = others
+        .iter()
+        .find(|property| property["name"] == "X-SOCIALPROFILE")
+        .expect("X-SOCIALPROFILE must reach `others`");
+    assert!(social["value"].is_string());
+}
+
+/// Decisión 7 — un grupo `PATCH`ado presente sustituye **todas** sus apariciones.
+#[tokio::test]
+async fn patch_replaces_a_multi_value_group() {
+    let env = TestEnv::new("f22-tels").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    seed_card(&env, &cid, "card-multi", "multi-uid@oxidav", &multi_card()).await;
+
+    let uri = format!("/api/v1/collections/{cid}/contacts/multi-uid@oxidav");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({
+                "tels": [
+                    { "value": "+34111", "types": ["work"], "pref": 2 },
+                    { "value": "+34222", "types": ["home"] },
+                ],
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let raw = stored_raw(&env, &cid, "multi-uid@oxidav").await;
+    // The two old `TEL` lines are gone; the two new ones land just before the
+    // terminator; every other line keeps its position byte-for-byte.
+    let expected = [
+        "BEGIN:VCARD",
+        "VERSION:4.0",
+        "UID:multi-uid@oxidav",
+        "EMAIL;TYPE=home:multi@example.com",
+        "EMAIL;TYPE=work:multi@work.example",
+        "ADR;TYPE=home:;;1 Home St;Madrid;;28001;ES",
+        "ADR;TYPE=work:;;2 Work Ave;Madrid;;28002;ES",
+        "FN:Multi Person",
+        "TEL;TYPE=work;PREF=2:+34111",
+        "TEL;TYPE=home:+34222",
+        "END:VCARD",
+    ]
+    .join("\r\n")
+        + "\r\n";
+    assert_eq!(raw, expected);
+    assert!(!raw.contains("+34600000001"), "an old TEL survived: {raw}");
+    assert!(!raw.contains("+34900000002"), "an old TEL survived: {raw}");
+}
+
+/// Decisión 7 — un array vacío **borra** la propiedad.
+#[tokio::test]
+async fn patch_with_an_empty_array_deletes_the_property() {
+    let env = TestEnv::new("f22-delete").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    seed_card(&env, &cid, "card-multi", "multi-uid@oxidav", &multi_card()).await;
+
+    let uri = format!("/api/v1/collections/{cid}/contacts/multi-uid@oxidav");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "tels": [] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let raw = stored_raw(&env, &cid, "multi-uid@oxidav").await;
+    let expected = [
+        "BEGIN:VCARD",
+        "VERSION:4.0",
+        "UID:multi-uid@oxidav",
+        "EMAIL;TYPE=home:multi@example.com",
+        "EMAIL;TYPE=work:multi@work.example",
+        "ADR;TYPE=home:;;1 Home St;Madrid;;28001;ES",
+        "ADR;TYPE=work:;;2 Work Ave;Madrid;;28002;ES",
+        "FN:Multi Person",
+        "END:VCARD",
+    ]
+    .join("\r\n")
+        + "\r\n";
+    assert_eq!(raw, expected);
+    assert!(!raw.contains("TEL"), "a TEL survived: {raw}");
+}
+
+/// Decisión 7 — una propiedad ausente del `PATCH` no se toca.
+#[tokio::test]
+async fn patch_leaves_absent_properties_alone() {
+    let env = TestEnv::new("f22-absent").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+
+    let original = multi_card();
+    seed_card(&env, &cid, "card-multi", "multi-uid@oxidav", &original).await;
+
+    let uri = format!("/api/v1/collections/{cid}/contacts/multi-uid@oxidav");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "fn": "Rebuilt Name" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let raw = stored_raw(&env, &cid, "multi-uid@oxidav").await;
+    assert_eq!(raw, original.replace("FN:Multi Person", "FN:Rebuilt Name"));
+    for line in [
+        "TEL;TYPE=cell:+34600000001",
+        "TEL;TYPE=work:+34900000002",
+        "EMAIL;TYPE=home:multi@example.com",
+        "EMAIL;TYPE=work:multi@work.example",
+        "ADR;TYPE=home:;;1 Home St;Madrid;;28001;ES",
+        "ADR;TYPE=work:;;2 Work Ave;Madrid;;28002;ES",
+    ] {
+        assert!(raw.contains(line), "an absent property changed: {line}");
+    }
+}
+
+/// Decisión 3 — `create` compone la tarjeta completa (esqueleto + merge) y el
+/// detalle la devuelve.
+#[tokio::test]
+async fn create_composes_the_full_card() {
+    let env = TestEnv::new("f22-create").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let base = format!("/api/v1/collections/{cid}/contacts");
+
+    let (status, created) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({
+                "fn": "Ada Lovelace",
+                "name": { "family": "Lovelace", "given": "Ada" },
+                "emails": [ { "value": "ada@example.com", "types": ["work"], "pref": 1 } ],
+                "tels": [ { "value": "+34600000000", "types": ["cell"] } ],
+                "notes": ["first programmer"],
+                "categories": [["Friends", "Family"]],
+                "urls": ["https://example.com/ada"],
+                "anniversary": "20100101",
+                "gender": { "sex": "F" },
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    let uid = created["uid"].as_str().expect("uid").to_string();
+    assert!(created.get("raw_payload").is_none());
+
+    let raw = stored_raw(&env, &cid, &uid).await;
+    assert!(raw.starts_with("BEGIN:VCARD\r\n"), "payload: {raw}");
+    assert!(raw.contains("VERSION:4.0"), "payload: {raw}");
+    assert!(raw.contains(&format!("UID:{uid}")), "payload: {raw}");
+    assert!(
+        raw.contains("EMAIL;TYPE=work;PREF=1:ada@example.com"),
+        "payload: {raw}"
+    );
+    assert!(raw.contains("TEL;TYPE=cell:+34600000000"), "payload: {raw}");
+
+    let uri = format!("{base}/{uid}");
+    let (status, d) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "detail failed: {d}");
+    assert_eq!(d["version"], "4.0");
+    assert_eq!(d["uid"], uid);
+    assert_eq!(d["name"]["family"], "Lovelace");
+    assert_eq!(d["emails"][0]["value"], "ada@example.com");
+    assert_eq!(d["emails"][0]["types"], json!(["work"]));
+    assert_eq!(d["emails"][0]["pref"], 1);
+    assert_eq!(d["tels"][0]["value"], "+34600000000");
+    assert_eq!(d["notes"], json!(["first programmer"]));
+    assert_eq!(d["categories"], json!([["Friends", "Family"]]));
+    assert!(
+        d["urls"][0]
+            .as_str()
+            .is_some_and(|url| url.starts_with("https://example.com/ada")),
+        "urls: {}",
+        d["urls"]
+    );
+    assert_eq!(d["anniversary"], "20100101");
+    assert_eq!(d["gender"]["sex"], "F");
+}
+
+/// Decisión 1 — las columnas desnormalizadas coinciden con `parse_vcf` tras
+/// crear y tras parchear un grupo multivalor.
+#[tokio::test]
+async fn stored_columns_agree_with_the_payload() {
+    let env = TestEnv::new("f22-columns").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let base = format!("/api/v1/collections/{cid}/contacts");
+
+    let (status, created) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({
+                "fn": "Ada Lovelace",
+                "email": "ada@example.com",
+                "phone": "+34600000000",
+                "organization": "Analytical Engines",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    let uid = created["uid"].as_str().expect("uid").to_string();
+    assert_columns_agree(&env, &cid, &uid).await;
+
+    // Patching a *new* multi-value group re-derives the legacy columns from the
+    // resulting payload.
+    let uri = format!("{base}/{uid}");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({
+                "emails": [ { "value": "new@example.com" } ],
+                "tels": [ { "value": "+34999888777" } ],
+                "notes": ["updated note"],
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let row = get_card_object(&env.pool, &cid, &uid)
+        .await
+        .expect("read card")
+        .expect("card exists");
+    assert_eq!(row.email.as_deref(), Some("new@example.com"));
+    assert_eq!(row.phone.as_deref(), Some("+34999888777"));
+    assert_eq!(row.notes.as_deref(), Some("updated note"));
+    assert_columns_agree(&env, &cid, &uid).await;
+}
+
+/// Decisión 7 — el escalar heredado y su array en la misma petición es un `400`.
+#[tokio::test]
+async fn legacy_scalar_and_array_together_are_rejected() {
+    let env = TestEnv::new("f22-scalar-array").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let base = format!("/api/v1/collections/{cid}/contacts");
+
+    let cases = [
+        json!({ "fn": "Ada", "email": "a@b.com", "emails": [ { "value": "c@d.com" } ] }),
+        json!({ "fn": "Ada", "phone": "+34", "tels": [ { "value": "+35" } ] }),
+        json!({ "fn": "Ada", "organization": "Acme", "organizations": [ ["Beta"] ] }),
+    ];
+
+    for body in cases {
+        let (status, value) = env
+            .call(Method::POST, &base, Some(&token), Some(body.clone()))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body {body} -> {value}");
+        assert_eq!(value["error"]["code"], "validation", "body {body}");
+        assert!(value["error"]["message"].is_string(), "body {body}");
+    }
+
+    // Nothing was persisted by the rejected requests.
+    let (_, list) = env.call(Method::GET, &base, Some(&token), None).await;
+    assert_eq!(list.as_array().map(Vec::len), Some(0));
+}
+
+/// Decisión 8 — todo campo nuevo rechaza con `400` (nunca `500`).
+#[tokio::test]
+async fn new_field_validation_rejects_with_400() {
+    let env = TestEnv::new("f22-validation").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let base = format!("/api/v1/collections/{cid}/contacts");
+
+    let too_many_tels = json!(
+        (0..40)
+            .map(|i| json!({ "value": format!("+34{i}") }))
+            .collect::<Vec<_>>()
+    );
+
+    let cases = [
+        (
+            "type with space",
+            json!({ "fn": "Ada", "tels": [ { "value": "+34", "types": ["wo rk"] } ] }),
+        ),
+        (
+            "type with colon",
+            json!({ "fn": "Ada", "tels": [ { "value": "+34", "types": ["a:b"] } ] }),
+        ),
+        (
+            "pref zero",
+            json!({ "fn": "Ada", "emails": [ { "value": "a@b.com", "pref": 0 } ] }),
+        ),
+        (
+            "pref 101",
+            json!({ "fn": "Ada", "emails": [ { "value": "a@b.com", "pref": 101 } ] }),
+        ),
+        (
+            "control char in nicknames",
+            json!({ "fn": "Ada", "nicknames": ["a\u{0007}b"] }),
+        ),
+        (
+            "control char in notes",
+            json!({ "fn": "Ada", "notes": ["a\u{0007}b"] }),
+        ),
+        (
+            "control char in address street",
+            json!({ "fn": "Ada", "addresses": [ { "street": "a\u{0007}b" } ] }),
+        ),
+        (
+            "overlong birthday",
+            json!({ "fn": "Ada", "birthday": "x".repeat(1000) }),
+        ),
+        (
+            "too many tels",
+            json!({ "fn": "Ada", "tels": too_many_tels }),
+        ),
+    ];
+
+    for (label, body) in cases {
+        let (status, value) = env
+            .call(Method::POST, &base, Some(&token), Some(body))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "case: {label} -> {value}");
+        assert_eq!(value["error"]["code"], "validation", "case: {label}");
+        assert!(value["error"]["message"].is_string(), "case: {label}");
+    }
+}
+
+/// Decisión 4 — el `uid` es inmutable en `PATCH`; `VERSION` no se toca.
+#[tokio::test]
+async fn patch_cannot_change_the_uid() {
+    let env = TestEnv::new("f22-uid").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let base = format!("/api/v1/collections/{cid}/contacts");
+
+    let (status, created) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({ "fn": "Ada", "uid": "fixed-uid@oxidav", "phone": "+34" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+
+    let uri = format!("{base}/fixed-uid@oxidav");
+
+    // A normal PATCH must leave `VERSION` and `UID` untouched.
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "fn": "Renamed" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    let raw = stored_raw(&env, &cid, "fixed-uid@oxidav").await;
+    assert!(raw.contains("VERSION:4.0"), "VERSION changed: {raw}");
+    assert!(raw.contains("UID:fixed-uid@oxidav"), "UID changed: {raw}");
+
+    // Changing the `uid` is rejected (chosen contract: a `400`, never a silent
+    // ignore).
+    let (status, value) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "fn": "X", "uid": "other-uid" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "uid patch -> {value}");
+    assert_eq!(value["error"]["code"], "validation");
+    let raw_after = stored_raw(&env, &cid, "fixed-uid@oxidav").await;
+    assert_eq!(
+        raw_after, raw,
+        "a rejected patch must not touch the payload"
+    );
+}
+
+/// Contrato 6 — `POST .../contacts/import` guarda cada tarjeta verbatim.
+#[tokio::test]
+async fn import_stores_cards_verbatim() {
+    let env = TestEnv::new("f22-import").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let uri = format!("/api/v1/collections/{cid}/contacts/import");
+
+    let card1 = apple_card();
+    let card2 = plain_card("imp-2@oxidav", "Second Person");
+    let card3 = plain_card("imp-3@oxidav", "Third Person");
+    let file = format!("{card1}{card2}{card3}");
+
+    let (status, value) = env
+        .call_body(
+            Method::POST,
+            &uri,
+            Some(&token),
+            "text/vcard",
+            file.clone().into_bytes(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "import failed: {value}");
+    assert_eq!(
+        value.as_array().map(Vec::len),
+        Some(3),
+        "expected three created cards: {value}"
+    );
+
+    assert_eq!(stored_raw(&env, &cid, "apple-uid@oxidav").await, card1);
+    assert_eq!(stored_raw(&env, &cid, "imp-2@oxidav").await, card2);
+    assert_eq!(stored_raw(&env, &cid, "imp-3@oxidav").await, card3);
+
+    // The detail view preserves the embedded PHOTO.
+    let one = format!("/api/v1/collections/{cid}/contacts/apple-uid@oxidav");
+    let (status, d) = env.call(Method::GET, &one, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(d["photos"][0]["kind"], "data");
+    assert_eq!(
+        d["photos"][0]["data_uri"],
+        format!("data:image/jpeg;base64,{APPLE_PHOTO_B64}")
+    );
+}
+
+/// Contrato 6 — un `.vcf` válido de más de 3 MB se importa (el límite por
+/// defecto de axum, 2 MB, lo rechazaría: este test obliga a subir el límite).
+#[tokio::test]
+async fn import_accepts_a_large_body() {
+    let env = TestEnv::new("f22-import-large").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let uri = format!("/api/v1/collections/{cid}/contacts/import");
+
+    let mut file = String::new();
+    let mut i = 0usize;
+    while file.len() <= 3 * 1024 * 1024 {
+        file.push_str(&big_card(i, 200_000));
+        i += 1;
+    }
+    assert!(file.len() > 3 * 1024 * 1024, "the body must exceed 3 MB");
+
+    let (status, value) = env
+        .call_body(
+            Method::POST,
+            &uri,
+            Some(&token),
+            "text/vcard",
+            file.into_bytes(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "large import failed: {value}");
+    assert_eq!(
+        stored_raw(&env, &cid, "big-0@oxidav").await,
+        big_card(0, 200_000)
+    );
+}
+
+/// Contrato 6 — un cuerpo sin tarjetas es un `400` con el sobre uniforme.
+#[tokio::test]
+async fn import_rejects_a_payload_without_cards() {
+    let env = TestEnv::new("f22-import-bad").await;
+    let token = env.token("user-a");
+    let cid = addressbook_collection_id(&env, &token, "Book").await;
+    let uri = format!("/api/v1/collections/{cid}/contacts/import");
+
+    let (status, value) = env
+        .call_body(
+            Method::POST,
+            &uri,
+            Some(&token),
+            "text/vcard",
+            b"garbage".to_vec(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "garbage import -> {value}");
+    assert_eq!(value["error"]["code"], "validation");
+    assert!(value["error"]["message"].is_string());
 }
