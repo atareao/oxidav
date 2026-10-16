@@ -46,20 +46,43 @@ interface ProjectConfig {
 }
 
 /**
+ * Parsed configs, keyed by file name: the helper is called a dozen times across
+ * the suite and each `tsconfig` must be read and parsed exactly once.
+ */
+const configCache = new Map<string, ProjectConfig | null>()
+
+/**
  * Parse a `tsconfig` with the TypeScript parser (JSONC-aware, resolves
  * `extends`). Returns `null` when the file does not exist yet, so callers
- * assert on a readable message instead of blowing up with `undefined`.
+ * assert on a readable message instead of blowing up with `undefined`. Throws
+ * when the file is readable but the parser reports diagnostics (a broken
+ * `extends`, an unreadable referenced file, no inputs…), so those failures
+ * cannot slip through as "parseable".
  */
 function readProjectConfig(fileName: string): ProjectConfig | null {
+  if (configCache.has(fileName)) return configCache.get(fileName) ?? null
+
   const configPath = join(PROJECT_ROOT, fileName)
   const read = ts.readConfigFile(configPath, ts.sys.readFile)
-  if (read.error !== undefined || read.config === undefined) return null
+  if (read.error !== undefined || read.config === undefined) {
+    configCache.set(fileName, null)
+    return null
+  }
 
   const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, PROJECT_ROOT)
-  return {
+  if (parsed.errors.length > 0) {
+    const details = parsed.errors
+      .map((error) => ts.flattenDiagnosticMessageText(error.messageText, ' '))
+      .join('; ')
+    throw new Error(`${fileName} must parse without errors: ${details}`)
+  }
+
+  const config: ProjectConfig = {
     types: parsed.options.types ?? [],
     fileNames: parsed.fileNames.map(toPosix),
   }
+  configCache.set(fileName, config)
+  return config
 }
 
 /** Every `*.test.ts` / `*.test.tsx` file that really exists under `src/`. */
