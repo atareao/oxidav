@@ -1,6 +1,6 @@
 # F19 — Rediseño UX transversal del SPA
 
-> El plan de origen es [`plans/PLAN-020-frontend-redesign.md`](../plans/PLAN-020-frontend-redesign.md).
+> El plan de origen es [`plans/PLAN-020-frontend-redesign-COMPLETED.md`](../plans/PLAN-020-frontend-redesign-COMPLETED.md).
 > Es una feature **exclusivamente de frontend**: no toca el backend, ni el
 > esquema, ni las rutas DAV/REST, ni el contrato de datos.
 
@@ -217,6 +217,6 @@ registrada aquí.
 
 ## Relacionado
 
-- [`plans/PLAN-020-frontend-redesign.md`](../plans/PLAN-020-frontend-redesign.md)
+- [`plans/PLAN-020-frontend-redesign-COMPLETED.md`](../plans/PLAN-020-frontend-redesign-COMPLETED.md)
 - [`docs/F18-timezone-support.md`](./F18-timezone-support.md) — limitación del selector de zona horaria heredada
 - [`AGENTS.md`](../AGENTS.md) — stack del frontend (React 19 + Ant Design v6 + Vite + TypeScript)

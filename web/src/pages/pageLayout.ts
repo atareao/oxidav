@@ -1,12 +1,13 @@
 import type { CSSProperties } from 'react'
 
 /**
- * Shared page-level layout tokens (F19 · paso 18).
+ * Shared page-level layout helpers (F19, aclarado en F20).
  *
- * Every page stacks its top-level blocks with the same vertical rhythm and
- * sizes its toolbar controls with the same fluid width, so the four views are
- * visually consistent and none of them overflows a narrow (320 px) viewport
- * while staying comfortable on desktop.
+ * These are *page layout* concerns — vertical rhythm between top-level blocks
+ * and fluid widths for toolbar controls — not design tokens. The design system
+ * lives in Ant Design's `theme.token` (`web/src/AuthenticatedApp.tsx`); nothing
+ * here duplicates a token from it. In particular `PAGE_GAP` is Ant Design's own
+ * semantic gap name (`'middle'`), not a hand-rolled spacing value.
  */
 
 /** Vertical gap (16 px) between the top-level blocks of a page. */
