@@ -31,7 +31,7 @@
 //! The structured fields (`UID`, `SUMMARY`, `DESCRIPTION`) come from the
 //! `icalendar` crate; only the time fields are parsed manually.
 
-use icalendar::{Calendar, Component, Property};
+use icalendar::{Calendar, Component, EventLike, Property};
 
 use super::vtimezone;
 use chrono::{DateTime, LocalResult, TimeZone};
@@ -68,6 +68,12 @@ pub struct ParsedEvent {
     pub summary: Option<String>,
     /// `DESCRIPTION`.
     pub description: Option<String>,
+    /// `LOCATION`, already unescaped by the parser (free text; escaped again on
+    /// emission). `None` when the property is absent or blank.
+    pub location: Option<String>,
+    /// `URL`, a URI emitted **verbatim** (never escaped). `None` when absent or
+    /// blank.
+    pub url: Option<String>,
     /// `DTSTART` as Unix milliseconds (required by the CalDAV contract).
     pub dtstart_ms: i64,
     /// `DTEND` as Unix milliseconds, when present.
@@ -105,6 +111,11 @@ pub fn parse_ics(raw: &str) -> Result<ParsedEvent, IcsError> {
 
     let summary = event.get_summary().map(str::to_string);
     let description = event.get_description().map(str::to_string);
+    // `LOCATION` is free text: the `icalendar` parser already unescapes it
+    // (its `ValueType::Text`), exactly like `SUMMARY`/`DESCRIPTION`. `URL` is a
+    // URI (`ValueType::Uri`) and is returned verbatim, commas included.
+    let location = normalize_ics_text(event.get_location());
+    let url = normalize_ics_text(event.get_url());
     let rrule = event.property_value("RRULE").map(str::to_string);
 
     let properties = event.properties();
@@ -121,12 +132,25 @@ pub fn parse_ics(raw: &str) -> Result<ParsedEvent, IcsError> {
         uid,
         summary,
         description,
+        location,
+        url,
         dtstart_ms,
         dtend_ms,
         dtstart_tzid,
         dtend_tzid,
         rrule,
     })
+}
+
+/// Normalise an optional iCalendar `LOCATION`/`URL` value.
+///
+/// A missing property, an empty value and a whitespace-only value all collapse
+/// to `None`; any other value is returned **unchanged** (not trimmed), so a
+/// URI's significant bytes survive verbatim.
+fn normalize_ics_text(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
 }
 
 /// Parse a `DTSTART`/`DTEND` [`Property`] into Unix milliseconds *and* the
@@ -285,6 +309,10 @@ pub struct EventFields {
     pub summary: Option<String>,
     /// `DESCRIPTION`.
     pub description: Option<String>,
+    /// `LOCATION` — free text, escaped per RFC 5545 §3.3.11 when emitted.
+    pub location: Option<String>,
+    /// `URL` — a URI, emitted **verbatim** (never escaped), like `RRULE`.
+    pub url: Option<String>,
     /// `DTSTART` as Unix milliseconds (required).
     pub dtstart_ms: i64,
     /// `DTEND` as Unix milliseconds, when present.
@@ -315,11 +343,12 @@ pub struct EventFields {
 /// is spliced in between `PRODID` and `BEGIN:VEVENT`, as RFC 5545 §3.2.19
 /// requires. The zone's reference year is that of `DTSTART`.
 ///
-/// Only genuinely free-text values (`SUMMARY`, `DESCRIPTION`) are escaped per
-/// RFC 5545 §3.3.11, since those are the fields the parser unescapes. Structured
-/// values (`UID`, `DTSTART`, `DTEND`, `RRULE`) are emitted verbatim: `RRULE` in
-/// particular uses `;` and `=` as **separators**, so escaping it would corrupt
-/// the rule (`FREQ=WEEKLY;COUNT=3` must stay such, not `FREQ=WEEKLY\;COUNT=3`).
+/// Only genuinely free-text values (`SUMMARY`, `DESCRIPTION`, `LOCATION`) are
+/// escaped per RFC 5545 §3.3.11, since those are the fields the parser
+/// unescapes. Structured values (`UID`, `DTSTART`, `DTEND`, `RRULE`) and the
+/// `URL` (a URI) are emitted verbatim: `RRULE` in particular uses `;` and `=`
+/// as **separators**, so escaping it would corrupt the rule
+/// (`FREQ=WEEKLY;COUNT=3` must stay such, not `FREQ=WEEKLY\;COUNT=3`).
 /// Every content line is folded at 75 octets (RFC 5545 §3.1) without splitting
 /// a UTF-8 character.
 ///
@@ -349,34 +378,26 @@ pub fn build_ics(fields: &EventFields) -> String {
 
     let mut body: Vec<String> = Vec::with_capacity(9);
     body.push("BEGIN:VEVENT".to_string());
-    body.push(format!("UID:{}", fields.uid));
-    body.push(format!("DTSTAMP:{}", format_datetime_ms(fields.dtstamp_ms)));
+    body.push(uid_line(&fields.uid));
+    body.push(dtstamp_line(fields.dtstamp_ms));
     if let Some(summary) = &fields.summary {
-        body.push(format!("SUMMARY:{}", escape_text(summary)));
+        body.push(summary_line(summary));
     }
     if let Some(description) = &fields.description {
-        body.push(format!("DESCRIPTION:{}", escape_text(description)));
+        body.push(description_line(description));
     }
-    body.push(match dtstart_tz {
-        Some(tz) => format!(
-            "DTSTART;TZID={}:{}",
-            vtimezone::canonical_tzid(tz),
-            vtimezone::format_local_datetime_ms(tz, fields.dtstart_ms)
-        ),
-        None => format!("DTSTART:{}", format_datetime_ms(fields.dtstart_ms)),
-    });
+    if let Some(location) = &fields.location {
+        body.push(location_line(location));
+    }
+    if let Some(url) = &fields.url {
+        body.push(url_line(url));
+    }
+    body.push(dtstart_line(fields.dtstart_ms, dtstart_tz));
     if let Some(dtend_ms) = fields.dtend_ms {
-        body.push(match dtend_tz {
-            Some(tz) => format!(
-                "DTEND;TZID={}:{}",
-                vtimezone::canonical_tzid(tz),
-                vtimezone::format_local_datetime_ms(tz, dtend_ms)
-            ),
-            None => format!("DTEND:{}", format_datetime_ms(dtend_ms)),
-        });
+        body.push(dtend_line(dtend_ms, dtend_tz));
     }
     if let Some(rrule) = &fields.rrule {
-        body.push(format!("RRULE:{rrule}"));
+        body.push(rrule_line(rrule));
     }
     body.push("END:VEVENT".to_string());
     body.push("END:VCALENDAR".to_string());
@@ -395,6 +416,419 @@ pub fn build_ics(fields: &EventFields) -> String {
         super::common::fold_content_line(line, &mut out);
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// F24 — surgical reconciliation of a stored `.ics` (PLAN-028)
+// ---------------------------------------------------------------------------
+
+/// Property names [`reconcile_ics`] knows, in canonical emission order.
+///
+/// `LOCATION` and `URL` are modelled fields as of F24: a pre-existing line of
+/// either is reconciled in place (or removed when the final value is `None`),
+/// and both anchor the canonical insertion position of a neighbouring modelled
+/// property.
+const RECONCILE_ORDER: [&str; 8] = [
+    "DTSTAMP",
+    "SUMMARY",
+    "DESCRIPTION",
+    "LOCATION",
+    "URL",
+    "DTSTART",
+    "DTEND",
+    "RRULE",
+];
+
+/// One **logical** iCalendar content line: its unfolded text plus the physical
+/// lines it was folded into, kept verbatim so a line that is not rewritten can be
+/// re-emitted byte for byte.
+struct LogicalLine {
+    /// The line unfolded: continuation prefixes and terminators removed.
+    text: String,
+    /// The original physical lines (terminators included), in order.
+    physical: Vec<String>,
+}
+
+/// Strip a single trailing `\r\n` or `\n` from a physical line.
+fn strip_line_terminator(line: &str) -> &str {
+    match line.strip_suffix("\r\n") {
+        Some(content) => content,
+        None => line.strip_suffix('\n').unwrap_or(line),
+    }
+}
+
+/// Split `raw` into **logical** content lines (RFC 5545 §3.1 unfolding).
+///
+/// A physical line whose content starts with a space or a tab continues the
+/// previous logical line; the leading whitespace is dropped and the remainder
+/// appended. The physical lines of every logical line are retained verbatim.
+fn split_logical_lines(raw: &str) -> Vec<LogicalLine> {
+    let mut lines: Vec<LogicalLine> = Vec::new();
+    for physical in raw.split_inclusive('\n') {
+        let content = strip_line_terminator(physical);
+        let is_continuation = content.starts_with(' ') || content.starts_with('\t');
+        if is_continuation && let Some(last) = lines.last_mut() {
+            last.text.push_str(&content[1..]);
+            last.physical.push(physical.to_string());
+            continue;
+        }
+        lines.push(LogicalLine {
+            text: content.to_string(),
+            physical: vec![physical.to_string()],
+        });
+    }
+    lines
+}
+
+/// Extract a `BEGIN:`/`END:` component name from a logical line, upper-cased.
+///
+/// Returns `None` for a property line. The keyword comparison is ASCII
+/// case-insensitive, as RFC 5545 allows; the component name is normalised to
+/// upper case so stack comparisons are exact.
+fn component_boundary(text: &str, keyword: &str) -> Option<String> {
+    let (head, tail) = text.split_once(':')?;
+    if head.eq_ignore_ascii_case(keyword) {
+        Some(tail.to_uppercase())
+    } else {
+        None
+    }
+}
+
+/// The property name of a logical line: everything before the first `:` or `;`.
+fn property_name(text: &str) -> &str {
+    text.split_once([':', ';']).map_or(text, |(name, _)| name)
+}
+
+/// The property value of a logical line: everything after the first `:`.
+fn property_value(text: &str) -> &str {
+    text.split_once(':').map_or("", |(_, value)| value)
+}
+
+/// Whether a logical line is a property (i.e. neither `BEGIN:` nor `END:`).
+fn is_property_line(text: &str) -> bool {
+    component_boundary(text, "BEGIN").is_none() && component_boundary(text, "END").is_none()
+}
+
+/// Whether a component stack is exactly `[VCALENDAR]`.
+fn is_vcalendar_level(stack: &[String]) -> bool {
+    stack.len() == 1 && stack[0] == "VCALENDAR"
+}
+
+/// Whether a component stack is exactly `[VCALENDAR, VEVENT]`.
+fn is_vevent_top_level(stack: &[String]) -> bool {
+    stack.len() == 2 && stack[0] == "VCALENDAR" && stack[1] == "VEVENT"
+}
+
+/// The canonical rank of a property name, or `None` when it is not modelled.
+fn canonical_rank(name: &str) -> Option<usize> {
+    RECONCILE_ORDER
+        .iter()
+        .position(|&known| known.eq_ignore_ascii_case(name))
+}
+
+/// The component stack applicable to each logical line.
+///
+/// A `BEGIN:X` line carries the stack **before** the push, so the target
+/// `BEGIN:VEVENT` inside a `VCALENDAR` reports `[VCALENDAR]`; an `END:X` line
+/// carries the stack **before** the pop, so its `END:VEVENT` reports
+/// `[VCALENDAR, VEVENT]`. Property lines carry the current stack unchanged.
+fn component_stacks(lines: &[LogicalLine]) -> Vec<Vec<String>> {
+    let mut stacks = Vec::with_capacity(lines.len());
+    let mut stack: Vec<String> = Vec::new();
+    for line in lines {
+        if let Some(name) = component_boundary(&line.text, "BEGIN") {
+            stacks.push(stack.clone());
+            stack.push(name);
+        } else if let Some(name) = component_boundary(&line.text, "END") {
+            stacks.push(stack.clone());
+            if stack.last().is_some_and(|open| open == &name) {
+                stack.pop();
+            }
+        } else {
+            stacks.push(stack.clone());
+        }
+    }
+    stacks
+}
+
+/// Whether the calendar already defines a `VTIMEZONE` for `tz`.
+fn has_tzid_definition(lines: &[LogicalLine], tz: Tz) -> bool {
+    let canonical = vtimezone::canonical_tzid(tz);
+    lines.iter().any(|line| {
+        property_name(&line.text).eq_ignore_ascii_case("TZID")
+            && property_value(&line.text).trim() == canonical
+    })
+}
+
+/// The logical-line index before which a missing property `name` must be inserted.
+///
+/// The canonical position is before the first same-level property whose rank is
+/// later, else before the first nested component, else before `END:VEVENT`
+/// (`target_end`). Anchoring to a component boundary keeps a new property inside
+/// the event's property list, never interleaved into a `VALARM`.
+fn insertion_index(
+    name: &str,
+    target: usize,
+    target_end: usize,
+    lines: &[LogicalLine],
+    stacks: &[Vec<String>],
+) -> usize {
+    let rank = canonical_rank(name).unwrap_or(usize::MAX);
+    let region: Vec<(&LogicalLine, &Vec<String>)> = lines[target + 1..target_end]
+        .iter()
+        .zip(&stacks[target + 1..target_end])
+        .collect();
+
+    if let Some(offset) = region.iter().position(|(line, stack)| {
+        is_vevent_top_level(stack)
+            && is_property_line(&line.text)
+            && canonical_rank(property_name(&line.text)).is_some_and(|other| other > rank)
+    }) {
+        return target + 1 + offset;
+    }
+    if let Some(offset) = region.iter().position(|(line, stack)| {
+        is_vevent_top_level(stack) && component_boundary(&line.text, "BEGIN").is_some()
+    }) {
+        return target + 1 + offset;
+    }
+    target_end
+}
+
+/// Render the `UID` content line (a structured value, emitted verbatim).
+fn uid_line(uid: &str) -> String {
+    format!("UID:{uid}")
+}
+
+/// Render the `DTSTAMP` content line as a UTC date-time.
+fn dtstamp_line(dtstamp_ms: i64) -> String {
+    format!("DTSTAMP:{}", format_datetime_ms(dtstamp_ms))
+}
+
+/// Render the `SUMMARY` content line, escaping the free-text value.
+fn summary_line(summary: &str) -> String {
+    format!("SUMMARY:{}", escape_text(summary))
+}
+
+/// Render the `DESCRIPTION` content line, escaping the free-text value.
+fn description_line(description: &str) -> String {
+    format!("DESCRIPTION:{}", escape_text(description))
+}
+
+/// Render the `LOCATION` content line, escaping the free-text value.
+fn location_line(location: &str) -> String {
+    format!("LOCATION:{}", escape_text(location))
+}
+
+/// Render the `URL` content line (a URI, emitted verbatim).
+fn url_line(url: &str) -> String {
+    format!("URL:{url}")
+}
+
+/// Render the `DTSTART` content line: `;TZID=<canonical>` with a local time when
+/// `tz` is set, otherwise the UTC rendering.
+fn dtstart_line(dtstart_ms: i64, tz: Option<Tz>) -> String {
+    match tz {
+        Some(tz) => format!(
+            "DTSTART;TZID={}:{}",
+            vtimezone::canonical_tzid(tz),
+            vtimezone::format_local_datetime_ms(tz, dtstart_ms)
+        ),
+        None => format!("DTSTART:{}", format_datetime_ms(dtstart_ms)),
+    }
+}
+
+/// Render the `DTEND` content line, mirroring [`dtstart_line`].
+fn dtend_line(dtend_ms: i64, tz: Option<Tz>) -> String {
+    match tz {
+        Some(tz) => format!(
+            "DTEND;TZID={}:{}",
+            vtimezone::canonical_tzid(tz),
+            vtimezone::format_local_datetime_ms(tz, dtend_ms)
+        ),
+        None => format!("DTEND:{}", format_datetime_ms(dtend_ms)),
+    }
+}
+
+/// Render the `RRULE` content line (a structured value, emitted verbatim).
+fn rrule_line(rrule: &str) -> String {
+    format!("RRULE:{rrule}")
+}
+
+/// Reconcilia las propiedades *modeladas* del primer `VEVENT` de `raw` con
+/// `fields`, dejando intacta —byte a byte— cualquier otra línea del payload.
+///
+/// Sólo se tocan las propiedades del **nivel superior** del primer `VEVENT` que
+/// cuelga de un `VCALENDAR` (el mismo que elige [`parse_ics`]); un `SUMMARY`
+/// dentro de un `VALARM`, un segundo `VEVENT` o cualquier propiedad no modelada
+/// (`ATTENDEE`, `CATEGORIES`, `X-*`…) se reemiten **verbatim**, con su plegado
+/// original. El conjunto modelado —y por tanto reconciliado— es `SUMMARY`,
+/// `DESCRIPTION`, `LOCATION`, `URL`, `DTSTART`, `DTEND`, `RRULE` y `DTSTAMP`;
+/// `LOCATION` y `URL` se reconcilian igual que el resto (se sustituyen, se
+/// insertan o se eliminan según el valor final). Las únicas líneas regeneradas
+/// son las modeladas ausentes o modificadas.
+///
+/// Si la zona final de `DTSTART`/`DTEND` no está definida en el `VCALENDAR`, se
+/// inserta su bloque `VTIMEZONE` justo antes del `BEGIN:VEVENT` objetivo. Un
+/// `VTIMEZONE` preexistente **nunca** se elimina.
+///
+/// # Errores
+/// [`IcsError::NoEvent`] si `raw` no contiene ningún `VEVENT` de nivel
+/// `VCALENDAR`.
+pub fn reconcile_ics(raw: &str, fields: &EventFields) -> Result<String, IcsError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let lines = split_logical_lines(raw);
+    let stacks = component_stacks(&lines);
+
+    // The first `VEVENT` directly inside a `VCALENDAR`: the one `parse_ics` picks.
+    let target = lines
+        .iter()
+        .enumerate()
+        .find(|(index, line)| {
+            component_boundary(&line.text, "BEGIN").as_deref() == Some("VEVENT")
+                && is_vcalendar_level(&stacks[*index])
+        })
+        .map(|(index, _)| index)
+        .ok_or(IcsError::NoEvent)?;
+
+    // The `END:VEVENT` closing the target, bounding the reconciled region so a
+    // following `VEVENT` is never touched.
+    let target_end = (target + 1..lines.len())
+        .find(|&index| {
+            component_boundary(&lines[index].text, "END").as_deref() == Some("VEVENT")
+                && is_vevent_top_level(&stacks[index])
+        })
+        .unwrap_or(lines.len());
+
+    // Top-level property lines of the target event.
+    let top_level_props: Vec<usize> = lines[target + 1..target_end]
+        .iter()
+        .zip(&stacks[target + 1..target_end])
+        .enumerate()
+        .filter(|(_, (line, stack))| is_vevent_top_level(stack) && is_property_line(&line.text))
+        .map(|(offset, _)| target + 1 + offset)
+        .collect();
+
+    // Final rendered value of every modelled property, or `None` when it must be
+    // removed.
+    let dtstart_tz = fields
+        .dtstart_tzid
+        .as_deref()
+        .and_then(vtimezone::parse_tzid);
+    let dtend_tz = fields
+        .dtend_tzid
+        .as_deref()
+        .and_then(vtimezone::parse_tzid)
+        .or(dtstart_tz);
+    let final_values: [(&'static str, Option<String>); 8] = [
+        ("DTSTAMP", Some(dtstamp_line(fields.dtstamp_ms))),
+        ("SUMMARY", fields.summary.as_deref().map(summary_line)),
+        (
+            "DESCRIPTION",
+            fields.description.as_deref().map(description_line),
+        ),
+        ("LOCATION", fields.location.as_deref().map(location_line)),
+        ("URL", fields.url.as_deref().map(url_line)),
+        ("DTSTART", Some(dtstart_line(fields.dtstart_ms, dtstart_tz))),
+        ("DTEND", fields.dtend_ms.map(|ms| dtend_line(ms, dtend_tz))),
+        ("RRULE", fields.rrule.as_deref().map(rrule_line)),
+    ];
+
+    let mut replace: BTreeMap<usize, String> = BTreeMap::new();
+    let mut remove: BTreeSet<usize> = BTreeSet::new();
+    let mut insertions: BTreeMap<usize, Vec<&'static str>> = BTreeMap::new();
+
+    for (name, value) in &final_values {
+        let occurrences: Vec<usize> = top_level_props
+            .iter()
+            .copied()
+            .filter(|&index| property_name(&lines[index].text).eq_ignore_ascii_case(name))
+            .collect();
+        match value {
+            Some(new_line) => match occurrences.split_first() {
+                // Replace the first occurrence in place; duplicates are invalid
+                // per RFC 5545 and the new value wins, so drop the rest.
+                Some((&first, rest)) => {
+                    replace.insert(first, new_line.clone());
+                    remove.extend(rest);
+                }
+                // No occurrence: insert at the canonical position.
+                None => {
+                    let at = insertion_index(name, target, target_end, &lines, &stacks);
+                    insertions.entry(at).or_default().push(name);
+                }
+            },
+            // Cleared field: drop every occurrence.
+            None => remove.extend(&occurrences),
+        }
+    }
+
+    // Zones the event needs, in first-seen order (dtstart before dtend).
+    let mut zones: Vec<Tz> = Vec::new();
+    for tz in [dtstart_tz, dtend_tz].into_iter().flatten() {
+        if !zones.contains(&tz) {
+            zones.push(tz);
+        }
+    }
+    let missing_zones: Vec<Tz> = zones
+        .iter()
+        .copied()
+        .filter(|&tz| !has_tzid_definition(&lines, tz))
+        .collect();
+    let rendered_zones: Vec<String> = if missing_zones.is_empty() {
+        Vec::new()
+    } else {
+        let reference = reference_year(fields, &zones);
+        missing_zones
+            .iter()
+            .map(|&tz| vtimezone::render_vtimezone(tz, reference))
+            .collect()
+    };
+
+    // Insertions anchored before `at`, emitted in canonical order.
+    let emit_insertions = |at: usize, out: &mut String| {
+        let Some(names) = insertions.get(&at) else {
+            return;
+        };
+        let mut names = names.clone();
+        names.sort_by_key(|name| canonical_rank(name).unwrap_or(usize::MAX));
+        for name in names {
+            if let Some(line) = final_values.iter().find_map(|(known, value)| {
+                if *known == name {
+                    value.as_deref()
+                } else {
+                    None
+                }
+            }) {
+                super::common::fold_content_line(line, out);
+            }
+        }
+    };
+
+    let mut out = String::with_capacity(raw.len() + 256);
+    for (index, line) in lines.iter().enumerate() {
+        // Splice the missing `VTIMEZONE` blocks immediately before the target.
+        if index == target {
+            for block in &rendered_zones {
+                out.push_str(block);
+            }
+        }
+        emit_insertions(index, &mut out);
+        if remove.contains(&index) {
+            continue;
+        }
+        match replace.get(&index) {
+            Some(new_line) => super::common::fold_content_line(new_line, &mut out),
+            None => {
+                for physical in &line.physical {
+                    out.push_str(physical);
+                }
+            }
+        }
+    }
+    emit_insertions(lines.len(), &mut out);
+
+    Ok(out)
 }
 
 /// The reference year for the `VTIMEZONE` observances: the **local** year of
@@ -874,6 +1308,8 @@ mod tests {
             uid: "composed@oxidav".to_string(),
             summary: Some("Reunión: equipo".to_string()),
             description: Some("Line one\nLine two; with, punctuation".to_string()),
+            location: None,
+            url: None,
             dtstart_ms: 1_710_496_800_000,
             dtend_ms: Some(1_710_500_400_000),
             rrule: Some("FREQ=WEEKLY;COUNT=3".to_string()),
@@ -902,6 +1338,8 @@ mod tests {
             uid: "structured@oxidav".to_string(),
             summary: Some("A;B,C\\D".to_string()),
             description: Some("line1\nline2; end, back\\slash".to_string()),
+            location: None,
+            url: None,
             dtstart_ms: 1_710_496_800_000,
             dtend_ms: None,
             rrule: Some("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;COUNT=3".to_string()),
@@ -933,6 +1371,8 @@ mod tests {
             uid: "minimal@oxidav".to_string(),
             summary: None,
             description: None,
+            location: None,
+            url: None,
             dtstart_ms: 1_710_496_800_000,
             dtend_ms: None,
             rrule: None,
@@ -961,6 +1401,8 @@ mod tests {
             uid: "long@oxidav".to_string(),
             summary: Some(summary.clone()),
             description: None,
+            location: None,
+            url: None,
             dtstart_ms: 1_710_496_800_000,
             dtend_ms: None,
             rrule: None,
@@ -984,6 +1426,8 @@ mod tests {
             uid: "uid-b@x".to_string(),
             summary: Some("a\\b;c,d".to_string()),
             description: None,
+            location: None,
+            url: None,
             dtstart_ms: 0,
             dtend_ms: None,
             rrule: None,
@@ -1006,6 +1450,8 @@ mod tests {
             uid: "regression@oxidav".to_string(),
             summary: Some("Plain".to_string()),
             description: None,
+            location: None,
+            url: None,
             dtstart_ms: 1_710_496_800_000,
             dtend_ms: Some(1_710_500_400_000),
             dtstart_tzid: None,
@@ -1039,6 +1485,8 @@ mod tests {
             uid: "zoned@oxidav".to_string(),
             summary: Some("Zoned".to_string()),
             description: None,
+            location: None,
+            url: None,
             // 09:00 UTC == 10:00 Europe/Madrid (CET).
             dtstart_ms: 1_710_493_200_000,
             // 09:00 UTC the same day == 10:00 Madrid; DTEND inherits the zone.
@@ -1085,6 +1533,8 @@ mod tests {
             uid: "two-zones@oxidav".to_string(),
             summary: None,
             description: None,
+            location: None,
+            url: None,
             dtstart_ms: 1_710_493_200_000,     // 10:00 Madrid
             dtend_ms: Some(1_710_500_400_000), // 11:00 UTC == 20:00 Tokyo
             dtstart_tzid: Some("Europe/Madrid".to_string()),
@@ -1104,5 +1554,683 @@ mod tests {
         assert_eq!(parsed.dtstart_tzid.as_deref(), Some("Europe/Madrid"));
         assert_eq!(parsed.dtend_tzid.as_deref(), Some("Asia/Tokyo"));
         assert_eq!(parsed.dtend_ms, Some(1_710_500_400_000));
+    }
+
+    // -- F24 Paso 1 RED — `reconcile_ics` must not destroy unmodelled data ----
+
+    /// A rich `.ics` payload — the trap fixture of PLAN-028. It carries a
+    /// `VALARM` with **its own** `SUMMARY` (`SUMMARY:Recordatorio`, *not* the
+    /// event's), two `ATTENDEE` lines, `CATEGORIES`, `LOCATION` and an `X-`
+    /// property. As of F24 `LOCATION` **is** modelled (it is reconciled like the
+    /// other modelled fields); `ATTENDEE`, `CATEGORIES`, `X-*` and `VALARM` are
+    /// not, so they must survive only by passing through verbatim.
+    const RICH_ICS: &str = concat!(
+        "BEGIN:VCALENDAR\r\n",
+        "VERSION:2.0\r\n",
+        "PRODID:-//Thunderbird//EN\r\n",
+        "BEGIN:VEVENT\r\n",
+        "UID:rich@oxidav\r\n",
+        "DTSTAMP:20240315T090000Z\r\n",
+        "SUMMARY:Original\r\n",
+        "DESCRIPTION:Una descripcion\r\n",
+        "LOCATION:Sala 3\r\n",
+        "CATEGORIES:Reunion,Trabajo\r\n",
+        "X-CUSTOM-PROP:valor-propio\r\n",
+        "ATTENDEE;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT;RSVP=TRUE:mailto:ana@example.org\r\n",
+        "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:luis@example.org\r\n",
+        "DTSTART:20240315T100000Z\r\n",
+        "DTEND:20240315T110000Z\r\n",
+        "BEGIN:VALARM\r\n",
+        "ACTION:DISPLAY\r\n",
+        "TRIGGER:-PT15M\r\n",
+        "SUMMARY:Recordatorio\r\n",
+        "END:VALARM\r\n",
+        "END:VEVENT\r\n",
+        "END:VCALENDAR\r\n",
+    );
+
+    /// The `EventFields` used across the `reconcile_ics` tests: every modelled
+    /// value equals the fixture's, except `summary`, which is replaced.
+    ///
+    /// `LOCATION` is modelled as of F24 and the fixture carries `LOCATION:Sala 3`,
+    /// so `location` **is** set here: the E1/E2 tests then assert that the line
+    /// survives because the (unchanged) modelled value renders it back identically.
+    /// The properties that are genuinely unmodelled — and therefore only pass
+    /// through verbatim — are `ATTENDEE`, `CATEGORIES`, `X-*` and `VALARM`.
+    fn reconcile_fields(summary: Option<&str>) -> EventFields {
+        EventFields {
+            uid: "rich@oxidav".to_string(),
+            summary: summary.map(str::to_string),
+            description: Some("Una descripcion".to_string()),
+            location: Some("Sala 3".to_string()),
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        }
+    }
+
+    #[test]
+    fn reconcile_keeps_unmodelled_properties_verbatim() {
+        // E1: changing only `summary` must leave every *unmodelled* property and
+        // subcomponent byte for byte intact.
+        let fields = reconcile_fields(Some("Nuevo titulo"));
+
+        let out = reconcile_ics(RICH_ICS, &fields).expect("reconcile");
+
+        assert!(out.contains("SUMMARY:Nuevo titulo"), "{out}");
+        // `LOCATION` is now a modelled field: it survives because the reconciled
+        // value renders the very same line back, not by pass-through.
+        assert!(out.contains("LOCATION:Sala 3"), "{out}");
+        // These are genuinely unmodelled, so they survive only by pass-through:
+        // `CATEGORIES`, `X-*`, both `ATTENDEE` lines and the `VALARM` below.
+        assert!(out.contains("CATEGORIES:Reunion,Trabajo"), "{out}");
+        assert!(out.contains("X-CUSTOM-PROP:valor-propio"), "{out}");
+        // Both `ATTENDEE` lines, with their parameters, must survive verbatim.
+        assert!(
+            out.contains(
+                "ATTENDEE;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT;RSVP=TRUE:\
+                 mailto:ana@example.org"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:luis@example.org"),
+            "{out}"
+        );
+        // The nested `VALARM` subcomponent, byte for byte.
+        assert!(
+            out.contains(concat!(
+                "BEGIN:VALARM\r\n",
+                "ACTION:DISPLAY\r\n",
+                "TRIGGER:-PT15M\r\n",
+                "SUMMARY:Recordatorio\r\n",
+                "END:VALARM\r\n",
+            )),
+            "{out}"
+        );
+        // Exactly two `ATTENDEE` lines: nothing added, nothing lost.
+        let attendee_lines = out.lines().filter(|l| l.starts_with("ATTENDEE")).count();
+        assert_eq!(attendee_lines, 2, "{out}");
+
+        // And the modelled field round-trips.
+        let parsed = parse_ics(&out).expect("reconciled payload must parse");
+        assert_eq!(parsed.summary.as_deref(), Some("Nuevo titulo"));
+    }
+
+    #[test]
+    fn reconcile_does_not_touch_the_alarm_summary() {
+        // Depth trap: the `VALARM` carries its own `SUMMARY:Recordatorio`, which
+        // must NOT be mistaken for the event's and must keep living inside its
+        // `BEGIN:VALARM`…`END:VALARM` block.
+        let fields = reconcile_fields(Some("Nuevo titulo"));
+
+        let out = reconcile_ics(RICH_ICS, &fields).expect("reconcile");
+
+        assert!(out.contains("SUMMARY:Nuevo titulo"), "{out}");
+        assert!(out.contains("SUMMARY:Recordatorio"), "{out}");
+
+        let alarm_start = out.find("BEGIN:VALARM").expect("a VALARM block");
+        let alarm_end = out
+            .find("END:VALARM")
+            .expect("the VALARM end")
+            .checked_add("END:VALARM".len())
+            .expect("non-overflowing");
+        let alarm_block = &out[alarm_start..alarm_end];
+        assert!(
+            alarm_block.contains("SUMMARY:Recordatorio"),
+            "the alarm summary must stay inside its own block:\n{out}"
+        );
+    }
+
+    #[test]
+    fn reconcile_leaves_a_second_vevent_byte_identical() {
+        // E7: only the first `VEVENT` is reconciled; any following one must be
+        // emitted byte for byte.
+        let first = concat!(
+            "BEGIN:VEVENT\r\n",
+            "UID:primero@oxidav\r\n",
+            "DTSTAMP:20240315T090000Z\r\n",
+            "SUMMARY:Original\r\n",
+            "DTSTART:20240315T100000Z\r\n",
+            "DTEND:20240315T110000Z\r\n",
+            "END:VEVENT\r\n",
+        );
+        let second = concat!(
+            "BEGIN:VEVENT\r\n",
+            "UID:segundo@oxidav\r\n",
+            "DTSTAMP:20240315T090000Z\r\n",
+            "SUMMARY:Segundo\r\n",
+            "DTSTART:20240316T100000Z\r\n",
+            "DTEND:20240316T110000Z\r\n",
+            "X-SEGUNDO:no-tocar\r\n",
+            "END:VEVENT\r\n",
+        );
+        let raw = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Thunderbird//EN\r\n\
+             {first}{second}END:VCALENDAR\r\n"
+        );
+
+        let fields = EventFields {
+            uid: "primero@oxidav".to_string(),
+            summary: Some("Cambiado".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SUMMARY:Cambiado"), "{out}");
+        assert!(
+            out.contains(second),
+            "the second VEVENT must be byte-identical:\n{out}"
+        );
+        assert!(out.contains("X-SEGUNDO:no-tocar"), "{out}");
+        assert!(out.contains("SUMMARY:Segundo"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_errors_when_there_is_no_vevent() {
+        let raw = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
+        let fields = reconcile_fields(Some("Nuevo titulo"));
+
+        assert!(matches!(
+            reconcile_ics(raw, &fields),
+            Err(IcsError::NoEvent)
+        ));
+    }
+
+    // -- F24 — `reconcile_ics`: zones, insertion, removal, dedup, folding -----
+
+    #[test]
+    fn reconcile_adds_a_missing_timezone_and_keeps_the_old_one() {
+        // E6: switching zone adds the new `VTIMEZONE` but never removes the old.
+        let madrid = vtimezone::render_vtimezone(Tz::Europe__Madrid, 2024);
+        let raw = format!(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Thunderbird//EN\r\n\
+             {madrid}\
+             BEGIN:VEVENT\r\n\
+             UID:zonas@oxidav\r\n\
+             DTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Con zona\r\n\
+             DTSTART;TZID=Europe/Madrid:20240315T100000\r\n\
+             DTEND;TZID=Europe/Madrid:20240315T110000\r\n\
+             BEGIN:VALARM\r\n\
+             ACTION:DISPLAY\r\n\
+             TRIGGER:-PT15M\r\n\
+             SUMMARY:Recordatorio\r\n\
+             END:VALARM\r\n\
+             END:VEVENT\r\n\
+             END:VCALENDAR\r\n"
+        );
+
+        let fields = EventFields {
+            uid: "zonas@oxidav".to_string(),
+            summary: Some("Con zona".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            // 09:00 UTC == 10:00 Europe/Madrid before the change.
+            dtstart_ms: 1_710_493_200_000,
+            dtend_ms: Some(1_710_496_800_000),
+            dtstart_tzid: Some("Asia/Tokyo".to_string()),
+            dtend_tzid: Some("Asia/Tokyo".to_string()),
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("DTSTART;TZID=Asia/Tokyo:"), "{out}");
+        assert!(out.contains("BEGIN:VTIMEZONE"), "{out}");
+        assert!(out.contains("TZID:Asia/Tokyo\r\n"), "{out}");
+        // The pre-existing Madrid block survives verbatim.
+        assert!(
+            out.contains(&madrid),
+            "the Madrid VTIMEZONE must survive:\n{out}"
+        );
+        // The alarm survives.
+        assert!(out.contains("BEGIN:VALARM"), "{out}");
+        assert!(out.contains("SUMMARY:Recordatorio"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_inserts_a_missing_modelled_property() {
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:ins@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Con titulo\r\nDTSTART:20240315T100000Z\r\n\
+             DTEND:20240315T110000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "ins@oxidav".to_string(),
+            summary: Some("Con titulo".to_string()),
+            description: Some("nueva".to_string()),
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert_eq!(out.matches("DESCRIPTION:nueva").count(), 1, "{out}");
+        let summary = out.find("SUMMARY:Con titulo").expect("a SUMMARY line");
+        let description = out.find("DESCRIPTION:nueva").expect("a DESCRIPTION line");
+        let dtstart = out.find("DTSTART:").expect("a DTSTART line");
+        assert!(
+            summary < description && description < dtstart,
+            "DESCRIPTION must sit between SUMMARY and DTSTART:\n{out}"
+        );
+        // The rest of the payload is unchanged.
+        assert!(out.contains("UID:ins@oxidav"), "{out}");
+        assert!(out.contains("DTEND:20240315T110000Z"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_removes_a_cleared_modelled_property() {
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:del@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Con titulo\r\nDESCRIPTION:para borrar\r\n\
+             DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "del@oxidav".to_string(),
+            summary: Some("Con titulo".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(!out.contains("DESCRIPTION:"), "{out}");
+        // Everything else is present (SUMMARY/DTSTAMP rewritten identically).
+        assert!(out.contains("SUMMARY:Con titulo"), "{out}");
+        assert!(out.contains("DTSTART:20240315T100000Z"), "{out}");
+        assert!(out.contains("DTEND:20240315T110000Z"), "{out}");
+        assert!(out.contains("UID:del@oxidav"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_normalises_a_duplicated_modelled_property() {
+        // Two top-level `SUMMARY` lines (invalid per RFC 5545) plus the alarm's
+        // own `SUMMARY`, which must stay untouched.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:dup@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Primero\r\nSUMMARY:Segundo\r\nDTSTART:20240315T100000Z\r\n\
+             BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\n\
+             SUMMARY:Recordatorio\r\nEND:VALARM\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "dup@oxidav".to_string(),
+            summary: Some("Unico".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert_eq!(out.matches("SUMMARY:Unico").count(), 1, "{out}");
+        assert!(!out.contains("SUMMARY:Primero"), "{out}");
+        assert!(!out.contains("SUMMARY:Segundo"), "{out}");
+        assert!(out.contains("SUMMARY:Recordatorio"), "{out}");
+        // Two `SUMMARY` lines in total: the event's and the alarm's.
+        let summaries = out.lines().filter(|l| l.starts_with("SUMMARY:")).count();
+        assert_eq!(summaries, 2, "{out}");
+    }
+
+    #[test]
+    fn reconcile_preserves_the_original_folding_of_untouched_lines() {
+        // A non-modelled property folded over two physical lines: the first is
+        // exactly 75 octets and the second begins with a single space.
+        let first_physical = format!("X-LARGO:{}", "a".repeat(67));
+        assert_eq!(first_physical.len(), 75);
+        let raw = calendar(&format!(
+            "BEGIN:VEVENT\r\nUID:fold@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Original\r\n{first_physical}\r\n bbb\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n"
+        ));
+
+        let fields = EventFields {
+            uid: "fold@oxidav".to_string(),
+            summary: Some("Cambiado".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SUMMARY:Cambiado"), "{out}");
+        assert!(
+            out.contains(&format!("{first_physical}\r\n bbb\r\n")),
+            "the X-LARGO folding must be byte-identical:\n{out}"
+        );
+    }
+
+    // -- F24 — `LOCATION`/`URL`: parse, compose and reconcile ------------------
+
+    #[test]
+    fn parse_ics_unescapes_location() {
+        // The open question of PLAN-028: the `icalendar` parser types `LOCATION`
+        // as `ValueType::Text` (like `SUMMARY`/`DESCRIPTION`), so it unescapes
+        // the wire value itself — this test pins that empirically.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:loc@oxidav\r\nSUMMARY:Con ubicacion\r\n\
+             LOCATION:Sala 3\\; planta 2\\, ala \\\\norte\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+
+        let event = parse_ics(&raw).expect("parse");
+
+        assert_eq!(
+            event.location.as_deref(),
+            Some("Sala 3; planta 2, ala \\norte")
+        );
+    }
+
+    #[test]
+    fn parse_ics_reads_url_verbatim() {
+        // `URL` is a URI (`ValueType::Uri`): the parser must not touch its
+        // commas, so the value comes back byte for byte.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:url@oxidav\r\nSUMMARY:Con url\r\n\
+             URL:https://ejemplo.org/a?x=1&y=2,3\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+
+        let event = parse_ics(&raw).expect("parse");
+
+        assert_eq!(
+            event.url.as_deref(),
+            Some("https://ejemplo.org/a?x=1&y=2,3")
+        );
+    }
+
+    #[test]
+    fn build_ics_round_trips_location_and_url() {
+        let fields = EventFields {
+            uid: "roundtrip@oxidav".to_string(),
+            summary: Some("RT".to_string()),
+            description: None,
+            location: Some("Sala 3; planta 2, ala \\norte".to_string()),
+            url: Some("https://ejemplo.org/a?x=1&y=2,3".to_string()),
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let raw = build_ics(&fields);
+        let parsed = parse_ics(&raw).expect("composed payload must parse");
+
+        assert_eq!(parsed.location, fields.location);
+        assert_eq!(parsed.url, fields.url);
+    }
+
+    #[test]
+    fn build_ics_emits_url_verbatim_but_escapes_location() {
+        let fields = EventFields {
+            uid: "verbatim@oxidav".to_string(),
+            summary: None,
+            description: None,
+            location: Some("a;b,c\\d".to_string()),
+            url: Some("https://x.org/a,b;c".to_string()),
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let raw = build_ics(&fields);
+
+        // Free text: `;`, `,` and `\` are escaped.
+        assert!(raw.contains("LOCATION:a\\;b\\,c\\\\d"), "{raw}");
+        // A URI: emitted verbatim, commas included, like `RRULE`.
+        assert!(raw.contains("URL:https://x.org/a,b;c"), "{raw}");
+    }
+
+    #[test]
+    fn build_ics_omits_location_and_url_when_none_is_byte_identical() {
+        // E12: with `location` and `url` absent (`None`) the output is exactly
+        // the pre-F24 bytes — the hard contract that keeps this change inert for
+        // every event that does not use the two new fields.
+        let fields = EventFields {
+            uid: "f24-identity@oxidav".to_string(),
+            summary: Some("Plain".to_string()),
+            description: Some("Una descripcion".to_string()),
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let expected = concat!(
+            "BEGIN:VCALENDAR\r\n",
+            "VERSION:2.0\r\n",
+            "PRODID:-//oxidav//oxidav//EN\r\n",
+            "BEGIN:VEVENT\r\n",
+            "UID:f24-identity@oxidav\r\n",
+            "DTSTAMP:20240315T100000Z\r\n",
+            "SUMMARY:Plain\r\n",
+            "DESCRIPTION:Una descripcion\r\n",
+            "DTSTART:20240315T100000Z\r\n",
+            "DTEND:20240315T110000Z\r\n",
+            "END:VEVENT\r\n",
+            "END:VCALENDAR\r\n",
+        );
+
+        assert_eq!(build_ics(&fields), expected);
+    }
+
+    #[test]
+    fn build_ics_places_location_and_url_in_canonical_order() {
+        let fields = EventFields {
+            uid: "order@oxidav".to_string(),
+            summary: Some("Orden".to_string()),
+            description: Some("d".to_string()),
+            location: Some("Sala".to_string()),
+            url: Some("https://x.org".to_string()),
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let raw = build_ics(&fields);
+
+        let description = raw.find("DESCRIPTION:d").expect("a DESCRIPTION line");
+        let location = raw.find("LOCATION:Sala").expect("a LOCATION line");
+        let url = raw.find("URL:https://x.org").expect("a URL line");
+        let dtstart = raw.find("DTSTART:").expect("a DTSTART line");
+        assert!(
+            description < location && location < url && url < dtstart,
+            "expected DESCRIPTION < LOCATION < URL < DTSTART:\n{raw}"
+        );
+    }
+
+    #[test]
+    fn reconcile_inserts_location_and_url_in_canonical_order() {
+        // A payload without either property: reconciling with both set inserts
+        // them, once each, at the canonical position (after `DESCRIPTION`,
+        // before `URL`, and both before `DTSTART`).
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:insloc@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Con titulo\r\nDESCRIPTION:desc\r\nDTSTART:20240315T100000Z\r\n\
+             DTEND:20240315T110000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "insloc@oxidav".to_string(),
+            summary: Some("Con titulo".to_string()),
+            description: Some("desc".to_string()),
+            location: Some("Sala 3".to_string()),
+            url: Some("https://ejemplo.org/x".to_string()),
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert_eq!(out.matches("LOCATION:").count(), 1, "{out}");
+        assert_eq!(out.matches("URL:").count(), 1, "{out}");
+        let description = out.find("DESCRIPTION:desc").expect("a DESCRIPTION line");
+        let location = out.find("LOCATION:Sala 3").expect("a LOCATION line");
+        let url = out.find("URL:https://ejemplo.org/x").expect("a URL line");
+        let dtstart = out.find("DTSTART:").expect("a DTSTART line");
+        assert!(
+            description < location && location < url && url < dtstart,
+            "expected DESCRIPTION < LOCATION < URL < DTSTART:\n{out}"
+        );
+    }
+
+    #[test]
+    fn reconcile_replaces_location_and_escapes_reserved_characters() {
+        // Part of E4 (write side): the stored `LOCATION:Sala 3` is replaced in
+        // place by the escaped new value, single line, and nothing else moves.
+        let fields = EventFields {
+            uid: "rich@oxidav".to_string(),
+            summary: Some("Original".to_string()),
+            description: Some("Una descripcion".to_string()),
+            location: Some("Sala 3; planta 2, ala \\norte".to_string()),
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(RICH_ICS, &fields).expect("reconcile");
+
+        assert!(
+            out.contains("LOCATION:Sala 3\\; planta 2\\, ala \\\\norte"),
+            "{out}"
+        );
+        // Exactly one `LOCATION`, and the old unescaped line is gone.
+        assert_eq!(out.matches("LOCATION:").count(), 1, "{out}");
+        assert!(!out.contains("LOCATION:Sala 3\r\n"), "{out}");
+        // The rest of the payload is untouched.
+        assert!(out.contains("SUMMARY:Original"), "{out}");
+        assert!(out.contains("DESCRIPTION:Una descripcion"), "{out}");
+        assert!(out.contains("CATEGORIES:Reunion,Trabajo"), "{out}");
+        assert!(out.contains("X-CUSTOM-PROP:valor-propio"), "{out}");
+        assert!(out.contains("BEGIN:VALARM"), "{out}");
+        assert!(out.contains("TRIGGER:-PT15M"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_clears_location_when_absent() {
+        // A `None` final value removes every `LOCATION:` line while leaving every
+        // unmodelled property and the `VALARM` intact.
+        let fields = EventFields {
+            uid: "rich@oxidav".to_string(),
+            summary: Some("Original".to_string()),
+            description: Some("Una descripcion".to_string()),
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(RICH_ICS, &fields).expect("reconcile");
+
+        assert!(!out.contains("LOCATION:"), "{out}");
+        // The unmodelled content survives.
+        assert!(
+            out.contains("ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:luis@example.org"),
+            "{out}"
+        );
+        assert!(out.contains("X-CUSTOM-PROP:valor-propio"), "{out}");
+        assert!(out.contains("CATEGORIES:Reunion,Trabajo"), "{out}");
+        assert!(out.contains("BEGIN:VALARM"), "{out}");
+        assert!(out.contains("SUMMARY:Recordatorio"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_changes_location_but_keeps_url_untouched() {
+        // Changing `location` (rewritten in place) must not move or re-escape the
+        // `URL`, which stays verbatim where it was.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:keepurl@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Con url\r\nLOCATION:Vieja\r\nURL:https://ejemplo.org/a,b;c\r\n\
+             DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "keepurl@oxidav".to_string(),
+            summary: Some("Con url".to_string()),
+            description: None,
+            location: Some("Nueva".to_string()),
+            url: Some("https://ejemplo.org/a,b;c".to_string()),
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("LOCATION:Nueva\r\n"), "{out}");
+        assert!(!out.contains("LOCATION:Vieja"), "{out}");
+        assert!(out.contains("URL:https://ejemplo.org/a,b;c\r\n"), "{out}");
+        let location = out.find("LOCATION:Nueva").expect("a LOCATION line");
+        let url = out
+            .find("URL:https://ejemplo.org/a,b;c")
+            .expect("a URL line");
+        let dtstart = out.find("DTSTART:").expect("a DTSTART line");
+        assert!(location < url && url < dtstart, "{out}");
     }
 }

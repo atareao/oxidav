@@ -212,6 +212,17 @@ fn ics_event_madrid(uid: &str, summary: &str) -> String {
     )
 }
 
+/// A `VCALENDAR`/`VEVENT` carrying `LOCATION` and `URL`, used to exercise the DAV
+/// denormalisation of both columns (F24 scenario E9, storage half).
+fn ics_event_with_location_and_url(uid: &str, summary: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//oxidav//test//EN\r\n\
+         BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:{summary}\r\n\
+         LOCATION:Sala 3\r\nURL:https://ejemplo.org/x\r\n\
+         DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
 /// The canonical URL of the `evt-1@oxidav` resource in `col-work`.
 fn resource_uri() -> String {
     format!("/dav/calendars/{SUB}/col-work/evt-1@oxidav.ics")
@@ -332,6 +343,8 @@ async fn propfind_collection_lists_resources_with_getetag() {
             dtend: Some(1_710_500_400_000),
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: ics.to_string(),
         },
@@ -389,6 +402,8 @@ async fn propfind_depth_zero_hides_collection_members() {
             dtend: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".to_string(),
         },
@@ -471,6 +486,8 @@ async fn propfind_resource_returns_etag_and_calendar_data() {
             dtend: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: ics.to_string(),
         },
@@ -539,6 +556,34 @@ async fn put_creates_a_resource_with_201_and_denormalises_it() {
     assert_eq!(
         stored.raw_payload, ics,
         "the raw .ics must be kept verbatim"
+    );
+}
+
+/// F24 scenario E9 (storage half) — a `PUT` carrying `LOCATION` and `URL`
+/// denormalises both into their columns, while the `GET` still returns the raw
+/// `.ics` **byte-for-byte** (the flow keeps storing the payload verbatim).
+#[tokio::test]
+async fn put_denormalises_location_and_url_and_get_stays_verbatim() {
+    let env = test_env("put-location-url").await;
+    make_calendar(&env, "col-work").await;
+
+    let ics = ics_event_with_location_and_url("evt-lu@oxidav", "Reunión");
+    let response = dav_with(&env, "PUT", &uri_for("evt-lu@oxidav"), &[], &ics).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let stored = get_calendar_object(&env.pool, "col-work", "evt-lu@oxidav")
+        .await
+        .expect("query")
+        .expect("the object must be persisted");
+    assert_eq!(stored.location.as_deref(), Some("Sala 3"));
+    assert_eq!(stored.url.as_deref(), Some("https://ejemplo.org/x"));
+
+    let fetched = dav_with(&env, "GET", &uri_for("evt-lu@oxidav"), &[], "").await;
+    assert_eq!(fetched.status(), StatusCode::OK);
+    assert_eq!(
+        body_text(fetched).await,
+        ics,
+        "GET must return the raw .ics byte-for-byte"
     );
 }
 
