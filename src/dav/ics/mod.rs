@@ -31,6 +31,10 @@
 //! The structured fields (`UID`, `SUMMARY`, `DESCRIPTION`) come from the
 //! `icalendar` crate; only the time fields are parsed manually.
 
+pub mod projection;
+
+pub use projection::{EventProjection, project_event};
+
 use icalendar::{Calendar, Component, EventLike, Property};
 
 use super::vtimezone;
