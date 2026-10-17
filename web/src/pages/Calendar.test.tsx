@@ -60,6 +60,8 @@ function makeEvent(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
     collection_id: collection.id,
     summary: 'Evento',
     description: null,
+    location: null,
+    url: null,
     dtstart,
     dtend: dtstart + 3_600_000,
     dtstart_tzid: null,
@@ -347,5 +349,273 @@ describe('Calendar', () => {
       expect(screen.queryByText('No se pudieron cargar los datos')).not.toBeInTheDocument(),
     )
     expect(listCalendarCollections).toHaveBeenCalledTimes(2)
+  })
+
+  /** Event carrying every editable metadata field (F24/PLAN-028). */
+  const richEvent = (): CalendarEvent =>
+    makeEvent({
+      summary: 'Con metadatos',
+      description: 'Notas',
+      location: 'Sala 3',
+      url: 'https://ejemplo.org/x',
+    })
+
+  it('rellena descripción, ubicación y URL al abrir en edición (F24)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([richEvent()])
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Con metadatos/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByRole('textbox', { name: 'Descripción' })).toHaveValue('Notas')
+    expect(within(dialog).getByRole('textbox', { name: 'Ubicación' })).toHaveValue('Sala 3')
+    expect(within(dialog).getByRole('textbox', { name: 'URL' })).toHaveValue(
+      'https://ejemplo.org/x',
+    )
+  })
+
+  it('vacía la ubicación y la envía como cadena vacía, sin tocar descripción ni URL (F24/O3)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([richEvent()])
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con metadatos' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Con metadatos/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.clear(within(dialog).getByRole('textbox', { name: 'Ubicación' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.location).toBe('')
+    expect('description' in input).toBe(false)
+    expect('url' in input).toBe(false)
+  })
+
+  it('vacía la URL y la envía como cadena vacía, sin tocar los demás campos (F24/O3)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([richEvent()])
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con metadatos' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Con metadatos/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.clear(within(dialog).getByRole('textbox', { name: 'URL' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.url).toBe('')
+    expect('description' in input).toBe(false)
+    expect('location' in input).toBe(false)
+  })
+
+  it('vacía la descripción y la envía como cadena vacía, sin tocar ubicación ni URL (F24/O3)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([richEvent()])
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con metadatos' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Con metadatos/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.clear(within(dialog).getByRole('textbox', { name: 'Descripción' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.description).toBe('')
+    expect('location' in input).toBe(false)
+    expect('url' in input).toBe(false)
+  })
+
+  it('no envía description/location/url cuando solo cambia el título (D2, F24)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([richEvent()])
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Otro título' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Con metadatos/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    const title = within(dialog).getByRole('textbox', { name: 'Título' })
+    await user.clear(title)
+    await user.type(title, 'Otro título')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.summary).toBe('Otro título')
+    // Fields the user never saw/edited must not be echoed back: an old DAV row
+    // may hold a value the column cannot show, and sending it would wipe it.
+    expect('description' in input).toBe(false)
+    expect('location' in input).toBe(false)
+    expect('url' in input).toBe(false)
+  })
+
+  it('no permite guardar con una URL que no sea http(s) (F24)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Sin URL' })])
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Sin URL/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.type(
+      within(dialog).getByRole('textbox', { name: 'URL' }),
+      'javascript:alert(1)',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    expect(
+      await screen.findByText('La URL debe empezar por http:// o https://'),
+    ).toBeInTheDocument()
+    expect(updateEvent).not.toHaveBeenCalled()
+  })
+
+  it('pinta la ubicación y la URL como enlace seguro en la tarjeta (F24)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([
+      makeEvent({ summary: 'Con metadatos', location: 'Sala 3', url: 'https://ejemplo.org/x' }),
+    ])
+
+    renderCalendar()
+
+    expect(await screen.findByText('Sala 3')).toBeInTheDocument()
+    const link = await screen.findByRole('link', { name: 'https://ejemplo.org/x' })
+    expect(link).toHaveAttribute('href', 'https://ejemplo.org/x')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  it('permite renombrar un evento con URL heredada no-http sin perderla (F24)', async () => {
+    // A native DAV client stored a `URL:mailto:…` the backend deliberately lets
+    // through. Changing only the title MUST still be saveable, and the `PATCH`
+    // must not echo the URL back (which would destroy it).
+    const imported = makeEvent({
+      summary: 'Importado',
+      location: 'Sala 3',
+      url: 'mailto:ana@example.org',
+    })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([imported])
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Renombrado' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Importado/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    const title = within(dialog).getByRole('textbox', { name: 'Título' })
+    await user.clear(title)
+    await user.type(title, 'Renombrado')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.summary).toBe('Renombrado')
+    expect('url' in input).toBe(false)
+    // No validation error was surfaced: the inherited value was accepted as-is.
+    expect(screen.queryByText(/La URL/)).not.toBeInTheDocument()
+  })
+
+  it('recorta una URL con espacio final antes de enviarla, sin provocar un 400 (F24)', async () => {
+    // The server rejects whitespace/control characters in `url`; the front trims
+    // (and validates) the value first, so a pasted trailing space is stored
+    // without it instead of round-tripping to a `400`.
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Sin URL' })])
+    vi.mocked(updateEvent).mockResolvedValue(
+      makeEvent({ summary: 'Sin URL', url: 'https://ejemplo.org/x' }),
+    )
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Sin URL/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.type(
+      within(dialog).getByRole('textbox', { name: 'URL' }),
+      'https://ejemplo.org/x ',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.url).toBe('https://ejemplo.org/x')
+  })
+
+  it('no arrastra la ubicación del evento anterior al editar dos seguidos (D2, F24)', async () => {
+    const a = makeEvent({ uid: 'uid-a', summary: 'Evento A', location: 'A' })
+    const b = makeEvent({ uid: 'uid-b', summary: 'Evento B', location: 'B' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([a, b])
+    vi.mocked(updateEvent).mockResolvedValue(b)
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Evento A/ }))
+
+    let dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByRole('textbox', { name: 'Ubicación' })).toHaveValue('A')
+    await user.click(within(dialog).getByRole('button', { name: 'Cancelar' }))
+
+    await user.click(await screen.findByRole('button', { name: /· Evento B/ }))
+    dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByRole('textbox', { name: 'Ubicación' })).toHaveValue('B')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, uid, input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(uid).toBe('uid-b')
+    // Neither A's nor B's location was sent, since the user never touched it.
+    expect('location' in input).toBe(false)
+  })
+
+  it('no pinta enlaces para URLs no http(s) (F24)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([
+      makeEvent({ uid: 'uid-js', summary: 'JS', url: 'javascript:alert(1)' }),
+      makeEvent({ uid: 'uid-data', summary: 'Data', url: 'data:text/html,x' }),
+    ])
+
+    renderCalendar()
+
+    expect(await screen.findByText(/· JS/)).toBeInTheDocument()
+    expect(await screen.findByText(/· Data/)).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'javascript:alert(1)' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'data:text/html,x' })).not.toBeInTheDocument()
+  })
+
+  it('mantiene la URL visible tras guardar aunque se vacíe otro campo (F24)', async () => {
+    const event = richEvent()
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([event])
+    // Realistic API reply: the location was cleared, but the untouched URL stays.
+    vi.mocked(updateEvent).mockResolvedValue(
+      makeEvent({ summary: 'Con metadatos', description: 'Notas', location: null, url: event.url }),
+    )
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Con metadatos/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.clear(within(dialog).getByRole('textbox', { name: 'Ubicación' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    expect(
+      await screen.findByRole('link', { name: 'https://ejemplo.org/x' }),
+    ).toBeInTheDocument()
   })
 })

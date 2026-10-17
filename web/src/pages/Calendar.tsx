@@ -93,14 +93,75 @@ function defaultRange(): [Dayjs, Dayjs] {
 interface EventFormValues {
   summary: string
   description?: string
+  location?: string
+  url?: string
   range: [Dayjs, Dayjs]
 }
 
 /** Fields the optimistic layer may rewrite on an existing event. */
 type EventChanges = Pick<
   CalendarEvent,
-  'summary' | 'description' | 'dtstart' | 'dtend' | 'dtstart_tzid' | 'dtend_tzid'
+  'summary' | 'description' | 'location' | 'url' | 'dtstart' | 'dtend' | 'dtstart_tzid' | 'dtend_tzid'
 >
+
+/**
+ * Is `value` safe to render as a clickable link? The server already allowlists
+ * `http://`/`https://` (F24), but defence in depth: the browser must not be the
+ * last filter, so anything else stays plain text.
+ */
+function isSafeHttpUrl(value: string | null): value is string {
+  if (value === null) {
+    return false
+  }
+  const lower = value.toLowerCase()
+  return lower.startsWith('http://') || lower.startsWith('https://')
+}
+
+/**
+ * Mirror of the server's URL frontier (F24), used to give immediate feedback
+ * instead of a `400` on save.
+ *
+ * The server validates **only** a value supplied by the request and lets an
+ * inherited one (a `URL:mailto:…`/`ftp://…` an imported `.ics` already carries)
+ * pass through verbatim, so a `PATCH` can rename such an event without wiping
+ * its link (see `src/api/events.rs`). This validator reproduces that contract:
+ *
+ * - a value equal to the one the dialog opened with (`baseline`, already
+ *   trimmed) is accepted untouched, whatever its scheme;
+ * - a **changed** value must be an absolute `http://`/`https://` URL free of
+ *   control characters and whitespace.
+ *
+ * The value is scrutinised trimmed — exactly how it is compared and sent — so a
+ * pasted `"https://ejemplo.org/x "` is accepted and stored without the trailing
+ * space instead of reaching the server and being rejected.
+ *
+ * Returns `null` when valid, otherwise the error message.
+ */
+function validateUrlValue(value: unknown, baseline: string): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  if (trimmed === '' || trimmed === baseline) {
+    return null
+  }
+  // `URL` is emitted verbatim into the `.ics`, so a control character or an
+  // (inner) whitespace could inject a content line — same rule as the server.
+  // `\p{Cc}` covers the C0/C1 control blocks without spelling out their ranges.
+  if (/[\s\p{Cc}]/u.test(trimmed)) {
+    return 'La URL no puede contener espacios ni caracteres de control'
+  }
+  const lower = trimmed.toLowerCase()
+  const rest = lower.startsWith('http://')
+    ? lower.slice('http://'.length)
+    : lower.startsWith('https://')
+      ? lower.slice('https://'.length)
+      : null
+  if (rest === null || rest === '') {
+    return 'La URL debe empezar por http:// o https://'
+  }
+  return null
+}
 
 type OptimisticAction =
   | { kind: 'create'; event: CalendarEvent }
@@ -247,8 +308,19 @@ export function Calendar() {
       const [start, end] = values.range
       const dtstart = start.valueOf()
       const dtend = end.valueOf()
-      const description = values.description?.trim() ?? ''
+      // Raw form values, kept for the "did the user change it?" comparison (D2);
+      // `description` keeps its pre-existing trim when it *is* sent.
+      const rawDescription = values.description ?? ''
+      const description = rawDescription.trim()
       const hasDescription = description.length > 0
+      // `location` and `url` are trimmed exactly like `description`: an accidental
+      // trailing space must not count as a "change" (which would fire an
+      // unnecessary `PATCH`) and, for `url`, must not reach the server as the
+      // `400`-inducing control/whitespace it rejects.
+      const location = (values.location ?? '').trim()
+      const hasLocation = location.length > 0
+      const url = (values.url ?? '').trim()
+      const hasUrl = url.length > 0
       setMutationError(null)
       savingRef.current = true
       setSaving(true)
@@ -273,6 +345,8 @@ export function Calendar() {
               collection_id: collectionId,
               summary: values.summary,
               description: hasDescription ? description : null,
+              location: hasLocation ? location : null,
+              url: hasUrl ? url : null,
               dtstart,
               dtend,
               dtstart_tzid: tzid ?? null,
@@ -287,6 +361,13 @@ export function Calendar() {
             const input: CreateEventInput = { summary: values.summary, dtstart, dtend }
             if (hasDescription) {
               input.description = description
+            }
+            // On creation there is no previous value: only send what was filled.
+            if (hasLocation) {
+              input.location = location
+            }
+            if (hasUrl) {
+              input.url = url
             }
             if (tzid !== undefined) {
               input.tzid = tzid
@@ -318,6 +399,8 @@ export function Calendar() {
           changes: {
             summary: values.summary,
             description: hasDescription ? description : null,
+            location: hasLocation ? location : null,
+            url: hasUrl ? url : null,
             dtstart,
             dtend,
             dtstart_tzid: anchorTzid,
@@ -326,8 +409,24 @@ export function Calendar() {
         })
         try {
           const input: UpdateEventInput = { summary: values.summary, dtstart, dtend }
-          if (hasDescription) {
+          // D2 (PLAN-028): `description`/`location`/`url` are sent **only** when
+          // they differ from the value the dialog opened with. An old row written
+          // by DAV may carry a `LOCATION`/`URL` the column does not know yet, so
+          // the dialog shows it empty; sending it unconditionally would wipe it
+          // silently. Clearing a field *is* a difference, so `""` is sent and the
+          // server normalises it to `null` (which drops the `.ics` line) — that is
+          // how O3 lets the user leave an event without description/location/URL.
+          // The comparison is between *trimmed* values on both sides, so a legacy
+          // value carrying a stray space that the user never touched counts as
+          // "unchanged" and is preserved verbatim in the `.ics`.
+          if (description !== (target.description ?? '').trim()) {
             input.description = description
+          }
+          if (location !== (target.location ?? '').trim()) {
+            input.location = location
+          }
+          if (url !== (target.url ?? '').trim()) {
+            input.url = url
           }
           if (anchorTzid !== null) {
             input.tzid = anchorTzid
@@ -380,11 +479,32 @@ export function Calendar() {
       return {
         summary: editing.summary ?? '',
         description: editing.description ?? '',
+        location: editing.location ?? '',
+        url: editing.url ?? '',
         range: [start, end],
       }
     }
-    return { summary: '', description: '', range: defaultRange() }
+    return { summary: '', description: '', location: '', url: '', range: defaultRange() }
   }, [editing])
+
+  // Baseline the URL validator compares against (D2): the value the dialog was
+  // opened with, so an unchanged inherited `mailto:`/`ftp:` URL is accepted and
+  // never has to be destroyed to be able to save.
+  const urlBaseline = useMemo(() => (editing?.url ?? '').trim(), [editing])
+
+  // La instancia `form` es única por vista y la comparte el `<Modal>` (su `onOk`
+  // llama a `form.submit()`), así que sobrevive al remontaje por `key` del
+  // formulario. Su *store* conserva los valores del evento anterior y Ant Design,
+  // al reinicializar, hace `merge(initialValues, store)`: el *store* gana, de modo
+  // que `initialValues` por sí solo no reemplaza nada. Hay que resetear
+  // explícitamente cuando cambia el evento para que el formulario muestre los del
+  // evento nuevo, no los del anterior (mientras el baseline D2 ya es el nuevo,
+  // lo que enviaría o limpiaría la ubicación/URL equivocada).
+  useEffect(() => {
+    if (modalOpen) {
+      form.resetFields()
+    }
+  }, [form, formInitialValues, modalOpen])
 
   return (
     <>
@@ -523,6 +643,38 @@ export function Calendar() {
                             >
                               {formatTime(event.dtstart)} · {event.summary ?? '(sin título)'}
                             </Button>
+                            {event.location !== null ? (
+                              <Typography.Text
+                                type="secondary"
+                                style={{
+                                  fontSize: 12,
+                                  flex: '0 0 auto',
+                                  maxWidth: 96,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {event.location}
+                              </Typography.Text>
+                            ) : null}
+                            {isSafeHttpUrl(event.url) ? (
+                              <Typography.Link
+                                href={event.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  fontSize: 12,
+                                  flex: '0 0 auto',
+                                  maxWidth: 96,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {event.url}
+                              </Typography.Link>
+                            ) : null}
                             {event.dtstart_tzid !== null ? (
                               <Typography.Text
                                 type="secondary"
@@ -588,6 +740,11 @@ export function Calendar() {
           layout="vertical"
           onFinish={handleSubmit}
           initialValues={formInitialValues}
+          // `key` fuerza un montaje limpio al cambiar de evento (o de edición a
+          // alta), para que `initialValues` se apliquen de nuevo y el formulario
+          // no muestre los valores del evento anterior mientras el baseline D2 ya
+          // es el nuevo.
+          key={editing?.uid ?? 'new'}
         >
           <Form.Item
             name="summary"
@@ -598,6 +755,27 @@ export function Calendar() {
           </Form.Item>
           <Form.Item name="description" label="Descripción">
             <Input.TextArea rows={3} placeholder="Descripción (opcional)" />
+          </Form.Item>
+          <Form.Item name="location" label="Ubicación">
+            <Input placeholder="Ubicación (opcional)" />
+          </Form.Item>
+          <Form.Item
+            name="url"
+            label="URL"
+            rules={[
+              {
+                // The server allowlists the scheme (F24) but lets an inherited,
+                // unchanged value through verbatim; `validateUrlValue` mirrors
+                // both halves so the user gets immediate feedback instead of a
+                // 400 — while a legacy `mailto:`/`ftp:` URL stays editable.
+                validator: (_rule: unknown, value: unknown) => {
+                  const error = validateUrlValue(value, urlBaseline)
+                  return error === null ? Promise.resolve() : Promise.reject(new Error(error))
+                },
+              },
+            ]}
+          >
+            <Input type="url" placeholder="https://ejemplo.com (opcional)" />
           </Form.Item>
           <Form.Item
             name="range"

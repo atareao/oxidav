@@ -557,6 +557,8 @@ async fn api_collections_delete_cascades_and_is_not_idempotent() {
             dtend: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -689,6 +691,8 @@ async fn seed_events(pool: &SqlitePool, collection_id: &str, n: usize) {
                 dtend: None,
                 dtstart_tzid: None,
                 dtend_tzid: None,
+                location: None,
+                url: None,
                 rrule: None,
                 raw_payload: format!("BEGIN:VCALENDAR\nSUMMARY:reunion {i}\nEND:VCALENDAR"),
             },
@@ -727,6 +731,8 @@ async fn search_events_endpoint_is_scoped_and_ranked() {
             dtend: Some(1_700_000_600_000),
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nSECRET-A\nEND:VCALENDAR".to_string(),
         },
@@ -745,6 +751,8 @@ async fn search_events_endpoint_is_scoped_and_ranked() {
             dtend: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -764,6 +772,8 @@ async fn search_events_endpoint_is_scoped_and_ranked() {
             dtend: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -922,6 +932,8 @@ async fn search_short_query_returns_empty_list() {
             dtend: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -1067,6 +1079,8 @@ async fn search_hostile_query_never_returns_500() {
             dtend: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -1183,6 +1197,8 @@ async fn search_aggregate_returns_both_sets() {
             dtend: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            location: None,
+            url: None,
             rrule: None,
             raw_payload: "BEGIN:VCALENDAR\nEND:VCALENDAR".to_string(),
         },
@@ -1793,6 +1809,378 @@ async fn events_range_filter_and_pagination() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// F24 (PLAN-028) — `PATCH` preserves the stored `.ics`; `LOCATION`/`URL`
+// ---------------------------------------------------------------------------
+
+/// A realistic `VCALENDAR` from a native client: it carries a `VALARM` (with its
+/// own `SUMMARY`), two `ATTENDEE`, `CATEGORIES`, `LOCATION`, `DESCRIPTION` and an
+/// `X-` property — everything `build_ics` never models and a `PATCH` used to
+/// destroy.
+fn rich_ics(uid: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\n\
+         VERSION:2.0\r\n\
+         PRODID:-//oxidav//test//EN\r\n\
+         BEGIN:VEVENT\r\n\
+         UID:{uid}\r\n\
+         DTSTAMP:20240101T000000Z\r\n\
+         SUMMARY:Original\r\n\
+         DESCRIPTION:Linea uno\r\n\
+         LOCATION:Sala 3\r\n\
+         CATEGORIES:trabajo,personal\r\n\
+         X-CUSTOM:keep-me\r\n\
+         ATTENDEE;CN=Ada:mailto:ada@example.org\r\n\
+         ATTENDEE;CN=Alan:mailto:alan@example.org\r\n\
+         BEGIN:VALARM\r\n\
+         ACTION:DISPLAY\r\n\
+         TRIGGER:-PT15M\r\n\
+         SUMMARY:Recordatorio\r\n\
+         END:VALARM\r\n\
+         DTSTART:20240315T100000Z\r\n\
+         DTEND:20240315T110000Z\r\n\
+         END:VEVENT\r\n\
+         END:VCALENDAR\r\n"
+    )
+}
+
+/// A minimal `VCALENDAR` whose event carries a `URL` line, used to prove the
+/// verbatim emission and the scheme allowlist at the API boundary.
+fn ics_with_url(uid: &str, url: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//oxidav//test//EN\r\n\
+         BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:Original\r\n\
+         LOCATION:Sala 3\r\nURL:{url}\r\n\
+         DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+/// Seed a calendar object through the repository (bypassing the DAV `PUT`) so a
+/// test can set the stored `raw_payload` and the denormalised columns
+/// **independently** — the only way to reproduce a legacy row whose `location`
+/// column is `NULL` while its payload still carries `LOCATION` (E14).
+async fn seed_event(
+    env: &TestEnv,
+    collection_id: &str,
+    id: &str,
+    uid: &str,
+    location: Option<&str>,
+    url: Option<&str>,
+    raw: &str,
+) {
+    insert_calendar_object(
+        &env.pool,
+        &NewCalendarObject {
+            id: id.to_string(),
+            collection_id: collection_id.to_string(),
+            uid: uid.to_string(),
+            summary: Some("Original".to_string()),
+            description: None,
+            location: location.map(str::to_string),
+            url: url.map(str::to_string),
+            dtstart: Some(1_710_496_800_000),
+            dtend: Some(1_710_497_200_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            raw_payload: raw.to_string(),
+        },
+    )
+    .await
+    .expect("seed event");
+}
+
+/// Read the stored `raw_payload` of a calendar event.
+async fn stored_event_raw(env: &TestEnv, collection_id: &str, uid: &str) -> String {
+    get_calendar_object(&env.pool, collection_id, uid)
+        .await
+        .expect("read event")
+        .expect("event exists")
+        .raw_payload
+}
+
+/// E1 — the flag test: a `PATCH` changing only the title keeps every unmodelled
+/// property of a rich `.ics` (`VALARM`, both `ATTENDEE`, `CATEGORIES`, `X-`,
+/// `LOCATION`) byte for byte, refreshes `DTSTAMP` and rewrites only those two
+/// lines.
+#[tokio::test]
+async fn patch_preserves_unmodelled_properties_of_a_rich_ics() {
+    let env = TestEnv::new("f24-preserve-rich").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "rich-1@oxidav";
+    let original = rich_ics(uid);
+    seed_event(&env, &cid, "evt-rich", uid, Some("Sala 3"), None, &original).await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Nuevo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(body["summary"], "Nuevo");
+    assert_eq!(body["location"], "Sala 3");
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    for needle in [
+        "BEGIN:VALARM",
+        "SUMMARY:Recordatorio",
+        "END:VALARM",
+        "ATTENDEE;CN=Ada:mailto:ada@example.org",
+        "ATTENDEE;CN=Alan:mailto:alan@example.org",
+        "CATEGORIES:trabajo,personal",
+        "X-CUSTOM:keep-me",
+        "LOCATION:Sala 3",
+        "DESCRIPTION:Linea uno",
+        "SUMMARY:Nuevo",
+    ] {
+        assert!(stored.contains(needle), "missing {needle:?}: {stored}");
+    }
+    assert!(
+        !stored.contains("DTSTAMP:20240101T000000Z"),
+        "DTSTAMP must be refreshed: {stored}"
+    );
+
+    // Only the SUMMARY and DTSTAMP lines differ, line for line: everything else
+    // (the whole VALARM, the second ATTENDEE, the folding) is byte-identical.
+    let before: Vec<&str> = original.lines().collect();
+    let after: Vec<&str> = stored.lines().collect();
+    assert_eq!(before.len(), after.len(), "line count changed:\n{stored}");
+    let diffs: Vec<&str> = before
+        .iter()
+        .zip(&after)
+        .filter(|(before, after)| before != after)
+        .map(|(before, _)| *before)
+        .collect();
+    assert_eq!(diffs.len(), 2, "only SUMMARY/DTSTAMP may change:\n{stored}");
+    assert!(
+        diffs.iter().any(|line| line.starts_with("SUMMARY:")),
+        "{diffs:?}"
+    );
+    assert!(
+        diffs.iter().any(|line| line.starts_with("DTSTAMP:")),
+        "{diffs:?}"
+    );
+}
+
+/// E14 — the D1 rule: a legacy row whose `location` column is `NULL` but whose
+/// payload carries `LOCATION:Sala 3` (a row written before migration `0005`)
+/// keeps its location across a `PATCH` that does not mention it, and the DTO
+/// reports it.
+#[tokio::test]
+async fn patch_on_a_legacy_row_keeps_the_location_of_its_payload() {
+    let env = TestEnv::new("f24-legacy-location").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "legacy-1@oxidav";
+    // `location` column NULL, payload carries `LOCATION`.
+    let original = rich_ics(uid);
+    seed_event(&env, &cid, "evt-legacy", uid, None, None, &original).await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Renombrado" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(
+        body["location"], "Sala 3",
+        "the column was NULL but the payload had LOCATION"
+    );
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        stored.contains("LOCATION:Sala 3"),
+        "LOCATION lost: {stored}"
+    );
+
+    // The column is healed to agree with the reconciled payload.
+    let row = get_calendar_object(&env.pool, &cid, uid)
+        .await
+        .expect("read event")
+        .expect("event exists");
+    assert_eq!(row.location.as_deref(), Some("Sala 3"));
+}
+
+/// E3 — a blank `location` clears the field: `200`, the DTO reports `null` and
+/// no `LOCATION:` line survives in the payload.
+#[tokio::test]
+async fn patch_with_a_blank_location_clears_it() {
+    let env = TestEnv::new("f24-clear-location").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "clr-1@oxidav";
+    seed_event(
+        &env,
+        &cid,
+        "evt-clr",
+        uid,
+        Some("Sala 3"),
+        None,
+        &rich_ics(uid),
+    )
+    .await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "location": "" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(body["location"], Value::Null, "location must be cleared");
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        !stored.contains("LOCATION:"),
+        "a LOCATION line survived: {stored}"
+    );
+}
+
+/// E10 — `POST` with `location` and `url`: `201`, the DTO carries both, the
+/// payload escapes the free-text `LOCATION` and emits the `URL` verbatim.
+#[tokio::test]
+async fn create_with_location_and_url() {
+    let env = TestEnv::new("f24-create-loc-url").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let base = format!("/api/v1/collections/{cid}/events");
+
+    let (status, created) = env
+        .call(
+            Method::POST,
+            &base,
+            Some(&token),
+            Some(json!({
+                "summary": "Con sitio",
+                "dtstart": 1_710_496_800_000_i64,
+                "dtend": 1_710_497_200_000_i64,
+                "uid": "loc-url-1",
+                "location": "Sala 3; planta 2, ala \\norte",
+                "url": "https://ejemplo.org/a?x=1&y=2,3",
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(created["location"], "Sala 3; planta 2, ala \\norte");
+    assert_eq!(created["url"], "https://ejemplo.org/a?x=1&y=2,3");
+
+    let stored = stored_event_raw(&env, &cid, "loc-url-1").await;
+    // Free text: `;`, `,` and `\` are escaped on the wire.
+    assert!(
+        stored.contains("LOCATION:Sala 3\\; planta 2\\, ala \\\\norte"),
+        "LOCATION not escaped: {stored}"
+    );
+    // A URI: emitted verbatim, its comma untouched.
+    assert!(
+        stored.contains("URL:https://ejemplo.org/a?x=1&y=2,3"),
+        "URL not verbatim: {stored}"
+    );
+}
+
+/// E5 — the `url` scheme allowlist: a hostile scheme is a `400` and the stored
+/// payload does not change; `https://` is accepted and emitted verbatim.
+#[tokio::test]
+async fn url_scheme_allowlist() {
+    let env = TestEnv::new("f24-url-allowlist").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "url-1@oxidav";
+    seed_event(
+        &env,
+        &cid,
+        "evt-url",
+        uid,
+        Some("Sala 3"),
+        Some("https://ok.example/x"),
+        &ics_with_url(uid, "https://ok.example/x"),
+    )
+    .await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let before = stored_event_raw(&env, &cid, uid).await;
+
+    for hostile in [
+        "javascript:alert(1)",
+        "data:text/html,x",
+        "file:///etc/passwd",
+        "https://x\ny",
+    ] {
+        let (status, body) = env
+            .call(
+                Method::PATCH,
+                &uri,
+                Some(&token),
+                Some(json!({ "url": hostile })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{hostile:?}: {body}");
+        assert_eq!(body["error"]["code"], "validation", "{hostile:?}: {body}");
+        assert_eq!(
+            stored_event_raw(&env, &cid, uid).await,
+            before,
+            "payload changed for {hostile:?}"
+        );
+    }
+
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "url": "https://ejemplo.org/x" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "valid url rejected: {body}");
+    assert_eq!(body["url"], "https://ejemplo.org/x");
+    let after = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        after.contains("URL:https://ejemplo.org/x"),
+        "URL not stored verbatim: {after}"
+    );
+}
+
+/// E9 (API half) — a DAV `PUT` of an `.ics` carrying `LOCATION`/`URL` is
+/// denormalised, and the REST `GET` reports both.
+#[tokio::test]
+async fn put_then_api_get_returns_location_and_url() {
+    let env = TestEnv::new("f24-put-api-get").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+
+    let uid = "dav-lu-1@oxidav";
+    let ics = ics_with_url(uid, "https://ejemplo.org/x");
+    let request = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/dav/calendars/user-a/{cid}/{uid}.ics"))
+        .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+        .header(header::CONTENT_TYPE, "text/calendar; charset=utf-8")
+        // A cookie-authenticated, state-changing DAV request must prove
+        // same-origin (F17 hardening).
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from(ics))
+        .expect("build PUT");
+    let response = env.app.clone().oneshot(request).await.expect("send PUT");
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {body}");
+    assert_eq!(body["location"], "Sala 3");
+    assert_eq!(body["url"], "https://ejemplo.org/x");
 }
 
 // ---------------------------------------------------------------------------

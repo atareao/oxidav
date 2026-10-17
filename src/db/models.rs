@@ -76,6 +76,10 @@ pub struct CalendarObject {
     pub summary: Option<String>,
     /// `DESCRIPTION`.
     pub description: Option<String>,
+    /// `LOCATION` (denormalised for the SPA); `None` means "no `LOCATION`".
+    pub location: Option<String>,
+    /// `URL` (denormalised for the SPA); `None` means "no `URL`".
+    pub url: Option<String>,
     /// `DTSTART`, Unix milliseconds.
     pub dtstart: Option<i64>,
     /// `DTEND`, Unix milliseconds.
@@ -109,6 +113,10 @@ pub struct NewCalendarObject {
     pub summary: Option<String>,
     /// `DESCRIPTION`.
     pub description: Option<String>,
+    /// `LOCATION`; `None` means "no `LOCATION`".
+    pub location: Option<String>,
+    /// `URL`; `None` means "no `URL`".
+    pub url: Option<String>,
     /// `DTSTART`, Unix milliseconds.
     pub dtstart: Option<i64>,
     /// `DTEND`, Unix milliseconds.
@@ -130,6 +138,10 @@ pub struct CalendarObjectUpdate {
     pub summary: Option<String>,
     /// `DESCRIPTION`.
     pub description: Option<String>,
+    /// `LOCATION`; `None` means "no `LOCATION`".
+    pub location: Option<String>,
+    /// `URL`; `None` means "no `URL`".
+    pub url: Option<String>,
     /// `DTSTART`, Unix milliseconds.
     pub dtstart: Option<i64>,
     /// `DTEND`, Unix milliseconds.

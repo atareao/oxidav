@@ -43,6 +43,12 @@ const APP_TOKENS: &str = include_str!("../migrations/0002_app_tokens.sql");
 const SYNC_LOG: &str = include_str!("../migrations/0003_sync_log.sql");
 /// The migration under test (the one that adds `dtstart_tzid`/`dtend_tzid`).
 const TIMEZONE: &str = include_str!("../migrations/0004_timezone.sql");
+/// A later additive migration. The repository helpers used below
+/// (`insert_calendar_object`, `search_events`) decode the **current**
+/// `CalendarObject`, so they need every column the current schema carries — this
+/// file replays `0004` and `0005` to reach it while still exercising the `0004`
+/// upgrade path.
+const LOCATION_URL: &str = include_str!("../migrations/0005_event_location_url.sql");
 
 /// A raw pool (no migrator) so the legacy schema can be replayed file by file.
 async fn open(url: &str) -> SqlitePool {
@@ -127,6 +133,9 @@ async fn migration_preserves_preexisting_row_and_keeps_fts_search_working() {
 
     // Apply 0004 on top of the *populated* database — the real upgrade path.
     pool.execute(TIMEZONE).await.expect("apply 0004_timezone");
+    pool.execute(LOCATION_URL)
+        .await
+        .expect("apply 0005_event_location_url");
     // Retire the connections that saw the pre-ALTER schema (see module docs).
     pool.close().await;
     let pool = open(&url).await;
@@ -168,6 +177,9 @@ async fn migration_allows_inserting_and_reading_back_a_tzid() {
     seed_legacy_schema(&pool).await;
     seed_legacy_data(&pool).await;
     pool.execute(TIMEZONE).await.expect("apply 0004_timezone");
+    pool.execute(LOCATION_URL)
+        .await
+        .expect("apply 0005_event_location_url");
     pool.close().await;
     let pool = open(&url).await;
 
@@ -183,6 +195,8 @@ async fn migration_allows_inserting_and_reading_back_a_tzid() {
         dtend: Some(3_600),
         dtstart_tzid: Some("Europe/Madrid".to_string()),
         dtend_tzid: Some("Europe/Madrid".to_string()),
+        location: None,
+        url: None,
         rrule: None,
         raw_payload: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".to_string(),
     };
@@ -214,6 +228,9 @@ async fn alter_table_keeps_external_content_fts_update_trigger_consistent() {
     seed_legacy_schema(&pool).await;
     seed_legacy_data(&pool).await;
     pool.execute(TIMEZONE).await.expect("apply 0004_timezone");
+    pool.execute(LOCATION_URL)
+        .await
+        .expect("apply 0005_event_location_url");
     pool.close().await;
     let pool = open(&url).await;
 
