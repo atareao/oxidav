@@ -1816,10 +1816,13 @@ async fn events_range_filter_and_pagination() {
 // ---------------------------------------------------------------------------
 
 /// A realistic `VCALENDAR` from a native client: it carries a `VALARM` (with its
-/// own `SUMMARY`), two `ATTENDEE`, `CATEGORIES`, `LOCATION`, `DESCRIPTION` and an
-/// `X-` property. As of F25 `CATEGORIES`/`LOCATION`/`DESCRIPTION` are modelled;
-/// the `VALARM`, the `ATTENDEE`s and the `X-` property are the genuinely
-/// unmodelled content a `PATCH` must preserve.
+/// own `SUMMARY`), two `ATTENDEE`, `CATEGORIES`, `LOCATION`, `DESCRIPTION`, two
+/// `ATTACH`, `STATUS`, `CLASS`, `TRANSP` and an `X-` property. As of F25 the
+/// modelled properties (`CATEGORIES`, `LOCATION`, `DESCRIPTION`, `ATTACH`,
+/// `STATUS`, `CLASS`, `TRANSP`) are inherited from the payload by a `PATCH`; the
+/// `VALARM`, the `ATTENDEE`s and the `X-` property are the genuinely unmodelled
+/// content a `PATCH` must preserve. It carries a `DTEND` and **no** `DURATION`
+/// (the two are mutually exclusive).
 fn rich_ics(uid: &str) -> String {
     format!(
         "BEGIN:VCALENDAR\r\n\
@@ -1832,6 +1835,11 @@ fn rich_ics(uid: &str) -> String {
          DESCRIPTION:Linea uno\r\n\
          LOCATION:Sala 3\r\n\
          CATEGORIES:trabajo,personal\r\n\
+         ATTACH:https://example.org/a.pdf\r\n\
+         ATTACH:https://example.org/b.pdf\r\n\
+         STATUS:CONFIRMED\r\n\
+         CLASS:PRIVATE\r\n\
+         TRANSP:TRANSPARENT\r\n\
          X-CUSTOM:keep-me\r\n\
          ATTENDEE;CN=Ada:mailto:ada@example.org\r\n\
          ATTENDEE;CN=Alan:mailto:alan@example.org\r\n\
@@ -1902,13 +1910,12 @@ async fn stored_event_raw(env: &TestEnv, collection_id: &str, uid: &str) -> Stri
         .raw_payload
 }
 
-/// E1 — the flag test: a `PATCH` changing only the title keeps every **unmodelled**
-/// property of a rich `.ics` (`VALARM`, both `ATTENDEE`, `X-`) and the modelled
-/// `LOCATION` byte for byte, refreshes `DTSTAMP` and rewrites only those two
-/// lines. As of F25 `CATEGORIES` is **modelled** (it is reconciled like the other
-/// modelled fields), so until the API inherits it from the payload a `PATCH` that
-/// does not mention it drops the line; that inheritance is a later step of
-/// PLAN-029, not this one.
+/// F8/E1 — the flag test: a `PATCH` changing only the title keeps every other
+/// property of a rich `.ics` — the genuinely unmodelled (`VALARM`, both
+/// `ATTENDEE`, `X-`) and the F25-modelled ones inherited from the payload
+/// (`CATEGORIES`, both `ATTACH`, `STATUS`, `CLASS`, `TRANSP`, `LOCATION`,
+/// `DESCRIPTION`) — byte for byte, refreshes `DTSTAMP` and rewrites only those
+/// **two** lines.
 #[tokio::test]
 async fn patch_preserves_unmodelled_properties_of_a_rich_ics() {
     let env = TestEnv::new("f24-preserve-rich").await;
@@ -1941,34 +1948,27 @@ async fn patch_preserves_unmodelled_properties_of_a_rich_ics() {
         "X-CUSTOM:keep-me",
         "LOCATION:Sala 3",
         "DESCRIPTION:Linea uno",
+        // F25: modelled, inherited from the payload.
+        "CATEGORIES:trabajo,personal",
+        "ATTACH:https://example.org/a.pdf",
+        "ATTACH:https://example.org/b.pdf",
+        "STATUS:CONFIRMED",
+        "CLASS:PRIVATE",
+        "TRANSP:TRANSPARENT",
         "SUMMARY:Nuevo",
     ] {
         assert!(stored.contains(needle), "missing {needle:?}: {stored}");
     }
-    // F25: `CATEGORIES` is modelled now, so until the API inherits it from the
-    // payload (a later PLAN-029 step) a `PATCH` drops the line. This test keeps
-    // promising only what is genuinely unmodelled, plus the modelled `LOCATION`.
-    assert!(
-        !stored.contains("CATEGORIES:"),
-        "F25: CATEGORIES is modelled and dropped until the API inherits it: {stored}"
-    );
     assert!(
         !stored.contains("DTSTAMP:20240101T000000Z"),
         "DTSTAMP must be refreshed: {stored}"
     );
 
     // Only the SUMMARY and DTSTAMP lines differ, line for line: everything else
-    // (the whole VALARM, the second ATTENDEE, the folding) is byte-identical. The
-    // F25-modelled `CATEGORIES` line is set aside from both sides, since a later
-    // step will make the API inherit it and restore it here.
-    let before: Vec<&str> = original
-        .lines()
-        .filter(|line| !line.starts_with("CATEGORIES:"))
-        .collect();
-    let after: Vec<&str> = stored
-        .lines()
-        .filter(|line| !line.starts_with("CATEGORIES:"))
-        .collect();
+    // (the whole VALARM, both ATTENDEE, the F25-modelled properties, the folding)
+    // is byte-identical.
+    let before: Vec<&str> = original.lines().collect();
+    let after: Vec<&str> = stored.lines().collect();
     assert_eq!(before.len(), after.len(), "line count changed:\n{stored}");
     let diffs: Vec<&str> = before
         .iter()
@@ -2199,6 +2199,352 @@ async fn put_then_api_get_returns_location_and_url() {
     assert_eq!(status, StatusCode::OK, "get failed: {body}");
     assert_eq!(body["location"], "Sala 3");
     assert_eq!(body["url"], "https://ejemplo.org/x");
+}
+
+// ---------------------------------------------------------------------------
+// F25 (PLAN-029) — VEVENT content & state: STATUS / CLASS / TRANSP /
+// CATEGORIES / ATTACH / DURATION, inherited from the payload across a `PATCH`
+// ---------------------------------------------------------------------------
+
+/// Build a one-key JSON patch object (`{ field: value }`).
+fn one_key_patch(field: &str, value: Value) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert(field.to_string(), value);
+    Value::Object(object)
+}
+
+/// Create a minimal event through the REST API and return its `uid`.
+async fn create_minimal_event(
+    env: &TestEnv,
+    token: &str,
+    collection_id: &str,
+    uid: &str,
+    extra: Value,
+) -> (StatusCode, Value) {
+    let mut body = serde_json::Map::new();
+    body.insert("summary".to_string(), json!("Evento"));
+    body.insert("dtstart".to_string(), json!(1_700_000_000_000_i64));
+    body.insert("uid".to_string(), json!(uid));
+    if let Value::Object(extra) = extra {
+        body.extend(extra);
+    }
+    env.call(
+        Method::POST,
+        &format!("/api/v1/collections/{collection_id}/events"),
+        Some(token),
+        Some(Value::Object(body)),
+    )
+    .await
+}
+
+/// F2 — the `STATUS`/`CLASS`/`TRANSP` allowlists: an unknown value is a `400`
+/// that leaves the payload intact; a lower-case value is accepted and returned
+/// upper-cased (and echoed in the payload).
+#[tokio::test]
+async fn patch_status_class_transp_allowlists() {
+    let env = TestEnv::new("f25-tokens").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f25-tok-1";
+    let (status, created) = create_minimal_event(&env, &token, &cid, uid, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+
+    // Unknown values are rejected and the payload is untouched.
+    let before = stored_event_raw(&env, &cid, uid).await;
+    for (field, bad) in [("status", "MAYBE"), ("class", "SECRET"), ("transp", "BUSY")] {
+        let (status, body) = env
+            .call(
+                Method::PATCH,
+                &uri,
+                Some(&token),
+                Some(one_key_patch(field, json!(bad))),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}={bad}: {body}");
+        assert_eq!(body["error"]["code"], "validation", "{field}={bad}: {body}");
+        assert_eq!(
+            stored_event_raw(&env, &cid, uid).await,
+            before,
+            "payload changed for {field}={bad}"
+        );
+    }
+
+    // Lower-case values are accepted and normalised to upper case.
+    for (field, value, expected, needle) in [
+        ("status", "confirmed", "CONFIRMED", "STATUS:CONFIRMED"),
+        ("class", "private", "PRIVATE", "CLASS:PRIVATE"),
+        ("transp", "transparent", "TRANSPARENT", "TRANSP:TRANSPARENT"),
+    ] {
+        let (status, body) = env
+            .call(
+                Method::PATCH,
+                &uri,
+                Some(&token),
+                Some(one_key_patch(field, json!(value))),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{field}={value}: {body}");
+        assert_eq!(body[field], expected, "{field} round-trip");
+        let stored = stored_event_raw(&env, &cid, uid).await;
+        assert!(stored.contains(needle), "missing {needle:?}: {stored}");
+    }
+}
+
+/// F3 — the `DURATION` grammar: junk is a `400`, a well-formed `dur-value` is
+/// accepted and emitted verbatim.
+#[tokio::test]
+async fn patch_duration_grammar() {
+    let env = TestEnv::new("f25-duration-grammar").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f25-dur-g-1";
+    let (status, created) = create_minimal_event(&env, &token, &cid, uid, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+
+    let before = stored_event_raw(&env, &cid, uid).await;
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "duration": "1 hora" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "junk duration -> {body}");
+    assert_eq!(body["error"]["code"], "validation");
+    assert_eq!(
+        stored_event_raw(&env, &cid, uid).await,
+        before,
+        "payload changed for a rejected duration"
+    );
+
+    for value in ["PT1H", "P1D", "PT15M"] {
+        let (status, body) = env
+            .call(
+                Method::PATCH,
+                &uri,
+                Some(&token),
+                Some(json!({ "duration": value })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{value}: {body}");
+        assert_eq!(body["duration"], value);
+        let stored = stored_event_raw(&env, &cid, uid).await;
+        assert!(
+            stored.contains(&format!("DURATION:{value}")),
+            "{value} not verbatim: {stored}"
+        );
+    }
+}
+
+/// F4 — the `DURATION`/`DTEND` mutual exclusion, enforced by the server:
+/// `duration` drops `DTEND`, `dtend` drops `DURATION`, both together are a `400`.
+#[tokio::test]
+async fn patch_duration_dtend_exclusivity() {
+    let env = TestEnv::new("f25-exclusive").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f25-excl-1";
+    let (status, created) = create_minimal_event(
+        &env,
+        &token,
+        &cid,
+        uid,
+        json!({ "dtend": 1_700_000_600_000_i64 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+
+    // A `duration` wins and removes `DTEND`; the DTO reports `dtend: null`.
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "duration": "PT1H" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "duration patch failed: {body}");
+    assert_eq!(body["duration"], "PT1H");
+    assert_eq!(body["dtend"], Value::Null, "dtend must be dropped");
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("DURATION:PT1H"), "{stored}");
+    assert!(!stored.contains("DTEND:"), "DTEND survived: {stored}");
+
+    // Symmetric: an explicit `dtend` wins and removes `DURATION`.
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "dtend": 1_700_000_900_000_i64 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "dtend patch failed: {body}");
+    assert_eq!(body["dtend"], 1_700_000_900_000_i64);
+    assert_eq!(body["duration"], Value::Null, "duration must be dropped");
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("DTEND:"), "{stored}");
+    assert!(!stored.contains("DURATION:"), "DURATION survived: {stored}");
+
+    // Both together is a `400`.
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "duration": "PT1H", "dtend": 1_700_001_000_000_i64 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "both -> {body}");
+    assert_eq!(body["error"]["code"], "validation");
+}
+
+/// F5 — `dtend` is **never** derived from `DURATION`: an event with only a
+/// `DURATION` reports `dtend: null` and its duration, and a `PATCH` of the title
+/// leaves it untouched.
+#[tokio::test]
+async fn duration_only_event_has_no_derived_end() {
+    let env = TestEnv::new("f25-no-derived-end").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f25-dur-only-1";
+    let (status, created) =
+        create_minimal_event(&env, &token, &cid, uid, json!({ "duration": "PT1H" })).await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(created["duration"], "PT1H");
+    assert_eq!(created["dtend"], Value::Null);
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, detail) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {detail}");
+    assert_eq!(detail["dtend"], Value::Null);
+    assert_eq!(detail["duration"], "PT1H");
+
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Otro" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(body["summary"], "Otro");
+    assert_eq!(body["dtend"], Value::Null, "no end must be invented");
+    assert_eq!(body["duration"], "PT1H");
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("DURATION:PT1H"), "{stored}");
+    assert!(!stored.contains("DTEND:"), "DTEND invented: {stored}");
+}
+
+/// F9 — a DAV `PUT` of an `.ics` carrying the six properties: the REST detail
+/// projects them all.
+#[tokio::test]
+async fn put_then_api_get_returns_the_six_properties() {
+    let env = TestEnv::new("f25-put-api-get").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+
+    let uid = "f25-dav-1@oxidav";
+    let ics = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//oxidav//test//EN\r\n\
+         BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:Completo\r\n\
+         DTSTART:20240315T100000Z\r\n\
+         CATEGORIES:trabajo,personal\r\n\
+         ATTACH:https://a.example/x.pdf\r\nATTACH:https://b.example/y.pdf\r\n\
+         STATUS:TENTATIVE\r\nCLASS:CONFIDENTIAL\r\nTRANSP:OPAQUE\r\n\
+         DURATION:PT1H\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    let request = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/dav/calendars/user-a/{cid}/{uid}.ics"))
+        .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+        .header(header::CONTENT_TYPE, "text/calendar; charset=utf-8")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from(ics))
+        .expect("build PUT");
+    let response = env.app.clone().oneshot(request).await.expect("send PUT");
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {body}");
+    assert_eq!(body["categories"], json!(["trabajo", "personal"]));
+    assert_eq!(
+        body["attach"],
+        json!(["https://a.example/x.pdf", "https://b.example/y.pdf"])
+    );
+    assert_eq!(body["status"], "TENTATIVE");
+    assert_eq!(body["class"], "CONFIDENTIAL");
+    assert_eq!(body["transp"], "OPAQUE");
+    assert_eq!(body["duration"], "PT1H");
+    assert_eq!(body["dtend"], Value::Null);
+}
+
+/// F10 — a row whose `raw_payload` cannot be projected makes the detail a `500`
+/// (never a `200` with invented data).
+#[tokio::test]
+async fn detail_of_a_corrupt_payload_is_a_500() {
+    let env = TestEnv::new("f25-corrupt").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "corrupt-1@oxidav";
+    // No `VEVENT` at all: `project_event` cannot read it.
+    seed_event(
+        &env,
+        &cid,
+        "evt-corrupt",
+        uid,
+        None,
+        None,
+        "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+    )
+    .await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "got: {body}");
+    assert_eq!(body["error"]["code"], "internal");
+}
+
+/// F11 — the listing does **not** change shape: items carry only the `EventDto`
+/// fields, never the six F25 properties.
+#[tokio::test]
+async fn event_list_does_not_expose_the_six_properties() {
+    let env = TestEnv::new("f25-list-shape").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let base = format!("/api/v1/collections/{cid}/events");
+    let (status, created) = create_minimal_event(
+        &env,
+        &token,
+        &cid,
+        "f25-list-1",
+        json!({ "status": "CONFIRMED", "categories": ["a"], "attach": ["https://a.example/x"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+
+    let (status, list) = env.call(Method::GET, &base, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let item = &list.as_array().expect("array")[0];
+    for key in [
+        "categories",
+        "attach",
+        "status",
+        "class",
+        "transp",
+        "duration",
+    ] {
+        assert!(item.get(key).is_none(), "list item leaked `{key}`: {item}");
+    }
+    // The light fields are still there.
+    assert_eq!(item["summary"], "Evento");
+    assert!(item.get("raw_payload").is_none());
 }
 
 // ---------------------------------------------------------------------------

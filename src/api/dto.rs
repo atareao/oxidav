@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AppToken;
+use crate::dav::ics::EventProjection;
 use crate::dav::vcf::{Address as CardAddress, CardProjection, Gender as CardGender};
 use crate::dav::vcf::{MediaValue, MultiValue, RawProperty, StructuredName};
 use crate::db::models::{CalendarObject, CardObject, Collection};
@@ -172,6 +173,106 @@ impl From<&CalendarObject> for EventDto {
     }
 }
 
+// ---------------------------------------------------------------------------
+// F25 — full-`VEVENT` detail DTO (PLAN-029)
+// ---------------------------------------------------------------------------
+
+/// The full projection of an event as returned by
+/// `GET .../events/{uid}` (and echoed by `POST`/`PATCH`).
+///
+/// A **superset** of [`EventDto`]: it keeps every field the list exposes (same
+/// names and types) and adds the six properties F25 models — `CATEGORIES`,
+/// `ATTACH`, `STATUS`, `CLASS`, `TRANSP` and `DURATION` — derived at read time
+/// from `raw_payload` by [`project_event`](crate::dav::ics::project_event), the
+/// single source of truth. It deliberately still excludes `raw_payload`.
+///
+/// `dtend` is **not** derived from `DURATION`: an event that carries only a
+/// `DURATION` reports `dtend: null` and its `duration`, so the SPA never
+/// re-sends a computed end that would turn the duration into an explicit end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EventDetailDto {
+    /// Internal calendar-object id (UUID).
+    pub id: String,
+    /// iCalendar `UID`, unique within the collection.
+    pub uid: String,
+    /// Owning collection.
+    pub collection_id: String,
+    /// Event title (`SUMMARY`).
+    pub summary: Option<String>,
+    /// Event body (`DESCRIPTION`).
+    pub description: Option<String>,
+    /// Event place (`LOCATION`), if any (F24).
+    pub location: Option<String>,
+    /// Event link (`URL`), if any (F24).
+    pub url: Option<String>,
+    /// Start instant, Unix milliseconds.
+    pub dtstart: Option<i64>,
+    /// End instant, Unix milliseconds. `null` when the event carries only a
+    /// `DURATION` (never derived).
+    pub dtend: Option<i64>,
+    /// IANA time-zone the event's `DTSTART` is anchored to (F18), if any.
+    pub dtstart_tzid: Option<String>,
+    /// IANA time-zone the event's `DTEND` is anchored to (F18), if any.
+    pub dtend_tzid: Option<String>,
+    /// Raw `RRULE` text (never expanded).
+    pub rrule: Option<String>,
+    /// Opaque ETag.
+    pub etag: String,
+    /// Creation time, Unix milliseconds.
+    pub created_at: i64,
+    /// Last modification time, Unix milliseconds.
+    pub updated_at: i64,
+    /// `CATEGORIES`, flattened to a single list (one entry per item, in order).
+    /// Empty means "no categories".
+    pub categories: Vec<String>,
+    /// `ATTACH` URIs, one entry per occurrence (parameters dropped).
+    pub attach: Vec<String>,
+    /// `STATUS` (`TENTATIVE`/`CONFIRMED`/`CANCELLED`), verbatim.
+    pub status: Option<String>,
+    /// `CLASS` (`PUBLIC`/`PRIVATE`/`CONFIDENTIAL` or a client token), verbatim.
+    /// Exposed as `class` (`class` is a Rust keyword).
+    #[serde(rename = "class")]
+    pub class_: Option<String>,
+    /// `TRANSP` (`OPAQUE`/`TRANSPARENT`), verbatim.
+    pub transp: Option<String>,
+    /// `DURATION`, verbatim (an opaque RFC 5545 duration).
+    pub duration: Option<String>,
+}
+
+impl EventDetailDto {
+    /// Build the full detail DTO from the stored row and its projection.
+    ///
+    /// The projection is the source of truth for the event content (it is derived
+    /// from `raw_payload`); the row supplies the identity, the opaque `etag` and
+    /// the timestamps.
+    #[must_use]
+    pub fn new(object: &CalendarObject, projection: EventProjection) -> Self {
+        Self {
+            id: object.id.clone(),
+            uid: object.uid.clone(),
+            collection_id: object.collection_id.clone(),
+            summary: projection.summary,
+            description: projection.description,
+            location: projection.location,
+            url: projection.url,
+            dtstart: Some(projection.dtstart_ms),
+            dtend: projection.dtend_ms,
+            dtstart_tzid: projection.dtstart_tzid,
+            dtend_tzid: projection.dtend_tzid,
+            rrule: projection.rrule,
+            etag: object.etag.clone(),
+            created_at: object.created_at,
+            updated_at: object.updated_at,
+            categories: projection.categories.into_iter().flatten().collect(),
+            attach: projection.attach,
+            status: projection.status,
+            class_: projection.class,
+            transp: projection.transp,
+            duration: projection.duration,
+        }
+    }
+}
+
 /// Request body for creating a calendar event.
 ///
 /// The backend composes the `.ics` stored in `raw_payload` from these fields
@@ -211,6 +312,25 @@ pub struct CreateEventRequest {
     /// Optional client-chosen `UID`; a fresh one is minted when omitted.
     #[serde(default)]
     pub uid: Option<String>,
+    /// `STATUS` (`TENTATIVE`/`CONFIRMED`/`CANCELLED`); normalised to upper case.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// `CLASS` (`PUBLIC`/`PRIVATE`/`CONFIDENTIAL`); normalised to upper case.
+    #[serde(default, rename = "class")]
+    pub class_: Option<String>,
+    /// `TRANSP` (`OPAQUE`/`TRANSPARENT`); normalised to upper case.
+    #[serde(default)]
+    pub transp: Option<String>,
+    /// `DURATION`, verbatim (an RFC 5545 `dur-value`); mutually exclusive with
+    /// `dtend`.
+    #[serde(default)]
+    pub duration: Option<String>,
+    /// `CATEGORIES` items; emitted as a single joined line.
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    /// `ATTACH` URIs, one content line per value (each an `http`/`https` URI).
+    #[serde(default)]
+    pub attach: Option<Vec<String>>,
 }
 
 /// Request body for a partial update of a calendar event.
@@ -222,7 +342,7 @@ pub struct CreateEventRequest {
 /// `raw_payload` is **reconciled** surgically from the merged fields — every
 /// property the model does not know (`VALARM`, `ATTENDEE`, `X-*`…) is preserved
 /// byte for byte.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct UpdateEventRequest {
     /// New title, if provided.
     #[serde(default)]
@@ -254,6 +374,25 @@ pub struct UpdateEventRequest {
     /// "absent" from "null", the same MVP limitation as every other field).
     #[serde(default)]
     pub tzid: Option<String>,
+    /// New `STATUS`, if provided (a blank value clears the field).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// New `CLASS`, if provided (a blank value clears the field).
+    #[serde(default, rename = "class")]
+    pub class_: Option<String>,
+    /// New `TRANSP`, if provided (a blank value clears the field).
+    #[serde(default)]
+    pub transp: Option<String>,
+    /// New `DURATION`, if provided. A blank value clears it (leaving `DTEND`
+    /// untouched); a value sets it and removes `DTEND` (they are exclusive).
+    #[serde(default)]
+    pub duration: Option<String>,
+    /// New `CATEGORIES`, if provided (`[]` clears them).
+    #[serde(default)]
+    pub categories: Option<Vec<String>>,
+    /// New `ATTACH` URIs, if provided (`[]` clears them).
+    #[serde(default)]
+    pub attach: Option<Vec<String>>,
 }
 
 impl UpdateEventRequest {
@@ -268,6 +407,12 @@ impl UpdateEventRequest {
             && self.dtend.is_none()
             && self.rrule.is_none()
             && self.tzid.is_none()
+            && self.status.is_none()
+            && self.class_.is_none()
+            && self.transp.is_none()
+            && self.duration.is_none()
+            && self.categories.is_none()
+            && self.attach.is_none()
     }
 }
 
