@@ -186,4 +186,61 @@ Commits previstos (un tipo por asunto): `♻️ refactor` (paso 1) → `✨ feat
 
 ## Resultado
 
-*(Se completa al cerrar el plan.)*
+**Estado: COMPLETADO.** Rama `feature/f25-vevent-contenido-estado`. Tipo `feat` → **minor (0.7.0)** cuando se libere.
+
+### Rojo → verde, medido
+
+| Momento | Backend | Frontend |
+|---|---|---|
+| Antes de empezar | **594 / 0** | 20 ficheros / **229** |
+| Tras la proyección (paso 2-3) | 601 / 0 (RED real: 7 tests fallando **en ejecución**, con stub, no por compilación) | — |
+| Tras la escritura (paso 4-5) | 608 / 0 (RED demostrado revirtiendo solo la implementación: 6 de 7 fallan por comportamiento; el séptimo es el guardián del contrato de bytes) | — |
+| Tras la API (paso 9) | 620 / 0 | — |
+| Tras el frontend (paso 10-11) | — | 236 / 0 |
+| **Cierre** | **623 / 0** | 20 ficheros / **236** |
+
+### Lo que se cumplió
+
+- Las **seis** propiedades se leen (proyección), se exponen (`EventDetailDto`), se editan (diálogo) y se escriben (`build_ics` + `reconcile_ics`).
+- El **invariante de F24 se mantiene**, ahora con las seis en juego: un `.ics` rico editado con un `PATCH` que solo cambia el título altera **exactamente dos líneas**.
+- El **contrato de identidad byte a byte** de `build_ics` con las seis vacías sigue fijado por test.
+- La **lista no cambia de forma** (test que lo fija): sigue leyendo solo columnas.
+- `dav/ics.rs` → `dav/ics/{mod,projection}.rs` fue un **rename puro**: 0 inserciones y 0 borrados, mismo `md5`, 31 items `pub` antes y después.
+- Sin migración y sin columnas nuevas.
+
+### Desviaciones y correcciones (dichas, no escondidas)
+
+1. **El escenario F14 estaba mal planteado y se retira.** El plan prometía que **la tarjeta** del calendario pintaría las categorías, los adjuntos y un fin calculado cuando el evento solo tiene `DURATION`. Eso es **incompatible con F11**, que este mismo plan exige: la lista del mes devuelve el DTO ligero y **no** lleva las seis. Se implementó, y la auditoría lo cazó: esas cosas solo habrían aparecido en eventos creados o editados en la sesión y **habrían desaparecido al recargar el mes** — peor que no pintarlas — mientras el test lo enmascaraba simulando una lista irreal. Se retira el pintado y el test pasa a simular lo que la lista devuelve de verdad. **Las seis viven en el diálogo.** (Contradicción del plan, detectada por la auditoría, no por los tests.)
+2. **Más commits de los previstos** (4 en el plan → 9 ejecutados): se verificó y commiteó cada paso por separado (plan, refactor, proyección, escritura, API, frontend, dos de cierre de auditoría y documentación). Sale una historia más fina que un único commit gigante; se documenta por transparencia.
+3. **Un test de F24 se debilitó de forma temporal** y se restauró en el mismo plan. Al pasar `CATEGORIES` a modelada, un `PATCH` que no la menciona la borra **hasta que la API la hereda del payload** (tarea 9), así que el test bandera no podía sostener su promesa en ese punto intermedio: se ajustó dejando un **alambre trampa** (`assert!(!stored.contains("CATEGORIES:"))`) que fallaría en cuanto la herencia funcionase, y en la tarea 9 se **restauró y reforzó** (ahora exige conservar `CATEGORIES`, `ATTACH` ×2, `STATUS`, `CLASS` y `TRANSP` con dos líneas de diferencia). El trampa desapareció, verificado.
+4. **`reconcile_ics` multi-valor: `ATTACH` reemplaza la lista entera** (no añade). Es la semántica de un `PATCH` y está documentado; conviene saberlo al consumir la API.
+
+### Hallazgos de la auditoría, cerrados
+
+- **La tarjeta pintaba lo que la lista no lleva** (el punto 1 de arriba): retirado.
+- **El detalle no se refrescaba al reabrir el mismo evento tras guardarlo**: la clave de petición ahora incluye el `etag`, que cambia en cada escritura.
+- **`update` se tragaba el fallo de proyección sin log**: ahora deja un `tracing::warn!` con el `uid` y el error (el flujo no cambia).
+- **Faltaba cobertura de API** para F6/F7/F4 (solo había unitarios): añadidos el escapado de la coma y el borrado con `[]` en `CATEGORIES`, los dos `ATTACH` verbatim y su borrado, el rechazo de `javascript:` en `POST` y `PATCH`, y la exclusividad en `POST`.
+- Sin hallazgos bloqueantes en backend (`reconcile_ics` multi-valor, exclusividad, validaciones y la proyección resistieron el repaso).
+
+### Incidentes de proceso (y qué los cazó)
+
+- **Dos subagentes terminaron sin informe** y uno dejó el árbol en **rojo** (2 fallos: `getEvent` sin simular en dos tests de F24). La verificación **por CLI**, no el resumen del subagente, los detectó y permitió devolver el trabajo con el diagnóstico exacto en vez de rehacerlo.
+- **Un subagente tocó un test que tenía prohibido tocar** (el bandera de F24), pero lo hizo de forma honesta: documentó la deuda y dejó el alambre trampa. Se aceptó como estado temporal con la restauración como requisito explícito del paso siguiente.
+- **Un subagente agotó su límite de pasos** dejando `clippy` y `fmt` sin ejecutar (el árbol no habría pasado la CI). Detectado y corregido antes de commitear.
+
+### Ficheros
+
+- `src/dav/ics/mod.rs` (antes `src/dav/ics.rs`), `src/dav/ics/projection.rs` (nuevo), `src/dav/vcf/mod.rs` (una referencia en prosa).
+- `src/api/dto.rs`, `src/api/events.rs`.
+- `web/src/types/api.ts`, `web/src/services/events.ts`, `web/src/hooks/useEventDetail.ts` (nuevo), `web/src/pages/Calendar.tsx`, `web/src/pages/Calendar.test.tsx`.
+- Tests: `tests/api.rs`, y los `#[cfg(test)]` de `src/dav/ics/{mod,projection}.rs`.
+- `docs/F25-vevent-contenido-y-estado.md`.
+
+### Fuera de alcance (sin tocar)
+
+`RECURRENCE-ID`/instancias desprendidas, `ORGANIZER`/`ATTENDEE`, `EXDATE`/`RDATE`, `SEQUENCE`/`CREATED`/`LAST-MODIFIED`, `VALARM` en el formulario, envío de invitaciones, `TZID`/`RRULE` en la interfaz, indexar las nuevas propiedades en FTS y el *backfill* de `location`/`url`. **Todo lo no modelado se conserva.**
+
+### Versionado
+
+`feat` → **minor**: 0.6.0 → **0.7.0**. **No se ha liberado**: el *bump*, el tag y la imagen son un paso aparte.
