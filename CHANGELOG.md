@@ -1,4 +1,16 @@
 # Changelog
+## [0.6.0] - 2026-10-17
+
+### Documentation
+
+- Regenerar el changelog para 0.5.0
+- El flujo de release dice la verdad
+- Registra PLAN-028 (F24), la conservación del .ics al editar
+- Cierra PLAN-028 (F24) y documenta la feature
+
+### Features
+
+- El PATCH conserva el .ics y LOCATION/URL son campos de primera clase
 ## [0.5.0] - 2026-10-16
 
 ### Bug Fixes
