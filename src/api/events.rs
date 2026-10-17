@@ -211,6 +211,13 @@ pub async fn create(
         dtstart_tzid: tzid.clone(),
         dtend_tzid: tzid.clone(),
         rrule: rrule.clone(),
+        status: None,
+        class_: None,
+        transp: None,
+        duration: None,
+        categories: Vec::new(),
+        attach: Vec::new(),
+        // F25: la tarea de API los cablea.
         dtstamp_ms: now_millis(),
     };
 
@@ -395,6 +402,13 @@ pub async fn update(
         dtstart_tzid: dtstart_tzid.clone(),
         dtend_tzid: dtend_tzid.clone(),
         rrule: rrule.clone(),
+        status: None,
+        class_: None,
+        transp: None,
+        duration: None,
+        categories: Vec::new(),
+        attach: Vec::new(),
+        // F25: la tarea de API los cablea.
         dtstamp_ms: now_millis(),
     };
 
