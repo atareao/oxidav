@@ -20,6 +20,15 @@ import type { EventDetail } from '../types/api'
 export interface EventDetailTarget {
   collectionId: string
   uid: string
+  /**
+   * El `etag` de la fila que se está abriendo. Entra en la *request key* para
+   * que guardar el evento invalide el detalle cacheado: tras un `PATCH` la lista
+   * consolida la fila con un `etag` nuevo, así que reabrir **el mismo** evento
+   * vuelve a pedir el detalle en lugar de mostrar el anterior al guardado.
+   * (Sin él, la clave `collectionId#uid#reloadToken` no cambiaba al reabrir y el
+   * diálogo mostraba el detalle obsoleto.)
+   */
+  etag: string
 }
 
 export interface UseEventDetailResult {
@@ -45,11 +54,17 @@ export function useEventDetail(target: EventDetailTarget | null): UseEventDetail
 
   const collectionId = target?.collectionId ?? null
   const uid = target?.uid ?? null
+  const etag = target?.etag ?? null
 
-  // La *request key* identifica la petición vigente: cambio de objetivo o
-  // recarga cambian la clave y, por derivación, dejan `loading` en `true`.
+  // La *request key* identifica la petición vigente: cambio de objetivo, de
+  // `etag` o recarga cambian la clave y, por derivación, dejan `loading` en
+  // `true`. El `etag` es lo que hace que **guardar** invalide el detalle: la
+  // lista consolida la fila con un `etag` nuevo tras el `PATCH`, de modo que
+  // reabrir el mismo evento fuerza una petición fresca.
   const requestKey =
-    collectionId === null || uid === null ? null : `${collectionId}#${uid}#${reloadToken}`
+    collectionId === null || uid === null
+      ? null
+      : `${collectionId}#${uid}#${etag ?? ''}#${reloadToken}`
 
   useEffect(() => {
     if (collectionId === null || uid === null || requestKey === null) {

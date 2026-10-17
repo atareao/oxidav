@@ -768,29 +768,23 @@ describe('Calendar', () => {
     expect('duration' in input).toBe(false)
   })
 
-  it('pinta categorías, adjuntos seguros y un fin calculado con solo DURATION (F14)', async () => {
+  it('pinta solo lo que la lista lleva: ni categorías, ni adjuntos, ni fin derivado (F14)', async () => {
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    // La lista del mes entrega el **DTO ligero**: no incluye `categories`,
+    // `attach` ni `duration`. La tarjeta no debe pintar nada de eso (antes lo
+    // hacía leyendo la copia optimista, y desaparecía al recargar el mes).
     vi.mocked(listEvents).mockResolvedValue([
-      makeDetail({
-        summary: 'Con todo',
-        dtstart: atToday(10),
-        dtend: null,
-        duration: 'PT90M',
-        categories: ['trabajo'],
-        attach: ['https://ejemplo.org/a', 'javascript:alert(1)'],
-      }),
+      makeEvent({ summary: 'Ligero', location: 'Sala 3', url: 'javascript:alert(1)' }),
     ])
 
     renderCalendar()
 
-    expect(await screen.findByText('trabajo')).toBeInTheDocument()
-    const link = await screen.findByRole('link', { name: 'https://ejemplo.org/a' })
-    expect(link).toHaveAttribute('href', 'https://ejemplo.org/a')
-    expect(link).toHaveAttribute('target', '_blank')
-    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
-    // No `DTEND`: the card derives 10:00 + 90 min = 11:30 from the `DURATION`.
-    expect(screen.getByText(/hasta 11:30/)).toBeInTheDocument()
-    // A non-http(s) `ATTACH` is never painted as a link.
+    // Lo que la lista sí lleva: hora, resumen y (F24) la ubicación como texto.
+    expect(await screen.findByText(/· Ligero/)).toBeInTheDocument()
+    expect(screen.getByText('Sala 3')).toBeInTheDocument()
+    // La tarjeta ya no deriva un fin a partir de un `DURATION`.
+    expect(screen.queryByText(/hasta /)).not.toBeInTheDocument()
+    // Una URL no http(s) nunca se pinta como enlace (F24, sigue vigente).
     expect(screen.queryByRole('link', { name: 'javascript:alert(1)' })).not.toBeInTheDocument()
   })
 
@@ -820,5 +814,59 @@ describe('Calendar', () => {
     // Untouched: the raw `P1DT2H` is preserved by not echoing anything back.
     expect('duration' in input).toBe(false)
     expect('dtend' in input).toBe(false)
+  })
+
+  it('indica que el detalle aún está cargando mientras llega (F12)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Lento' })])
+    // El detalle se queda pendiente: mientras no llega, el diálogo debe mostrar
+    // el indicador de carga y **no** montar el formulario.
+    let resolveDetail!: (value: EventDetail) => void
+    vi.mocked(getEvent).mockReturnValue(
+      new Promise<EventDetail>((resolve) => {
+        resolveDetail = resolve
+      }),
+    )
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Lento/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog.querySelector('.ant-skeleton')).not.toBeNull()
+    expect(within(dialog).queryByRole('textbox', { name: 'Título' })).not.toBeInTheDocument()
+
+    await act(async () => {
+      resolveDetail(makeDetail({ summary: 'Lento' }))
+    })
+
+    // Llegado el detalle, el formulario se monta y el indicador desaparece.
+    expect(await within(dialog).findByRole('textbox', { name: 'Título' })).toBeInTheDocument()
+    expect(dialog.querySelector('.ant-skeleton')).toBeNull()
+  })
+
+  it('vuelve a pedir el detalle al reabrir un evento tras guardarlo (F25/A2)', async () => {
+    const event = makeDetail({ summary: 'Reabrible' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Reabrible' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    // El `PATCH` devuelve la fila con un `etag` nuevo, que la lista consolida.
+    vi.mocked(updateEvent).mockResolvedValue(
+      makeEvent({ summary: 'Reabrible', etag: 'etag-2' }),
+    )
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Reabrible/ }))
+    await waitFor(() => expect(getEvent).toHaveBeenCalledTimes(1))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+
+    // Reabrir el **mismo** evento: el `etag` nuevo cambia la *request key*, así
+    // que el detalle se pide otra vez en lugar de mostrar el anterior al guardado.
+    await user.click(await screen.findByRole('button', { name: /· Reabrible/ }))
+    await waitFor(() => expect(getEvent).toHaveBeenCalledTimes(2))
   })
 })

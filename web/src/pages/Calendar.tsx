@@ -34,7 +34,6 @@ import {
   Select,
   Skeleton,
   Space,
-  Tag,
   Typography,
 } from 'antd'
 import dayjs from 'dayjs'
@@ -192,19 +191,6 @@ function durationToMs(raw: string): number | null {
 /** Structural equality used for D2's "only send what changed" on lists. */
 function sameStringArray(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index])
-}
-
-/** Past-the-end instant to paint on the card: `DTEND`, else `DTSTART + DURATION`. */
-function eventEndMs(event: CalendarEvent): number | null {
-  if (event.dtend !== null) {
-    return event.dtend
-  }
-  const duration = (event as Partial<EventDetail>).duration ?? null
-  if (duration === null || event.dtstart === null) {
-    return null
-  }
-  const ms = durationToMs(duration)
-  return ms === null ? null : event.dtstart + ms
 }
 
 /**
@@ -477,11 +463,14 @@ export function Calendar() {
   // El diálogo de edición necesita el detalle **completo** (la fila ligera de la
   // lista no trae `categories`/`attach`/`status`/…), así que tiene su propia
   // petición, independiente de la lista. En alta (`editing === null`) no pide nada.
+  // El `etag` entra en el objetivo para que guardar invalide el detalle cacheado:
+  // tras el `PATCH` la lista consolida la fila con un `etag` nuevo, y reabrir el
+  // mismo evento vuelve a pedir el detalle en lugar de mostrar el obsoleto.
   const editTarget = useMemo(() => {
     if (editing === null || effectiveCollectionId === null) {
       return null
     }
-    return { collectionId: effectiveCollectionId, uid: editing.uid }
+    return { collectionId: effectiveCollectionId, uid: editing.uid, etag: editing.etag }
   }, [editing, effectiveCollectionId])
 
   const {
@@ -970,15 +959,7 @@ export function Calendar() {
                           gap: 2,
                         }}
                       >
-                        {dayEvents.map((event) => {
-                          // The list DTO carries none of the six F25 properties, but
-                          // an event just created/updated (or the optimistic copy)
-                          // may be `EventDetail`-shaped: read them defensively.
-                          const detail = event as Partial<EventDetail>
-                          const categories = detail.categories ?? []
-                          const attach = detail.attach ?? []
-                          const endMs = eventEndMs(event)
-                          return (
+                        {dayEvents.map((event) => (
                           <li
                             key={event.uid}
                             style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}
@@ -1044,42 +1025,6 @@ export function Calendar() {
                                 {event.dtstart_tzid}
                               </Typography.Text>
                             ) : null}
-                            {/*
-                              F25: end painted locally when the event carries only a
-                              `DURATION` (no `DTEND`). This instant is display-only:
-                              it is never sent back, so a `DURATION` is never turned
-                              into an explicit `DTEND` by the mere act of viewing it.
-                            */}
-                            {event.dtend === null && endMs !== null ? (
-                              <Typography.Text type="secondary" style={{ fontSize: 12, flex: '0 0 auto' }}>
-                                hasta {formatTime(endMs)}
-                              </Typography.Text>
-                            ) : null}
-                            {categories.map((category) => (
-                              <Tag key={category} style={{ marginInlineEnd: 0 }}>
-                                {category}
-                              </Tag>
-                            ))}
-                            {attach.map((uri) =>
-                              isSafeHttpUrl(uri) ? (
-                                <Typography.Link
-                                  key={uri}
-                                  href={uri}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  style={{
-                                    fontSize: 12,
-                                    flex: '0 0 auto',
-                                    maxWidth: 96,
-                                    overflow: 'hidden',
-                                    textOverflow: 'ellipsis',
-                                    whiteSpace: 'nowrap',
-                                  }}
-                                >
-                                  {uri}
-                                </Typography.Link>
-                              ) : null,
-                            )}
                             <Popconfirm
                               title="Eliminar evento"
                               description="¿Seguro que quieres eliminar este evento?"
@@ -1098,8 +1043,7 @@ export function Calendar() {
                               </Button>
                             </Popconfirm>
                           </li>
-                          )
-                        })}
+                        ))}
                       </ul>
                     </div>
                   )
