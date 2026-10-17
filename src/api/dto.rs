@@ -119,6 +119,12 @@ pub struct EventDto {
     pub summary: Option<String>,
     /// Event body (`DESCRIPTION`).
     pub description: Option<String>,
+    /// Event place (`LOCATION`), if any (F24). Free text; `null` means "no
+    /// `LOCATION`".
+    pub location: Option<String>,
+    /// Event link (`URL`), if any (F24). An absolute `http`/`https` URI; `null`
+    /// means "no `URL`".
+    pub url: Option<String>,
     /// Start instant, Unix milliseconds.
     pub dtstart: Option<i64>,
     /// End instant, Unix milliseconds.
@@ -152,6 +158,8 @@ impl From<&CalendarObject> for EventDto {
             collection_id: object.collection_id.clone(),
             summary: object.summary.clone(),
             description: object.description.clone(),
+            location: object.location.clone(),
+            url: object.url.clone(),
             dtstart: object.dtstart,
             dtend: object.dtend,
             dtstart_tzid: object.dtstart_tzid.clone(),
@@ -177,6 +185,12 @@ pub struct CreateEventRequest {
     /// Event body (`DESCRIPTION`).
     #[serde(default)]
     pub description: Option<String>,
+    /// Event place (`LOCATION`); optional free text.
+    #[serde(default)]
+    pub location: Option<String>,
+    /// Event link (`URL`); optional, must be an absolute `http`/`https` URI.
+    #[serde(default)]
+    pub url: Option<String>,
     /// Start instant, Unix milliseconds; required.
     pub dtstart: i64,
     /// End instant, Unix milliseconds; must be `>= dtstart` when present.
@@ -203,8 +217,11 @@ pub struct CreateEventRequest {
 ///
 /// Only the fields present are applied; omitted fields keep their stored value.
 /// Note that a field cannot be cleared to `null` (the DTO cannot distinguish
-/// "absent" from "null"): a documented MVP limitation. The `.ics` in
-/// `raw_payload` is recomposed from the merged fields after validation.
+/// "absent" from "null"): a documented MVP limitation. A blank text value
+/// (`summary` aside) clears the field. As of F24 the stored `.ics` in
+/// `raw_payload` is **reconciled** surgically from the merged fields — every
+/// property the model does not know (`VALARM`, `ATTENDEE`, `X-*`…) is preserved
+/// byte for byte.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct UpdateEventRequest {
     /// New title, if provided.
@@ -213,6 +230,13 @@ pub struct UpdateEventRequest {
     /// New body, if provided.
     #[serde(default)]
     pub description: Option<String>,
+    /// New place (`LOCATION`), if provided. A blank value clears the field.
+    #[serde(default)]
+    pub location: Option<String>,
+    /// New link (`URL`), if provided (must be an absolute `http`/`https` URI). A
+    /// blank value clears the field.
+    #[serde(default)]
+    pub url: Option<String>,
     /// New start instant, if provided.
     #[serde(default)]
     pub dtstart: Option<i64>,
@@ -238,6 +262,8 @@ impl UpdateEventRequest {
     pub fn is_empty(&self) -> bool {
         self.summary.is_none()
             && self.description.is_none()
+            && self.location.is_none()
+            && self.url.is_none()
             && self.dtstart.is_none()
             && self.dtend.is_none()
             && self.rrule.is_none()

@@ -47,6 +47,10 @@ export interface CalendarEvent {
   collection_id: string
   summary: string | null
   description: string | null
+  /** `LOCATION`, verbatim, or `null` when the event carries none (F24). */
+  location: string | null
+  /** `URL`, verbatim, or `null` when the event carries none (F24). */
+  url: string | null
   dtstart: number | null
   dtend: number | null
   /** IANA time zone anchoring `dtstart`, or `null` when the event has none. */
@@ -63,6 +67,13 @@ export interface CalendarEvent {
 export interface CreateEventInput {
   summary: string
   description?: string
+  /** `LOCATION` (free text); omit for none. */
+  location?: string
+  /**
+   * `URL`; must be an absolute `http://`/`https://` URI. The server allowlists
+   * the scheme (security boundary: the SPA renders the value as a link).
+   */
+  url?: string
   dtstart: number
   dtend?: number
   rrule?: string
@@ -74,7 +85,21 @@ export interface CreateEventInput {
 /** Request body for a partial update of a calendar event (`PATCH .../events/{uid}`). */
 export interface UpdateEventInput {
   summary?: string
+  /** An empty string (`""`) *clears* the description. Omit to leave it untouched. */
   description?: string
+  /**
+   * `LOCATION`; an empty string (`""`) *clears* the field (the server normalises
+   * it to `None` and the `LOCATION` line disappears from the stored `.ics`).
+   * Omit to leave it untouched.
+   */
+  location?: string
+  /**
+   * `URL`; an empty string (`""`) *clears* the field. Otherwise it must be an
+   * absolute `http://`/`https://` URI — the server allowlists the scheme, both
+   * as a storage-safety boundary and to keep the SPA's rendered link safe.
+   * Omit to leave it untouched.
+   */
+  url?: string
   dtstart?: number
   dtend?: number
   rrule?: string

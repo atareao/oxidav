@@ -53,7 +53,9 @@ use serde::Deserialize;
 
 use crate::auth::SessionUser;
 use crate::dav::common::new_id;
-use crate::dav::ics::{EventFields, build_ics, supported_instant_range_ms};
+use crate::dav::ics::{
+    EventFields, build_ics, parse_ics, reconcile_ics, supported_instant_range_ms,
+};
 use crate::dav::vtimezone;
 use crate::db::models::{CalendarObjectUpdate, CollectionKind, NewCalendarObject};
 use crate::db::{
@@ -75,6 +77,12 @@ const MAX_DESCRIPTION_LEN: usize = 8_192;
 
 /// Maximum accepted length of an `RRULE` value, in characters.
 const MAX_RRULE_LEN: usize = 1_024;
+
+/// Maximum accepted length of an event location (`LOCATION`), in characters.
+const MAX_LOCATION_LEN: usize = 1_024;
+
+/// Maximum accepted length of an event link (`URL`), in characters.
+const MAX_URL_LEN: usize = 2_048;
 
 /// Maximum accepted length of a client-supplied `uid`, in characters.
 const MAX_UID_LEN: usize = 255;
@@ -179,6 +187,8 @@ pub async fn create(
         "description",
         MAX_DESCRIPTION_LEN,
     )?;
+    let location = validate_location(request.location.as_deref())?;
+    let url = validate_url(request.url.as_deref())?;
     let rrule = validate_rrule(request.rrule.as_deref())?;
     let tzid = validate_tzid(request.tzid.as_deref())?;
     validate_range(request.dtstart, request.dtend)?;
@@ -194,6 +204,8 @@ pub async fn create(
         uid: uid.clone(),
         summary: Some(summary.clone()),
         description: description.clone(),
+        location: location.clone(),
+        url: url.clone(),
         dtstart_ms: request.dtstart,
         dtend_ms: request.dtend,
         dtstart_tzid: tzid.clone(),
@@ -208,6 +220,8 @@ pub async fn create(
         uid,
         summary: Some(summary),
         description,
+        location,
+        url,
         dtstart: Some(request.dtstart),
         dtend: request.dtend,
         dtstart_tzid: tzid.clone(),
@@ -277,24 +291,75 @@ pub async fn update(
         .await?
         .ok_or(ApiError::NotFound)?;
 
+    // Merge rule (single and uniform, for every modelled field below): when the
+    // `PATCH` does not mention a field, its effective value is inherited from the
+    // request, then the stored payload, and only then the denormalised column.
+    //
+    // The stored `.ics` is the source of truth: it is the artefact native clients
+    // sync and the very bytes `reconcile_ics` rewrites in place. The columns are a
+    // derived index, and an *additive* one — `location`/`url` arrived in migration
+    // `0005` and the `*_tzid` columns in `0004`, so a row written under an older
+    // schema has them at `NULL` even though its payload already carries the
+    // property. Taking the column first would rewrite such a field from stale data,
+    // silently mutating something the `PATCH` never mentioned — exactly the silent
+    // deletion PLAN-028 exists to remove.
+    //
+    // Validation is a frontier for what *enters through the API*: only a value
+    // supplied by the request is validated. An inherited value (from the payload or
+    // the column) passes through verbatim — revalidating it would `400` *any*
+    // `PATCH` on an event imported from a native client with, say, a
+    // `URL:mailto:…`/`ftp://…` (a scheme outside our allowlist) or an over-long
+    // `LOCATION`.
+    let stored = parse_ics(&existing.raw_payload).ok();
+
     let summary = match &request.summary {
         Some(value) => Some(validate_summary(value)?),
-        None => existing.summary.clone(),
+        None => stored
+            .as_ref()
+            .and_then(|event| event.summary.clone())
+            .or_else(|| existing.summary.clone()),
     };
     let description = match &request.description {
         Some(value) => {
             normalize_optional(Some(value.as_str()), "description", MAX_DESCRIPTION_LEN)?
         }
-        None => existing.description.clone(),
+        None => stored
+            .as_ref()
+            .and_then(|event| event.description.clone())
+            .or_else(|| existing.description.clone()),
+    };
+    let location = match &request.location {
+        Some(value) => validate_location(Some(value))?,
+        None => stored
+            .as_ref()
+            .and_then(|event| event.location.clone())
+            .or_else(|| existing.location.clone()),
+    };
+    let url = match &request.url {
+        Some(value) => validate_url(Some(value))?,
+        None => stored
+            .as_ref()
+            .and_then(|event| event.url.clone())
+            .or_else(|| existing.url.clone()),
     };
     let rrule = match &request.rrule {
         Some(value) => validate_rrule(Some(value.as_str()))?,
-        None => existing.rrule.clone(),
+        None => stored
+            .as_ref()
+            .and_then(|event| event.rrule.clone())
+            .or_else(|| existing.rrule.clone()),
     };
     // An event always carries a DTSTART; fall back to 0 only for a legacy row
-    // that lacks the denormalised column.
-    let dtstart = request.dtstart.or(existing.dtstart).unwrap_or(0);
-    let dtend = request.dtend.or(existing.dtend);
+    // that lacks both a parseable payload and the denormalised column.
+    let dtstart = request
+        .dtstart
+        .or_else(|| stored.as_ref().map(|event| event.dtstart_ms))
+        .or(existing.dtstart)
+        .unwrap_or(0);
+    let dtend = request
+        .dtend
+        .or_else(|| stored.as_ref().and_then(|event| event.dtend_ms))
+        .or(existing.dtend);
     validate_range(dtstart, dtend)?;
 
     // A `tzid` in the patch replaces **both** anchors with the same canonical
@@ -307,13 +372,24 @@ pub async fn update(
             let tzid = validate_tzid(Some(raw))?;
             (tzid.clone(), tzid)
         }
-        None => (existing.dtstart_tzid.clone(), existing.dtend_tzid.clone()),
+        None => (
+            stored
+                .as_ref()
+                .and_then(|event| event.dtstart_tzid.clone())
+                .or_else(|| existing.dtstart_tzid.clone()),
+            stored
+                .as_ref()
+                .and_then(|event| event.dtend_tzid.clone())
+                .or_else(|| existing.dtend_tzid.clone()),
+        ),
     };
 
     let fields = EventFields {
         uid: existing.uid.clone(),
         summary: summary.clone(),
         description: description.clone(),
+        location: location.clone(),
+        url: url.clone(),
         dtstart_ms: dtstart,
         dtend_ms: dtend,
         dtstart_tzid: dtstart_tzid.clone(),
@@ -322,15 +398,31 @@ pub async fn update(
         dtstamp_ms: now_millis(),
     };
 
+    // `reconcile_ics` rewrites only the modelled content lines in place, keeping
+    // every unmodelled property (`VALARM`, other `ATTENDEE`s, `CATEGORIES`, `X-`)
+    // and the original folding byte for byte (F24/PLAN-028).
+    let raw_payload = match reconcile_ics(&existing.raw_payload, &fields) {
+        Ok(payload) => payload,
+        // Safety net: a degenerate row without a usable `VEVENT` is recomposed
+        // from scratch rather than failing the request. This should never happen
+        // — every row is born from an already-parsed `PUT`/`POST`.
+        Err(err) => {
+            tracing::warn!(error = %err, "reconcile_ics falló; se recompone con build_ics");
+            build_ics(&fields)
+        }
+    };
+
     let update = CalendarObjectUpdate {
         summary,
         description,
+        location,
+        url,
         dtstart: Some(dtstart),
         dtend,
         dtstart_tzid,
         dtend_tzid,
         rrule,
-        raw_payload: build_ics(&fields),
+        raw_payload,
     };
 
     let stored = update_calendar_object(&state.db, &existing.id, &update).await?;
@@ -423,6 +515,68 @@ fn normalize_optional(
             }
             Ok(Some(value.to_string()))
         }
+    }
+}
+
+/// Validate and normalise an optional event location (`LOCATION`).
+///
+/// `LOCATION` is free text: a blank value is normalised away (`None`, so `""`
+/// clears the field on `PATCH`) and the value is otherwise kept as sent. It needs
+/// no charset restriction — [`build_ics`]/[`reconcile_ics`] escape it per RFC
+/// 5545 §3.3.11, so even a newline is emitted as the two characters `\n` and can
+/// never split the content line.
+fn validate_location(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    normalize_optional(raw, "location", MAX_LOCATION_LEN)
+}
+
+/// Validate and normalise an optional event link (`URL`).
+///
+/// A blank value is normalised away (`None`, so `""` clears the field on
+/// `PATCH`). Otherwise the value must be an **absolute URI whose scheme is
+/// `http` or `https`** (checked ASCII case-insensitively) followed by `://` and a
+/// non-empty remainder.
+///
+/// This is a security boundary, not cosmetics, on two counts:
+///
+/// 1. [`build_ics`]/[`reconcile_ics`] emit `URL` **verbatim** (a URI must not be
+///    escaped), so a value carrying a control character or whitespace — e.g.
+///    `https://x\r\nBEGIN:VEVENT` — would inject an iCalendar content line into
+///    the stored `raw_payload`. Those bytes are therefore rejected.
+/// 2. The SPA renders the URL as a clickable link, so a `javascript:`/`data:`/
+///    `file:` value would be a stored XSS. Only the two `http`/`https` schemes
+///    are allowed.
+fn validate_url(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > MAX_URL_LEN {
+        return Err(ApiError::Validation(format!(
+            "El campo `url` no puede superar {MAX_URL_LEN} caracteres"
+        )));
+    }
+    // `URL` is emitted verbatim: reject every control character (`< 0x20`, `0x7F`
+    // and the C1 block) and any whitespace, which would otherwise let a value
+    // inject a content line.
+    if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(ApiError::Validation(
+            "El campo `url` contiene caracteres de control o espacios no permitidos".to_string(),
+        ));
+    }
+    // Scheme allowlist: `http://` or `https://` (ASCII case-insensitive) followed
+    // by a non-empty remainder. Done by hand: no `url` crate is a direct
+    // dependency.
+    let lower = value.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"));
+    match rest {
+        Some(rest) if !rest.is_empty() => Ok(Some(value.to_string())),
+        _ => Err(ApiError::Validation(
+            "El campo `url` debe ser una URL absoluta `http://` o `https://`".to_string(),
+        )),
     }
 }
 
@@ -725,6 +879,8 @@ mod tests {
             dtend: None,
             rrule: None,
             tzid: None,
+            location: None,
+            url: None,
         };
         assert!(empty.is_empty());
         let non_empty = UpdateEventRequest {
@@ -734,6 +890,8 @@ mod tests {
             dtend: None,
             rrule: None,
             tzid: None,
+            location: None,
+            url: None,
         };
         assert!(!non_empty.is_empty());
         // A patch that only changes the zone is *not* empty (F18): it must be
@@ -745,8 +903,90 @@ mod tests {
             dtend: None,
             rrule: None,
             tzid: Some("Europe/Madrid".to_string()),
+            location: None,
+            url: None,
         };
         assert!(!tzid_only.is_empty());
+    }
+
+    #[test]
+    fn update_is_empty_considers_the_new_fields() {
+        // F24: a patch that only touches `location` or `url` is *not* empty — it
+        // must be accepted rather than answered with the "no field to update"
+        // `400`.
+        let location_only = UpdateEventRequest {
+            summary: None,
+            description: None,
+            dtstart: None,
+            dtend: None,
+            rrule: None,
+            tzid: None,
+            location: Some("Sala 3".to_string()),
+            url: None,
+        };
+        assert!(!location_only.is_empty());
+
+        let url_only = UpdateEventRequest {
+            summary: None,
+            description: None,
+            dtstart: None,
+            dtend: None,
+            rrule: None,
+            tzid: None,
+            location: None,
+            url: Some("https://ejemplo.org/x".to_string()),
+        };
+        assert!(!url_only.is_empty());
+    }
+
+    #[test]
+    fn validate_location_normalises_blank_and_bounds_length() {
+        assert_eq!(validate_location(None).ok(), Some(None));
+        assert_eq!(validate_location(Some("  ")).ok(), Some(None));
+        assert_eq!(
+            validate_location(Some("Sala 3")).ok(),
+            Some(Some("Sala 3".to_string()))
+        );
+        let long = "x".repeat(MAX_LOCATION_LEN + 1);
+        assert!(matches!(
+            validate_location(Some(&long)),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_url_allows_only_absolute_http_https_and_rejects_injection() {
+        assert_eq!(validate_url(None).ok(), Some(None));
+        assert_eq!(validate_url(Some("   ")).ok(), Some(None));
+        assert_eq!(
+            validate_url(Some("https://ejemplo.org/x")).ok(),
+            Some(Some("https://ejemplo.org/x".to_string()))
+        );
+        // The scheme check is ASCII case-insensitive.
+        assert_eq!(
+            validate_url(Some("HTTP://ejemplo.org/x")).ok(),
+            Some(Some("HTTP://ejemplo.org/x".to_string()))
+        );
+        for hostile in [
+            "javascript:alert(1)",
+            "data:text/html,x",
+            "file:///etc/passwd",
+            "mailto:ada@example.org",
+            "https://",
+            "https://x\ny",
+            "https://x y",
+            "https://x\u{0007}",
+        ] {
+            assert!(
+                matches!(validate_url(Some(hostile)), Err(ApiError::Validation(_))),
+                "must reject {hostile:?}"
+            );
+        }
+        let long = format!("https://{}", "x".repeat(MAX_URL_LEN));
+        assert!(matches!(
+            validate_url(Some(&long)),
+            Err(ApiError::Validation(_))
+        ));
     }
 
     #[test]
