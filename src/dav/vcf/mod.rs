@@ -24,7 +24,7 @@
 //! All the pre-pass code touches the payload only through panic-free string
 //! operations ([`str::split_once`], [`str::get`], [`str::strip_suffix`],
 //! [`str::split_at`] at ASCII boundaries); it never indexes raw bytes at an
-//! unvalidated offset, mirroring the hardened slicing of `ics.rs`, so a payload
+//! unvalidated offset, mirroring the hardened slicing of `dav/ics/mod.rs`, so a payload
 //! carrying multibyte characters in unexpected positions returns an error
 //! instead of aborting the process.
 //!

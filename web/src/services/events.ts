@@ -6,7 +6,12 @@
  * the backend composes the stored iCalendar payload.
  */
 
-import type { CalendarEvent, CreateEventInput, UpdateEventInput } from '../types/api'
+import type {
+  CalendarEvent,
+  CreateEventInput,
+  EventDetail,
+  UpdateEventInput,
+} from '../types/api'
 import { api } from './api'
 
 /** Optional `[start, end)` window, in Unix epoch milliseconds. */
@@ -41,6 +46,23 @@ export function listEvents(
 ): Promise<CalendarEvent[]> {
   return api.get<CalendarEvent[]>(
     `/v1/collections/${encodeURIComponent(collectionId)}/events${rangeQuery(range)}`,
+    signal,
+  )
+}
+
+/**
+ * Fetch an event's full detail (F25): the light listing fields plus the six
+ * `VEVENT` properties the list does not expose (`CATEGORIES`, `ATTACH`,
+ * `STATUS`, `CLASS`, `TRANSP`, `DURATION`), already projected from the stored
+ * `.ics` by the server. The client never parses iCalendar itself.
+ */
+export function getEvent(
+  collectionId: string,
+  uid: string,
+  signal?: AbortSignal,
+): Promise<EventDetail> {
+  return api.get<EventDetail>(
+    `/v1/collections/${encodeURIComponent(collectionId)}/events/${encodeURIComponent(uid)}`,
     signal,
   )
 }
