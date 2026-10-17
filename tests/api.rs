@@ -2547,6 +2547,209 @@ async fn event_list_does_not_expose_the_six_properties() {
     assert!(item.get("raw_payload").is_none());
 }
 
+/// F6 by API — `POST` escapes the `CATEGORIES` line: an item containing a comma
+/// is written `\,` on the single joined line, and the detail round-trips both
+/// items; a `PATCH` with `categories: []` clears the property.
+#[tokio::test]
+async fn create_and_clear_categories_via_api() {
+    let env = TestEnv::new("f25-api-categories").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f25-api-cat-1";
+    let (status, created) = create_minimal_event(
+        &env,
+        &token,
+        &cid,
+        uid,
+        json!({ "categories": ["trabajo", "con, coma"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(created["categories"], json!(["trabajo", "con, coma"]));
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert_eq!(
+        stored.matches("CATEGORIES:").count(),
+        1,
+        "CATEGORIES must be a single line: {stored}"
+    );
+    assert!(
+        stored.contains("CATEGORIES:trabajo,con\\, coma"),
+        "the inner comma must be escaped: {stored}"
+    );
+
+    // The detail projects both items back.
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, detail) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {detail}");
+    assert_eq!(detail["categories"], json!(["trabajo", "con, coma"]));
+
+    // An empty list clears the property.
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "categories": [] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "clear failed: {body}");
+    assert_eq!(body["categories"], json!([]));
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        !stored.contains("CATEGORIES:"),
+        "a CATEGORIES line survived: {stored}"
+    );
+}
+
+/// F7 by API — `POST` emits one verbatim `ATTACH` line per URI, in order, and
+/// the detail returns both; a `PATCH` with `attach: []` clears them, and the
+/// scheme allowlist rejects a hostile `POST`/`PATCH` with `400` and no write.
+#[tokio::test]
+async fn create_and_clear_attach_via_api() {
+    let env = TestEnv::new("f25-api-attach").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f25-api-att-1";
+    let (status, created) = create_minimal_event(
+        &env,
+        &token,
+        &cid,
+        uid,
+        json!({ "attach": ["https://a.example/x", "https://b.example/y"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(
+        created["attach"],
+        json!(["https://a.example/x", "https://b.example/y"])
+    );
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert_eq!(
+        stored.matches("ATTACH:").count(),
+        2,
+        "one ATTACH line per URI: {stored}"
+    );
+    assert!(
+        stored.contains("ATTACH:https://a.example/x"),
+        "first ATTACH not verbatim: {stored}"
+    );
+    assert!(
+        stored.contains("ATTACH:https://b.example/y"),
+        "second ATTACH not verbatim: {stored}"
+    );
+
+    // The detail returns both, in order.
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, detail) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {detail}");
+    assert_eq!(
+        detail["attach"],
+        json!(["https://a.example/x", "https://b.example/y"])
+    );
+
+    // A hostile `PATCH` is a `400` and leaves the payload intact.
+    let before = stored_event_raw(&env, &cid, uid).await;
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "attach": ["javascript:alert(1)"] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "hostile patch -> {body}");
+    assert_eq!(body["error"]["code"], "validation");
+    assert_eq!(
+        stored_event_raw(&env, &cid, uid).await,
+        before,
+        "payload changed for a rejected attach"
+    );
+
+    // An empty list clears the property.
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "attach": [] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "clear failed: {body}");
+    assert_eq!(body["attach"], json!([]));
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        !stored.contains("ATTACH:"),
+        "an ATTACH line survived: {stored}"
+    );
+
+    // A hostile `POST` is also a `400` and writes nothing.
+    let hostile_uid = "f25-api-att-hostile";
+    let (status, body) = create_minimal_event(
+        &env,
+        &token,
+        &cid,
+        hostile_uid,
+        json!({ "attach": ["javascript:alert(1)"] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "hostile create -> {body}");
+    assert_eq!(body["error"]["code"], "validation");
+    let hostile_uri = format!("/api/v1/collections/{cid}/events/{hostile_uid}");
+    let (status, _) = env
+        .call(Method::GET, &hostile_uri, Some(&token), None)
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a rejected POST must not be stored"
+    );
+}
+
+/// F4 in `POST` — `DURATION`/`DTEND` exclusivity holds at creation: supplying
+/// both is a `400`, and a lone `duration` yields an event with `DURATION` and no
+/// `DTEND` (the detail reports `dtend: null`).
+#[tokio::test]
+async fn create_enforces_duration_dtend_exclusivity() {
+    let env = TestEnv::new("f25-api-exclusive").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+
+    // Both together is a `400` and nothing is written.
+    let both_uid = "f25-api-excl-both";
+    let (status, body) = create_minimal_event(
+        &env,
+        &token,
+        &cid,
+        both_uid,
+        json!({ "duration": "PT1H", "dtend": 1_700_000_600_000_i64 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "both -> {body}");
+    assert_eq!(body["error"]["code"], "validation");
+    let both_uri = format!("/api/v1/collections/{cid}/events/{both_uid}");
+    let (status, _) = env.call(Method::GET, &both_uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "rejected POST stored a row");
+
+    // A lone `duration`: `DURATION` written, no `DTEND`, detail `dtend: null`.
+    let uid = "f25-api-excl-dur";
+    let (status, created) =
+        create_minimal_event(&env, &token, &cid, uid, json!({ "duration": "PT1H" })).await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(created["duration"], "PT1H");
+    assert_eq!(created["dtend"], Value::Null);
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("DURATION:PT1H"), "{stored}");
+    assert!(!stored.contains("DTEND:"), "DTEND invented: {stored}");
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, detail) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {detail}");
+    assert_eq!(detail["dtend"], Value::Null);
+}
+
 // ---------------------------------------------------------------------------
 // F12 — Contact REST endpoints (`/api/v1/collections/{id}/contacts`)
 // ---------------------------------------------------------------------------

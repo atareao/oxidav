@@ -357,7 +357,24 @@ pub async fn update(
     // `PATCH` on an event imported from a native client with, say, a
     // `URL:mailto:…`/`ftp://…` (a scheme outside our allowlist), a `STATUS:x-custom`
     // or an over-long `LOCATION`.
-    let stored = project_event(&existing.raw_payload).ok();
+    // A payload that cannot be projected is tolerated (the merge falls back to
+    // the denormalised columns), but the six F25 properties — which have no
+    // column at all — are silently lost for this `PATCH`: a known residual case
+    // (every row is born from an already-parsed `PUT`/`POST`). Unlike the
+    // response-side `project_stored`, the error is swallowed here, so it is
+    // logged explicitly to keep the loss observable. The control flow is
+    // unchanged: a corrupt row still yields `None` and follows the same path.
+    let stored = match project_event(&existing.raw_payload) {
+        Ok(event) => Some(event),
+        Err(err) => {
+            tracing::warn!(
+                error = ?err,
+                uid = ?existing.uid,
+                "raw_payload no proyectable en PATCH; el merge cae a las columnas y las seis propiedades F25 se pierden"
+            );
+            None
+        }
+    };
 
     let summary = match &request.summary {
         Some(value) => Some(validate_summary(value)?),
