@@ -63,6 +63,33 @@ export interface CalendarEvent {
   updated_at: number
 }
 
+/**
+ * Full, typed projection of an event (`GET .../events/{uid}`, F25).
+ *
+ * Mirror of the backend `EventDetailDto`: a **superset** of {@link CalendarEvent}
+ * that keeps every field the listing exposes (same names and types) and adds the
+ * six properties F25 models — `CATEGORIES`, `ATTACH`, `STATUS`, `CLASS`, `TRANSP`
+ * and `DURATION` — derived at read time from the stored `.ics`. The client never
+ * parses iCalendar itself; these shapes are already-parsed server fields.
+ *
+ * `dtend` is **not** derived from `duration`: an event carrying only a `DURATION`
+ * reports `dtend: null` and its `duration` verbatim.
+ */
+export interface EventDetail extends CalendarEvent {
+  /** `CATEGORIES`, flattened to a single list (one entry per item, in order). */
+  categories: string[]
+  /** `ATTACH` URIs, one entry per occurrence. */
+  attach: string[]
+  /** `STATUS` (`TENTATIVE`/`CONFIRMED`/`CANCELLED`), or `null`. */
+  status: string | null
+  /** `CLASS` (`PUBLIC`/`PRIVATE`/`CONFIDENTIAL` or a client token), or `null`. */
+  class: string | null
+  /** `TRANSP` (`OPAQUE`/`TRANSPARENT`), or `null`. */
+  transp: string | null
+  /** `DURATION`, verbatim (an opaque RFC 5545 duration), or `null`. */
+  duration: string | null
+}
+
 /** Request body for creating a calendar event (`POST .../events`). */
 export interface CreateEventInput {
   summary: string
@@ -80,6 +107,18 @@ export interface CreateEventInput {
   uid?: string
   /** IANA time zone to anchor the event to (e.g. `"Europe/Madrid"`); omit for none. */
   tzid?: string
+  /** `STATUS` (`TENTATIVE`/`CONFIRMED`/`CANCELLED`); omit for none. */
+  status?: string
+  /** `CLASS` (`PUBLIC`/`PRIVATE`/`CONFIDENTIAL`); omit for none. */
+  class?: string
+  /** `TRANSP` (`OPAQUE`/`TRANSPARENT`); omit for none. */
+  transp?: string
+  /** `DURATION`, verbatim (an RFC 5545 duration); exclusive with `dtend`. */
+  duration?: string
+  /** `CATEGORIES` items; omit/empty for none. */
+  categories?: string[]
+  /** `ATTACH` URIs, one line per value; omit/empty for none. */
+  attach?: string[]
 }
 
 /** Request body for a partial update of a calendar event (`PATCH .../events/{uid}`). */
@@ -110,6 +149,22 @@ export interface UpdateEventInput {
    * it back explicitly (the server does not re-derive it from `dtstart`).
    */
   tzid?: string
+  /** `STATUS`; an empty string (`""`) *clears* it. Omit to leave it untouched. */
+  status?: string
+  /** `CLASS`; an empty string (`""`) *clears* it. Omit to leave it untouched. */
+  class?: string
+  /** `TRANSP`; an empty string (`""`) *clears* it. Omit to leave it untouched. */
+  transp?: string
+  /**
+   * `DURATION`; an empty string (`""`) *clears* it (leaving `DTEND` untouched).
+   * A non-empty value sets it and removes `DTEND` (they are exclusive). Omit to
+   * leave it untouched.
+   */
+  duration?: string
+  /** `CATEGORIES`; `[]` *clears* them. Omit to leave them untouched. */
+  categories?: string[]
+  /** `ATTACH` URIs; `[]` *clears* them. Omit to leave them untouched. */
+  attach?: string[]
 }
 
 /**
