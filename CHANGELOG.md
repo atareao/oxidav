@@ -1,4 +1,30 @@
 # Changelog
+## [0.7.0] - 2026-10-29
+
+### Bug Fixes
+
+- La tarjeta no pinta lo que la lista no lleva y el detalle se refresca
+
+### Documentation
+
+- Regenerar el changelog para 0.6.0
+- Registra PLAN-029 (F25), contenido y estado del VEVENT
+- Cierra PLAN-029 (F25) y documenta la feature
+
+### Features
+
+- Proyectar el detalle del VEVENT desde el payload
+- Escribir CATEGORIES, ATTACH, STATUS, CLASS, TRANSP y DURATION
+- El detalle del evento se proyecta al leer y la API hereda las seis
+- El diálogo de edición, con categorías, adjuntos y estado
+
+### Refactor
+
+- Convertir dav/ics.rs en dav/ics/mod.rs
+
+### Testing
+
+- Cobertura de API para las seis y traza del fallo de proyeccion
 ## [0.6.0] - 2026-10-17
 
 ### Documentation
