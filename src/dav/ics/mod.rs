@@ -31,6 +31,10 @@
 //! The structured fields (`UID`, `SUMMARY`, `DESCRIPTION`) come from the
 //! `icalendar` crate; only the time fields are parsed manually.
 
+pub mod projection;
+
+pub use projection::{EventProjection, project_event};
+
 use icalendar::{Calendar, Component, EventLike, Property};
 
 use super::vtimezone;
@@ -313,6 +317,28 @@ pub struct EventFields {
     pub location: Option<String>,
     /// `URL` — a URI, emitted **verbatim** (never escaped), like `RRULE`.
     pub url: Option<String>,
+    /// `CATEGORIES` — a flat list emitted as a **single** content line, items
+    /// joined with `,` and each escaped with [`escape_text`] (so a comma *inside*
+    /// a category is written `\,`). Empty means the property is absent and its
+    /// lines are removed on [`reconcile_ics`].
+    pub categories: Vec<String>,
+    /// `ATTACH` — one content line **per value**, each emitted **verbatim** (a
+    /// URI, like `URL`; never escaped). Empty means the property is absent and
+    /// its lines are removed on [`reconcile_ics`].
+    pub attach: Vec<String>,
+    /// `STATUS` — verbatim (RFC 5545 §3.8.1.11: `TENTATIVE`, `CONFIRMED`,
+    /// `CANCELLED`). `None` means the line is removed on [`reconcile_ics`].
+    pub status: Option<String>,
+    /// `CLASS` — verbatim (RFC 5545 §3.8.1.3: `PUBLIC`, `PRIVATE`,
+    /// `CONFIDENTIAL` or an `x-name`/`iana-token`). `None` means removed.
+    pub class_: Option<String>,
+    /// `TRANSP` — verbatim (RFC 5545 §3.8.2.7: `OPAQUE`, `TRANSPARENT`). `None`
+    /// means removed.
+    pub transp: Option<String>,
+    /// `DURATION` — opaque text, emitted **verbatim** (RFC 5545 §3.3.6 grammar),
+    /// like `RRULE`. Mutually exclusive with `dtend_ms` per RFC 5545; the
+    /// exclusion is enforced by the REST layer, not here. `None` means removed.
+    pub duration: Option<String>,
     /// `DTSTART` as Unix milliseconds (required).
     pub dtstart_ms: i64,
     /// `DTEND` as Unix milliseconds, when present.
@@ -343,12 +369,14 @@ pub struct EventFields {
 /// is spliced in between `PRODID` and `BEGIN:VEVENT`, as RFC 5545 §3.2.19
 /// requires. The zone's reference year is that of `DTSTART`.
 ///
-/// Only genuinely free-text values (`SUMMARY`, `DESCRIPTION`, `LOCATION`) are
-/// escaped per RFC 5545 §3.3.11, since those are the fields the parser
-/// unescapes. Structured values (`UID`, `DTSTART`, `DTEND`, `RRULE`) and the
-/// `URL` (a URI) are emitted verbatim: `RRULE` in particular uses `;` and `=`
-/// as **separators**, so escaping it would corrupt the rule
-/// (`FREQ=WEEKLY;COUNT=3` must stay such, not `FREQ=WEEKLY\;COUNT=3`).
+/// Only genuinely free-text values (`SUMMARY`, `DESCRIPTION`, `LOCATION` and each
+/// `CATEGORIES` item) are escaped per RFC 5545 §3.3.11, since those are the
+/// fields the parser unescapes. Structured values (`UID`, `DTSTART`, `DTEND`,
+/// `RRULE`, `STATUS`, `CLASS`, `TRANSP`, `DURATION`) and the URIs (`URL`,
+/// `ATTACH`) are emitted verbatim: `RRULE` in particular uses `;` and `=` as
+/// **separators**, so escaping it would corrupt the rule
+/// (`FREQ=WEEKLY;COUNT=3` must stay such, not `FREQ=WEEKLY\;COUNT=3`), and an
+/// `ATTACH` URI's commas and `&`/`=` are equally significant.
 /// Every content line is folded at 75 octets (RFC 5545 §3.1) without splitting
 /// a UTF-8 character.
 ///
@@ -376,7 +404,7 @@ pub fn build_ics(fields: &EventFields) -> String {
         }
     }
 
-    let mut body: Vec<String> = Vec::with_capacity(9);
+    let mut body: Vec<String> = Vec::with_capacity(15);
     body.push("BEGIN:VEVENT".to_string());
     body.push(uid_line(&fields.uid));
     body.push(dtstamp_line(fields.dtstamp_ms));
@@ -392,12 +420,30 @@ pub fn build_ics(fields: &EventFields) -> String {
     if let Some(url) = &fields.url {
         body.push(url_line(url));
     }
+    if !fields.categories.is_empty() {
+        body.push(categories_line(&fields.categories));
+    }
+    for uri in &fields.attach {
+        body.push(attach_line(uri));
+    }
     body.push(dtstart_line(fields.dtstart_ms, dtstart_tz));
     if let Some(dtend_ms) = fields.dtend_ms {
         body.push(dtend_line(dtend_ms, dtend_tz));
     }
+    if let Some(duration) = &fields.duration {
+        body.push(duration_line(duration));
+    }
     if let Some(rrule) = &fields.rrule {
         body.push(rrule_line(rrule));
+    }
+    if let Some(status) = &fields.status {
+        body.push(status_line(status));
+    }
+    if let Some(class) = &fields.class_ {
+        body.push(class_line(class));
+    }
+    if let Some(transp) = &fields.transp {
+        body.push(transp_line(transp));
     }
     body.push("END:VEVENT".to_string());
     body.push("END:VCALENDAR".to_string());
@@ -424,19 +470,26 @@ pub fn build_ics(fields: &EventFields) -> String {
 
 /// Property names [`reconcile_ics`] knows, in canonical emission order.
 ///
-/// `LOCATION` and `URL` are modelled fields as of F24: a pre-existing line of
-/// either is reconciled in place (or removed when the final value is `None`),
-/// and both anchor the canonical insertion position of a neighbouring modelled
-/// property.
-const RECONCILE_ORDER: [&str; 8] = [
+/// `LOCATION` and `URL` are modelled fields as of F24; `CATEGORIES`, `ATTACH`,
+/// `STATUS`, `CLASS`, `TRANSP` and `DURATION` join them in F25. A pre-existing
+/// line of any of them is reconciled in place (or removed when the final value
+/// is empty), and they anchor the canonical insertion position of a neighbouring
+/// modelled property.
+const RECONCILE_ORDER: [&str; 14] = [
     "DTSTAMP",
     "SUMMARY",
     "DESCRIPTION",
     "LOCATION",
     "URL",
+    "CATEGORIES",
+    "ATTACH",
     "DTSTART",
     "DTEND",
+    "DURATION",
     "RRULE",
+    "STATUS",
+    "CLASS",
+    "TRANSP",
 ];
 
 /// One **logical** iCalendar content line: its unfolded text plus the physical
@@ -624,6 +677,44 @@ fn url_line(url: &str) -> String {
     format!("URL:{url}")
 }
 
+/// Render the `CATEGORIES` content line as a **single** line: the items joined
+/// with `,`, each escaped with [`escape_text`] so a comma *inside* a category is
+/// written `\,`. The caller guarantees `categories` is non-empty.
+fn categories_line(categories: &[String]) -> String {
+    let joined = categories
+        .iter()
+        .map(|category| escape_text(category))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("CATEGORIES:{joined}")
+}
+
+/// Render one `ATTACH` content line (a URI, emitted verbatim, like `URL`).
+fn attach_line(attach: &str) -> String {
+    format!("ATTACH:{attach}")
+}
+
+/// Render the `STATUS` content line (a structured value, emitted verbatim).
+fn status_line(status: &str) -> String {
+    format!("STATUS:{status}")
+}
+
+/// Render the `CLASS` content line (a structured value, emitted verbatim).
+fn class_line(class: &str) -> String {
+    format!("CLASS:{class}")
+}
+
+/// Render the `TRANSP` content line (a structured value, emitted verbatim).
+fn transp_line(transp: &str) -> String {
+    format!("TRANSP:{transp}")
+}
+
+/// Render the `DURATION` content line (an opaque value, emitted verbatim, like
+/// `RRULE`).
+fn duration_line(duration: &str) -> String {
+    format!("DURATION:{duration}")
+}
+
 /// Render the `DTSTART` content line: `;TZID=<canonical>` with a local time when
 /// `tz` is set, otherwise the UTC rendering.
 fn dtstart_line(dtstart_ms: i64, tz: Option<Tz>) -> String {
@@ -660,12 +751,15 @@ fn rrule_line(rrule: &str) -> String {
 /// Sólo se tocan las propiedades del **nivel superior** del primer `VEVENT` que
 /// cuelga de un `VCALENDAR` (el mismo que elige [`parse_ics`]); un `SUMMARY`
 /// dentro de un `VALARM`, un segundo `VEVENT` o cualquier propiedad no modelada
-/// (`ATTENDEE`, `CATEGORIES`, `X-*`…) se reemiten **verbatim**, con su plegado
-/// original. El conjunto modelado —y por tanto reconciliado— es `SUMMARY`,
-/// `DESCRIPTION`, `LOCATION`, `URL`, `DTSTART`, `DTEND`, `RRULE` y `DTSTAMP`;
-/// `LOCATION` y `URL` se reconcilian igual que el resto (se sustituyen, se
-/// insertan o se eliminan según el valor final). Las únicas líneas regeneradas
-/// son las modeladas ausentes o modificadas.
+/// (`ATTENDEE`, `X-*`…) se reemiten **verbatim**, con su plegado original. El
+/// conjunto modelado —y por tanto reconciliado— es `SUMMARY`, `DESCRIPTION`,
+/// `LOCATION`, `URL`, `CATEGORIES`, `ATTACH`, `DTSTART`, `DTEND`, `DURATION`,
+/// `RRULE`, `STATUS`, `CLASS`, `TRANSP` y `DTSTAMP`. `ATTACH` es **multi-valor**:
+/// la primera ocurrencia se sustituye por el bloque completo de valores (una
+/// línea por cada uno, en orden) y todas las demás se eliminan; `CATEGORIES` es
+/// multi-valor en el payload pero se reconcilia como **una** línea (las
+/// ocurrencias extra se colapsan). Las únicas líneas regeneradas son las
+/// modeladas ausentes o modificadas.
 ///
 /// Si la zona final de `DTSTART`/`DTEND` no está definida en el `VCALENDAR`, se
 /// inserta su bloque `VTIMEZONE` justo antes del `BEGIN:VEVENT` objetivo. Un
@@ -709,8 +803,10 @@ pub fn reconcile_ics(raw: &str, fields: &EventFields) -> Result<String, IcsError
         .map(|(offset, _)| target + 1 + offset)
         .collect();
 
-    // Final rendered value of every modelled property, or `None` when it must be
-    // removed.
+    // Final rendered content of every modelled property: a **block** of one or
+    // more lines, or an empty block when the property must be removed. A
+    // single-valued property yields 0 or 1 line; `ATTACH` yields one line per
+    // value; `CATEGORIES` yields a single joined line.
     let dtstart_tz = fields
         .dtstart_tzid
         .as_deref()
@@ -720,36 +816,130 @@ pub fn reconcile_ics(raw: &str, fields: &EventFields) -> Result<String, IcsError
         .as_deref()
         .and_then(vtimezone::parse_tzid)
         .or(dtstart_tz);
-    let final_values: [(&'static str, Option<String>); 8] = [
-        ("DTSTAMP", Some(dtstamp_line(fields.dtstamp_ms))),
-        ("SUMMARY", fields.summary.as_deref().map(summary_line)),
+    let final_values: [(&'static str, Vec<String>); 14] = [
+        ("DTSTAMP", vec![dtstamp_line(fields.dtstamp_ms)]),
+        (
+            "SUMMARY",
+            fields
+                .summary
+                .as_deref()
+                .map(summary_line)
+                .into_iter()
+                .collect(),
+        ),
         (
             "DESCRIPTION",
-            fields.description.as_deref().map(description_line),
+            fields
+                .description
+                .as_deref()
+                .map(description_line)
+                .into_iter()
+                .collect(),
         ),
-        ("LOCATION", fields.location.as_deref().map(location_line)),
-        ("URL", fields.url.as_deref().map(url_line)),
-        ("DTSTART", Some(dtstart_line(fields.dtstart_ms, dtstart_tz))),
-        ("DTEND", fields.dtend_ms.map(|ms| dtend_line(ms, dtend_tz))),
-        ("RRULE", fields.rrule.as_deref().map(rrule_line)),
+        (
+            "LOCATION",
+            fields
+                .location
+                .as_deref()
+                .map(location_line)
+                .into_iter()
+                .collect(),
+        ),
+        (
+            "URL",
+            fields.url.as_deref().map(url_line).into_iter().collect(),
+        ),
+        (
+            "CATEGORIES",
+            if fields.categories.is_empty() {
+                Vec::new()
+            } else {
+                vec![categories_line(&fields.categories)]
+            },
+        ),
+        (
+            "ATTACH",
+            fields
+                .attach
+                .iter()
+                .map(|attach| attach_line(attach))
+                .collect(),
+        ),
+        ("DTSTART", vec![dtstart_line(fields.dtstart_ms, dtstart_tz)]),
+        (
+            "DTEND",
+            fields
+                .dtend_ms
+                .map(|ms| dtend_line(ms, dtend_tz))
+                .into_iter()
+                .collect(),
+        ),
+        (
+            "DURATION",
+            fields
+                .duration
+                .as_deref()
+                .map(duration_line)
+                .into_iter()
+                .collect(),
+        ),
+        (
+            "RRULE",
+            fields
+                .rrule
+                .as_deref()
+                .map(rrule_line)
+                .into_iter()
+                .collect(),
+        ),
+        (
+            "STATUS",
+            fields
+                .status
+                .as_deref()
+                .map(status_line)
+                .into_iter()
+                .collect(),
+        ),
+        (
+            "CLASS",
+            fields
+                .class_
+                .as_deref()
+                .map(class_line)
+                .into_iter()
+                .collect(),
+        ),
+        (
+            "TRANSP",
+            fields
+                .transp
+                .as_deref()
+                .map(transp_line)
+                .into_iter()
+                .collect(),
+        ),
     ];
 
-    let mut replace: BTreeMap<usize, String> = BTreeMap::new();
+    let mut replace: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     let mut remove: BTreeSet<usize> = BTreeSet::new();
     let mut insertions: BTreeMap<usize, Vec<&'static str>> = BTreeMap::new();
 
-    for (name, value) in &final_values {
+    for (name, values) in &final_values {
         let occurrences: Vec<usize> = top_level_props
             .iter()
             .copied()
             .filter(|&index| property_name(&lines[index].text).eq_ignore_ascii_case(name))
             .collect();
-        match value {
-            Some(new_line) => match occurrences.split_first() {
-                // Replace the first occurrence in place; duplicates are invalid
-                // per RFC 5545 and the new value wins, so drop the rest.
+        match values.split_first() {
+            Some(_) => match occurrences.split_first() {
+                // Replace the first occurrence with the whole block; duplicates
+                // are invalid per RFC 5545 and the new value wins, so drop the
+                // rest. For `ATTACH` this is the multi-value rule: the first
+                // occurrence becomes the full list (one line per value) and
+                // every other occurrence is removed.
                 Some((&first, rest)) => {
-                    replace.insert(first, new_line.clone());
+                    replace.insert(first, values.clone());
                     remove.extend(rest);
                 }
                 // No occurrence: insert at the canonical position.
@@ -793,14 +983,13 @@ pub fn reconcile_ics(raw: &str, fields: &EventFields) -> Result<String, IcsError
         let mut names = names.clone();
         names.sort_by_key(|name| canonical_rank(name).unwrap_or(usize::MAX));
         for name in names {
-            if let Some(line) = final_values.iter().find_map(|(known, value)| {
-                if *known == name {
-                    value.as_deref()
-                } else {
-                    None
+            if let Some(lines) = final_values
+                .iter()
+                .find_map(|(known, values)| if *known == name { Some(values) } else { None })
+            {
+                for line in lines {
+                    super::common::fold_content_line(line, out);
                 }
-            }) {
-                super::common::fold_content_line(line, out);
             }
         }
     };
@@ -818,7 +1007,11 @@ pub fn reconcile_ics(raw: &str, fields: &EventFields) -> Result<String, IcsError
             continue;
         }
         match replace.get(&index) {
-            Some(new_line) => super::common::fold_content_line(new_line, &mut out),
+            Some(new_lines) => {
+                for new_line in new_lines {
+                    super::common::fold_content_line(new_line, &mut out);
+                }
+            }
             None => {
                 for physical in &line.physical {
                     out.push_str(physical);
@@ -1315,6 +1508,13 @@ mod tests {
             rrule: Some("FREQ=WEEKLY;COUNT=3".to_string()),
             dtstart_tzid: None,
             dtend_tzid: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1345,6 +1545,13 @@ mod tests {
             rrule: Some("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;COUNT=3".to_string()),
             dtstart_tzid: None,
             dtend_tzid: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1378,6 +1585,13 @@ mod tests {
             rrule: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1408,6 +1622,13 @@ mod tests {
             rrule: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1433,6 +1654,13 @@ mod tests {
             rrule: None,
             dtstart_tzid: None,
             dtend_tzid: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 0,
         };
 
@@ -1457,6 +1685,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1494,6 +1729,13 @@ mod tests {
             dtstart_tzid: Some("Europe/Madrid".to_string()),
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_493_200_000,
         };
 
@@ -1540,6 +1782,13 @@ mod tests {
             dtstart_tzid: Some("Europe/Madrid".to_string()),
             dtend_tzid: Some("Asia/Tokyo".to_string()),
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_493_200_000,
         };
 
@@ -1561,9 +1810,10 @@ mod tests {
     /// A rich `.ics` payload — the trap fixture of PLAN-028. It carries a
     /// `VALARM` with **its own** `SUMMARY` (`SUMMARY:Recordatorio`, *not* the
     /// event's), two `ATTENDEE` lines, `CATEGORIES`, `LOCATION` and an `X-`
-    /// property. As of F24 `LOCATION` **is** modelled (it is reconciled like the
-    /// other modelled fields); `ATTENDEE`, `CATEGORIES`, `X-*` and `VALARM` are
-    /// not, so they must survive only by passing through verbatim.
+    /// property. As of F24 `LOCATION` **is** modelled and as of F25 `CATEGORIES`
+    /// **is too** (both are reconciled like the other modelled fields);
+    /// `ATTENDEE`, `X-*` and `VALARM` are not, so they must survive only by
+    /// passing through verbatim.
     const RICH_ICS: &str = concat!(
         "BEGIN:VCALENDAR\r\n",
         "VERSION:2.0\r\n",
@@ -1592,11 +1842,12 @@ mod tests {
     /// The `EventFields` used across the `reconcile_ics` tests: every modelled
     /// value equals the fixture's, except `summary`, which is replaced.
     ///
-    /// `LOCATION` is modelled as of F24 and the fixture carries `LOCATION:Sala 3`,
-    /// so `location` **is** set here: the E1/E2 tests then assert that the line
-    /// survives because the (unchanged) modelled value renders it back identically.
-    /// The properties that are genuinely unmodelled — and therefore only pass
-    /// through verbatim — are `ATTENDEE`, `CATEGORIES`, `X-*` and `VALARM`.
+    /// `LOCATION` is modelled as of F24 and `CATEGORIES` as of F25, and the
+    /// fixture carries `LOCATION:Sala 3` and `CATEGORIES:Reunion,Trabajo`, so both
+    /// **are** set here: the E1/E2 tests then assert that those lines survive
+    /// because the (unchanged) modelled values render them back identically. The
+    /// properties that are genuinely unmodelled — and therefore only pass through
+    /// verbatim — are `ATTENDEE`, `X-*` and `VALARM`.
     fn reconcile_fields(summary: Option<&str>) -> EventFields {
         EventFields {
             uid: "rich@oxidav".to_string(),
@@ -1609,6 +1860,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            // F25: la tarea de API los cablea.
+            categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
+            attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
         }
     }
@@ -1622,12 +1880,13 @@ mod tests {
         let out = reconcile_ics(RICH_ICS, &fields).expect("reconcile");
 
         assert!(out.contains("SUMMARY:Nuevo titulo"), "{out}");
-        // `LOCATION` is now a modelled field: it survives because the reconciled
-        // value renders the very same line back, not by pass-through.
+        // `LOCATION` is a modelled field as of F24 and `CATEGORIES` as of F25:
+        // both survive because the reconciled values render the very same lines
+        // back, not by pass-through.
         assert!(out.contains("LOCATION:Sala 3"), "{out}");
-        // These are genuinely unmodelled, so they survive only by pass-through:
-        // `CATEGORIES`, `X-*`, both `ATTENDEE` lines and the `VALARM` below.
         assert!(out.contains("CATEGORIES:Reunion,Trabajo"), "{out}");
+        // These are genuinely unmodelled, so they survive only by pass-through:
+        // `X-*`, both `ATTENDEE` lines and the `VALARM` below.
         assert!(out.contains("X-CUSTOM-PROP:valor-propio"), "{out}");
         // Both `ATTENDEE` lines, with their parameters, must survive verbatim.
         assert!(
@@ -1725,6 +1984,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1786,6 +2052,13 @@ mod tests {
             dtstart_tzid: Some("Asia/Tokyo".to_string()),
             dtend_tzid: Some("Asia/Tokyo".to_string()),
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1822,6 +2095,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1858,6 +2138,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1892,6 +2179,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1929,6 +2223,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -1993,6 +2294,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -2016,6 +2324,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -2043,6 +2358,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -2077,6 +2399,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -2113,6 +2442,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -2145,6 +2481,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            // F25: la tarea de API los cablea.
+            categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
+            attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -2160,6 +2503,8 @@ mod tests {
         // The rest of the payload is untouched.
         assert!(out.contains("SUMMARY:Original"), "{out}");
         assert!(out.contains("DESCRIPTION:Una descripcion"), "{out}");
+        // `CATEGORIES` is modelled as of F25 and survives because the reconciled
+        // value renders the very same line back.
         assert!(out.contains("CATEGORIES:Reunion,Trabajo"), "{out}");
         assert!(out.contains("X-CUSTOM-PROP:valor-propio"), "{out}");
         assert!(out.contains("BEGIN:VALARM"), "{out}");
@@ -2181,6 +2526,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            // F25: la tarea de API los cablea.
+            categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
+            attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -2218,6 +2570,13 @@ mod tests {
             dtstart_tzid: None,
             dtend_tzid: None,
             rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
         };
 
@@ -2232,5 +2591,355 @@ mod tests {
             .expect("a URL line");
         let dtstart = out.find("DTSTART:").expect("a DTSTART line");
         assert!(location < url && url < dtstart, "{out}");
+    }
+
+    // -- F25 — the six new properties: compose, canonical order and multi-value
+    // reconciliation (PLAN-029, tasks 4-5) -------------------------------------
+
+    #[test]
+    fn build_ics_emits_categories_escaped_and_attach_verbatim() {
+        let fields = EventFields {
+            uid: "f25-cat-attach@oxidav".to_string(),
+            summary: None,
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: vec!["trabajo".to_string(), "con, coma".to_string()],
+            attach: vec![
+                "https://a.example/x".to_string(),
+                "https://b.example/y&z,w".to_string(),
+            ],
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let raw = build_ics(&fields);
+
+        // One `CATEGORIES` line, each item escaped: the comma *inside* the second
+        // item becomes `\,`, the separating comma stays a bare `,`.
+        assert!(raw.contains("CATEGORIES:trabajo,con\\, coma\r\n"), "{raw}");
+        assert_eq!(raw.matches("CATEGORIES:").count(), 1, "{raw}");
+        // One `ATTACH` line per value, emitted verbatim: the `&`, the `,` and the
+        // `=` of the URIs are untouched.
+        assert!(raw.contains("ATTACH:https://a.example/x\r\n"), "{raw}");
+        assert!(raw.contains("ATTACH:https://b.example/y&z,w\r\n"), "{raw}");
+        assert_eq!(raw.matches("ATTACH:").count(), 2, "{raw}");
+    }
+
+    #[test]
+    fn build_ics_omits_the_new_properties_when_empty_is_byte_identical() {
+        let fields = EventFields {
+            uid: "f25-identity@oxidav".to_string(),
+            summary: Some("Plain".to_string()),
+            description: Some("Una descripcion".to_string()),
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        // The hard contract: with the six new fields empty the output is exactly
+        // the pre-F25 bytes.
+        let expected = concat!(
+            "BEGIN:VCALENDAR\r\n",
+            "VERSION:2.0\r\n",
+            "PRODID:-//oxidav//oxidav//EN\r\n",
+            "BEGIN:VEVENT\r\n",
+            "UID:f25-identity@oxidav\r\n",
+            "DTSTAMP:20240315T100000Z\r\n",
+            "SUMMARY:Plain\r\n",
+            "DESCRIPTION:Una descripcion\r\n",
+            "DTSTART:20240315T100000Z\r\n",
+            "DTEND:20240315T110000Z\r\n",
+            "END:VEVENT\r\n",
+            "END:VCALENDAR\r\n",
+        );
+
+        assert_eq!(build_ics(&fields), expected);
+    }
+
+    #[test]
+    fn build_ics_places_the_new_properties_in_canonical_order() {
+        let fields = EventFields {
+            uid: "f25-order@oxidav".to_string(),
+            summary: None,
+            description: None,
+            location: None,
+            url: Some("https://x.org".to_string()),
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: Some("FREQ=DAILY".to_string()),
+            status: Some("CONFIRMED".to_string()),
+            class_: Some("PRIVATE".to_string()),
+            transp: Some("TRANSPARENT".to_string()),
+            duration: None,
+            categories: vec!["trabajo".to_string()],
+            attach: vec!["https://a.example/x".to_string()],
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let raw = build_ics(&fields);
+
+        let url = raw.find("URL:https://x.org").expect("a URL line");
+        let categories = raw.find("CATEGORIES:").expect("a CATEGORIES line");
+        let attach = raw.find("ATTACH:").expect("an ATTACH line");
+        let dtstart = raw.find("DTSTART:").expect("a DTSTART line");
+        assert!(
+            url < categories && categories < attach && attach < dtstart,
+            "expected URL < CATEGORIES < ATTACH < DTSTART:\n{raw}"
+        );
+
+        let rrule = raw.find("RRULE:").expect("an RRULE line");
+        let status = raw.find("STATUS:").expect("a STATUS line");
+        let class = raw.find("CLASS:").expect("a CLASS line");
+        let transp = raw.find("TRANSP:").expect("a TRANSP line");
+        assert!(
+            rrule < status && status < class && class < transp,
+            "expected RRULE < STATUS < CLASS < TRANSP:\n{raw}"
+        );
+    }
+
+    #[test]
+    fn reconcile_replaces_attach_block_and_drops_the_extra_occurrences() {
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:attach@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Con adjuntos\r\n\
+             ATTACH:https://a.example/x\r\n\
+             ATTACH:https://b.example/y\r\n\
+             ATTACH:https://c.example/z\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "attach@oxidav".to_string(),
+            summary: Some("Con adjuntos".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: vec![
+                "https://a.example/x".to_string(),
+                "https://zz.example/w".to_string(),
+            ],
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        // The first occurrence becomes the whole block, in order; the two extra
+        // occurrences are gone.
+        let attaches: Vec<&str> = out
+            .lines()
+            .filter(|line| line.starts_with("ATTACH:"))
+            .collect();
+        assert_eq!(
+            attaches,
+            vec!["ATTACH:https://a.example/x", "ATTACH:https://zz.example/w"],
+            "{out}"
+        );
+        // Nothing else moves.
+        assert!(out.contains("SUMMARY:Con adjuntos\r\n"), "{out}");
+        assert!(out.contains("DTSTART:20240315T100000Z\r\n"), "{out}");
+        assert!(!out.contains("https://b.example/y"), "{out}");
+        assert!(!out.contains("https://c.example/z"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_clears_attach_and_categories_when_empty() {
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:clr@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Con extras\r\n\
+             CATEGORIES:trabajo,personal\r\n\
+             ATTACH:https://a.example/x\r\n\
+             ATTACH:https://b.example/y\r\n\
+             X-CUSTOM:keep-me\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\n\
+             SUMMARY:Recordatorio\r\nEND:VALARM\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "clr@oxidav".to_string(),
+            summary: Some("Con extras".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(!out.contains("CATEGORIES:"), "{out}");
+        assert!(!out.contains("ATTACH:"), "{out}");
+        // Everything else — the `X-` property and the whole `VALARM` — survives.
+        assert!(out.contains("X-CUSTOM:keep-me\r\n"), "{out}");
+        assert!(out.contains("BEGIN:VALARM"), "{out}");
+        assert!(out.contains("TRIGGER:-PT15M"), "{out}");
+        assert!(out.contains("SUMMARY:Recordatorio"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_replaces_categories_collapsing_two_lines_into_one() {
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:cat@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Con categorias\r\n\
+             CATEGORIES:trabajo\r\n\
+             CATEGORIES:personal\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "cat@oxidav".to_string(),
+            summary: Some("Con categorias".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: vec!["trabajo".to_string(), "personal".to_string()],
+            attach: Vec::new(),
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        // The two legacy `CATEGORIES` lines collapse into a single one.
+        assert_eq!(out.matches("CATEGORIES:").count(), 1, "{out}");
+        assert!(out.contains("CATEGORIES:trabajo,personal\r\n"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_keeps_the_new_properties_when_fields_carry_them() {
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:f25-keep@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Original\r\n\
+             DESCRIPTION:Una descripcion\r\n\
+             LOCATION:Sala 3\r\n\
+             CATEGORIES:Reunion,Trabajo\r\n\
+             STATUS:CONFIRMED\r\n\
+             CLASS:PRIVATE\r\n\
+             TRANSP:TRANSPARENT\r\n\
+             DURATION:PT1H\r\n\
+             ATTACH:https://a.example/x\r\n\
+             ATTACH:https://b.example/y\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             DTEND:20240315T110000Z\r\n\
+             BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\n\
+             SUMMARY:Recordatorio\r\nEND:VALARM\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "f25-keep@oxidav".to_string(),
+            summary: Some("Nuevo".to_string()),
+            description: Some("Una descripcion".to_string()),
+            location: Some("Sala 3".to_string()),
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            status: Some("CONFIRMED".to_string()),
+            class_: Some("PRIVATE".to_string()),
+            transp: Some("TRANSPARENT".to_string()),
+            duration: Some("PT1H".to_string()),
+            categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
+            attach: vec![
+                "https://a.example/x".to_string(),
+                "https://b.example/y".to_string(),
+            ],
+            dtstamp_ms: 1_710_496_800_000,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        // The F24 lesson: when `fields` carries the new values, only `SUMMARY`
+        // and `DTSTAMP` differ, line for line.
+        let before: Vec<&str> = raw.lines().collect();
+        let after: Vec<&str> = out.lines().collect();
+        assert_eq!(before.len(), after.len(), "line count changed:\n{out}");
+        let diffs: Vec<&str> = before
+            .iter()
+            .zip(&after)
+            .filter(|(before, after)| before != after)
+            .map(|(before, _)| *before)
+            .collect();
+        assert_eq!(diffs.len(), 2, "only SUMMARY/DTSTAMP may change:\n{out}");
+        assert!(
+            diffs.iter().any(|line| line.starts_with("SUMMARY:")),
+            "{diffs:?}"
+        );
+        assert!(
+            diffs.iter().any(|line| line.starts_with("DTSTAMP:")),
+            "{diffs:?}"
+        );
+
+        // With the six empty in `fields`, those lines disappear — correct, and
+        // the reason the REST API inherits them from the payload before
+        // reconciling.
+        let mut cleared = fields.clone();
+        cleared.status = None;
+        cleared.class_ = None;
+        cleared.transp = None;
+        cleared.duration = None;
+        cleared.categories = Vec::new();
+        cleared.attach = Vec::new();
+        let cleared_out = reconcile_ics(&raw, &cleared).expect("reconcile");
+        for absent in [
+            "STATUS:",
+            "CLASS:",
+            "TRANSP:",
+            "DURATION:",
+            "CATEGORIES:",
+            "ATTACH:",
+        ] {
+            assert!(
+                !cleared_out.contains(absent),
+                "{absent} should be gone:\n{cleared_out}"
+            );
+        }
     }
 }

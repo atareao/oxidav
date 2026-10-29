@@ -27,9 +27,12 @@ import {
   Flex,
   Form,
   Input,
+  InputNumber,
   Modal,
   Popconfirm,
+  Radio,
   Select,
+  Skeleton,
   Space,
   Typography,
 } from 'antd'
@@ -44,11 +47,18 @@ import {
   useState,
   useOptimistic,
 } from 'react'
+import { useEventDetail } from '../hooks/useEventDetail'
 import { useEvents } from '../hooks/useEvents'
 import { toErrorMessage } from '../services/api'
 import { listCalendarCollections } from '../services/collections'
 import { createEvent, deleteEvent, updateEvent } from '../services/events'
-import type { CalendarEvent, Collection, CreateEventInput, UpdateEventInput } from '../types/api'
+import type {
+  CalendarEvent,
+  Collection,
+  CreateEventInput,
+  EventDetail,
+  UpdateEventInput,
+} from '../types/api'
 import {
   addMonths,
   buildMonthGrid,
@@ -71,6 +81,160 @@ const timeFormatter = new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute
 
 function formatTime(ms: number | null): string {
   return ms === null ? 'Todo el día' : timeFormatter.format(new Date(ms))
+}
+
+// ---------------------------------------------------------------------------
+// F25 — STATUS / CLASS / TRANSP white lists (mirror of the server, PLAN-029)
+// ---------------------------------------------------------------------------
+
+const STATUS_OPTIONS = [
+  { value: 'TENTATIVE', label: 'Tentativo' },
+  { value: 'CONFIRMED', label: 'Confirmado' },
+  { value: 'CANCELLED', label: 'Cancelado' },
+]
+
+const CLASS_OPTIONS = [
+  { value: 'PUBLIC', label: 'Público' },
+  { value: 'PRIVATE', label: 'Privado' },
+  { value: 'CONFIDENTIAL', label: 'Confidencial' },
+]
+
+const TRANSP_OPTIONS = [
+  { value: 'OPAQUE', label: 'Ocupado (opaco)' },
+  { value: 'TRANSPARENT', label: 'Libre (transparente)' },
+]
+
+/** Unit a composed `DURATION` is built from: `PT15M`, `PT2H`, `P1D`. */
+type DurationUnit = 'minutes' | 'hours' | 'days'
+
+const DURATION_UNIT_OPTIONS = [
+  { value: 'minutes', label: 'minutos' },
+  { value: 'hours', label: 'horas' },
+  { value: 'days', label: 'días' },
+]
+
+/**
+ * Decompose a `DURATION` into a single number + unit, when possible.
+ *
+ * Only the three shapes the form can compose are recognised (`P1D`, `PT2H`,
+ * `PT15M`). Anything else (e.g. `P1DT2H`, `PT1H30M`) is **not** decomposable:
+ * the dialog shows it verbatim and refuses to rewrite it unless the user
+ * changes it — the rule that keeps D2 from silently turning a composed value
+ * into an invented one.
+ */
+function decomposeDuration(raw: string): { value: number; unit: DurationUnit } | null {
+  let match = /^P(\d+)D$/.exec(raw)
+  if (match !== null) {
+    return { value: Number(match[1]), unit: 'days' }
+  }
+  match = /^PT(\d+)H$/.exec(raw)
+  if (match !== null) {
+    return { value: Number(match[1]), unit: 'hours' }
+  }
+  match = /^PT(\d+)M$/.exec(raw)
+  if (match !== null) {
+    return { value: Number(match[1]), unit: 'minutes' }
+  }
+  return null
+}
+
+/** Compose an RFC 5545 `DURATION` from a positive integer + unit; `null` otherwise. */
+function composeDuration(value: number | null | undefined, unit: string | undefined): string | null {
+  if (value === null || value === undefined || unit === undefined) {
+    return null
+  }
+  const size = Math.trunc(value)
+  if (!Number.isFinite(size) || size <= 0) {
+    return null
+  }
+  switch (unit) {
+    case 'minutes':
+      return `PT${size}M`
+    case 'hours':
+      return `PT${size}H`
+    case 'days':
+      return `P${size}D`
+    default:
+      return null
+  }
+}
+
+/**
+ * Milliseconds a `DURATION` stands for, or `null` when it cannot be read.
+ *
+ * Used **only to paint** an end on the card when the event carries no `DTEND`
+ * (F14). The derived instant is never sent: `DURATION` and `DTEND` are
+ * exclusive and the server only ever learns the user's explicit choice.
+ */
+function durationToMs(raw: string): number | null {
+  const match = /^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(raw)
+  if (match === null) {
+    return null
+  }
+  const [, weeks, days, hours, minutes, seconds] = match
+  if (
+    weeks === undefined &&
+    days === undefined &&
+    hours === undefined &&
+    minutes === undefined &&
+    seconds === undefined
+  ) {
+    return null
+  }
+  return (
+    ((Number(weeks ?? 0) * 7 + Number(days ?? 0)) * 24 * 60 + Number(hours ?? 0) * 60 + Number(minutes ?? 0)) *
+      60_000 +
+    Number(seconds ?? 0) * 1000
+  )
+}
+
+/** Structural equality used for D2's "only send what changed" on lists. */
+function sameStringArray(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index])
+}
+
+/**
+ * Build the edit form's initial values from the loaded detail (never from the
+ * light list row, which lacks the six F25 properties).
+ *
+ * The duration radio opens on «Dura…» when the event carries a `DURATION`. A
+ * decomposable value pre-fills the number+unit; a non-decomposable one (e.g.
+ * `P1DT2H`) leaves them empty on purpose — the raw text is shown as-is and is
+ * not rewritten unless the user changes it.
+ */
+function formValuesFromDetail(detail: EventDetail): EventFormValues {
+  const start = detail.dtstart === null ? dayjs() : dayjs(detail.dtstart)
+  let end = detail.dtend === null ? start.add(1, 'hour') : dayjs(detail.dtend)
+  let durationMode: 'end' | 'duration' = 'end'
+  let durationValue: number | undefined
+  let durationUnit: DurationUnit | undefined
+  if (detail.duration !== null) {
+    durationMode = 'duration'
+    const decomposed = decomposeDuration(detail.duration)
+    if (decomposed !== null) {
+      durationValue = decomposed.value
+      durationUnit = decomposed.unit
+      const ms = durationToMs(detail.duration)
+      if (ms !== null) {
+        end = start.add(ms, 'millisecond')
+      }
+    }
+  }
+  return {
+    summary: detail.summary ?? '',
+    description: detail.description ?? '',
+    location: detail.location ?? '',
+    url: detail.url ?? '',
+    range: [start, end],
+    status: detail.status ?? undefined,
+    class: detail.class ?? undefined,
+    transp: detail.transp ?? undefined,
+    categories: detail.categories,
+    attach: detail.attach,
+    durationMode,
+    durationValue,
+    durationUnit,
+  }
 }
 
 /**
@@ -96,13 +260,25 @@ interface EventFormValues {
   location?: string
   url?: string
   range: [Dayjs, Dayjs]
+  status?: string
+  class?: string
+  transp?: string
+  categories?: string[]
+  attach?: string[]
+  /** Which end wins: an explicit `dtend` (`end`) or a `duration` (`duration`). */
+  durationMode: 'end' | 'duration'
+  /** Magnitude for the composed `DURATION`; empty when not decomposable. */
+  durationValue?: number
+  /** Unit for the composed `DURATION`. */
+  durationUnit?: DurationUnit
 }
 
 /** Fields the optimistic layer may rewrite on an existing event. */
 type EventChanges = Pick<
   CalendarEvent,
   'summary' | 'description' | 'location' | 'url' | 'dtstart' | 'dtend' | 'dtstart_tzid' | 'dtend_tzid'
->
+> &
+  Partial<Pick<EventDetail, 'status' | 'class' | 'transp' | 'categories' | 'attach' | 'duration'>>
 
 /**
  * Is `value` safe to render as a clickable link? The server already allowlists
@@ -163,8 +339,31 @@ function validateUrlValue(value: unknown, baseline: string): string | null {
   return null
 }
 
+/** Sentinel `baseline` that no real value can equal, forcing full validation. */
+const NO_ATTACH_BASELINE = '\u0000'
+
+/**
+ * Validate one `ATTACH` value with the **same** scheme/whitespace frontier as
+ * {@link validateUrlValue}, but per item of a list.
+ *
+ * An inherited value (one of the URIs the dialog opened with) is accepted
+ * verbatim, mirroring the server: an `ATTACH:mailto:…` an imported `.ics`
+ * already carries is preserved. A value the user changed or added is a new
+ * boundary crossing and must be an absolute `http://`/`https://` URI.
+ */
+function validateAttachValue(value: unknown, baselines: string[]): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  const trimmed = value.trim()
+  if (trimmed === '' || baselines.includes(trimmed)) {
+    return null
+  }
+  return validateUrlValue(trimmed, NO_ATTACH_BASELINE)
+}
+
 type OptimisticAction =
-  | { kind: 'create'; event: CalendarEvent }
+  | { kind: 'create'; event: CalendarEvent & Partial<EventDetail> }
   | { kind: 'update'; uid: string; changes: EventChanges }
   | { kind: 'delete'; uid: string }
 
@@ -261,6 +460,26 @@ export function Calendar() {
 
   const [optimisticEvents, addOptimistic] = useOptimistic(events, applyOptimistic)
 
+  // El diálogo de edición necesita el detalle **completo** (la fila ligera de la
+  // lista no trae `categories`/`attach`/`status`/…), así que tiene su propia
+  // petición, independiente de la lista. En alta (`editing === null`) no pide nada.
+  // El `etag` entra en el objetivo para que guardar invalide el detalle cacheado:
+  // tras el `PATCH` la lista consolida la fila con un `etag` nuevo, y reabrir el
+  // mismo evento vuelve a pedir el detalle en lugar de mostrar el obsoleto.
+  const editTarget = useMemo(() => {
+    if (editing === null || effectiveCollectionId === null) {
+      return null
+    }
+    return { collectionId: effectiveCollectionId, uid: editing.uid, etag: editing.etag }
+  }, [editing, effectiveCollectionId])
+
+  const {
+    detail: editDetail,
+    loading: editDetailLoading,
+    error: editDetailError,
+    reload: reloadEditDetail,
+  } = useEventDetail(editTarget)
+
   const days = useMemo(() => buildMonthGrid(month), [month])
 
   const eventsByDay = useMemo(() => {
@@ -321,6 +540,22 @@ export function Calendar() {
       const hasLocation = location.length > 0
       const url = (values.url ?? '').trim()
       const hasUrl = url.length > 0
+      // F25 fields. The scalars use `''` as "unset" (the server clears on a
+      // blank value); the lists compare by value (D2).
+      const status = values.status ?? ''
+      const eventClass = values.class ?? ''
+      const transp = values.transp ?? ''
+      const categories = values.categories ?? []
+      const attach = (values.attach ?? [])
+        .map((item) => (item ?? '').trim())
+        .filter((item) => item.length > 0)
+      // `DURATION`/`DTEND` are exclusive (RFC 5545 / plan's D2): the radio decides
+      // which one is authoritative and the other is *never* sent.
+      const durationMode = values.durationMode ?? 'end'
+      const composedDuration =
+        durationMode === 'duration'
+          ? composeDuration(values.durationValue, values.durationUnit)
+          : null
       setMutationError(null)
       savingRef.current = true
       setSaving(true)
@@ -336,6 +571,9 @@ export function Calendar() {
         // recurrence repeats in local wall-clock time (F18).
         const tzid = browserTimeZone()
         const optimisticId = tempId()
+        // With a duration the optimistic event paints the end derived locally;
+        // this instant is display-only and is never sent.
+        const durationMs = composedDuration === null ? null : durationToMs(composedDuration)
         startTransition(async () => {
           addOptimistic({
             kind: 'create',
@@ -348,17 +586,23 @@ export function Calendar() {
               location: hasLocation ? location : null,
               url: hasUrl ? url : null,
               dtstart,
-              dtend,
+              dtend: durationMode === 'end' ? dtend : durationMs === null ? null : dtstart + durationMs,
               dtstart_tzid: tzid ?? null,
               dtend_tzid: tzid ?? null,
               rrule: null,
               etag: '',
               created_at: Date.now(),
               updated_at: Date.now(),
+              status: status === '' ? null : status,
+              class: eventClass === '' ? null : eventClass,
+              transp: transp === '' ? null : transp,
+              categories,
+              attach,
+              duration: durationMode === 'duration' ? composedDuration : null,
             },
           })
           try {
-            const input: CreateEventInput = { summary: values.summary, dtstart, dtend }
+            const input: CreateEventInput = { summary: values.summary, dtstart }
             if (hasDescription) {
               input.description = description
             }
@@ -371,6 +615,26 @@ export function Calendar() {
             }
             if (tzid !== undefined) {
               input.tzid = tzid
+            }
+            if (durationMode === 'end') {
+              input.dtend = dtend
+            } else if (composedDuration !== null) {
+              input.duration = composedDuration
+            }
+            if (status !== '') {
+              input.status = status
+            }
+            if (eventClass !== '') {
+              input.class = eventClass
+            }
+            if (transp !== '') {
+              input.transp = transp
+            }
+            if (categories.length > 0) {
+              input.categories = categories
+            }
+            if (attach.length > 0) {
+              input.attach = attach
             }
             const created = await createEvent(collectionId, input)
             setEvents((previous) => [...previous, created])
@@ -387,11 +651,34 @@ export function Calendar() {
       }
 
       const target = editing
+      const original = editDetail
+      // The form is only mounted once the detail has loaded, so this is a
+      // defensive guard rather than a reachable path.
+      if (original === null) {
+        finish()
+        return
+      }
       // Editing must NOT re-anchor the event: `dtstart` is a fixed instant, so
       // re-anchoring (say) a `Europe/Madrid` event to the browser zone would
       // silently change the local time of its recurrence. Preserve the existing
       // anchor; when the event has none, omit `tzid` rather than invent one.
       const anchorTzid = target.dtstart_tzid
+      // `DURATION` is only sent when the user actually changed it. A value that
+      // does not decompose into one number+unit (e.g. `P1DT2H`) is shown verbatim
+      // and left untouched — sending a recomposed/rounded value would rewrite it
+      // silently. Switching to «Termina a las…» sends `dtend` instead, and the
+      // server drops the `DURATION` (they are exclusive).
+      let durationInput: string | undefined
+      if (durationMode === 'duration') {
+        if (composedDuration !== null) {
+          if (composedDuration !== (original.duration ?? '')) {
+            durationInput = composedDuration
+          }
+        } else if (original.duration !== null && decomposeDuration(original.duration) !== null) {
+          // The user emptied a duration the form had decomposed: clear it.
+          durationInput = ''
+        }
+      }
       startTransition(async () => {
         addOptimistic({
           kind: 'update',
@@ -402,13 +689,24 @@ export function Calendar() {
             location: hasLocation ? location : null,
             url: hasUrl ? url : null,
             dtstart,
-            dtend,
+            dtend: durationMode === 'end' ? dtend : null,
             dtstart_tzid: anchorTzid,
             dtend_tzid: target.dtend_tzid,
+            status: status === '' ? null : status,
+            class: eventClass === '' ? null : eventClass,
+            transp: transp === '' ? null : transp,
+            categories,
+            attach,
+            duration: durationMode === 'duration' ? composedDuration : null,
           },
         })
         try {
-          const input: UpdateEventInput = { summary: values.summary, dtstart, dtend }
+          const input: UpdateEventInput = { summary: values.summary, dtstart }
+          if (durationMode === 'end') {
+            input.dtend = dtend
+          } else if (durationInput !== undefined) {
+            input.duration = durationInput
+          }
           // D2 (PLAN-028): `description`/`location`/`url` are sent **only** when
           // they differ from the value the dialog opened with. An old row written
           // by DAV may carry a `LOCATION`/`URL` the column does not know yet, so
@@ -419,14 +717,31 @@ export function Calendar() {
           // The comparison is between *trimmed* values on both sides, so a legacy
           // value carrying a stray space that the user never touched counts as
           // "unchanged" and is preserved verbatim in the `.ics`.
-          if (description !== (target.description ?? '').trim()) {
+          if (description !== (original.description ?? '').trim()) {
             input.description = description
           }
-          if (location !== (target.location ?? '').trim()) {
+          if (location !== (original.location ?? '').trim()) {
             input.location = location
           }
-          if (url !== (target.url ?? '').trim()) {
+          if (url !== (original.url ?? '').trim()) {
             input.url = url
+          }
+          // F25: only the six that changed travel (D2); an emptier value than the
+          // baseline counts as a change, so clearing means sending `''`/`[]`.
+          if (status !== (original.status ?? '')) {
+            input.status = status
+          }
+          if (eventClass !== (original.class ?? '')) {
+            input.class = eventClass
+          }
+          if (transp !== (original.transp ?? '')) {
+            input.transp = transp
+          }
+          if (!sameStringArray(categories, original.categories)) {
+            input.categories = categories
+          }
+          if (!sameStringArray(attach, original.attach)) {
+            input.attach = attach
           }
           if (anchorTzid !== null) {
             input.tzid = anchorTzid
@@ -444,7 +759,7 @@ export function Calendar() {
         }
       })
     },
-    [addOptimistic, editing, effectiveCollectionId, message, setEvents],
+    [addOptimistic, editDetail, editing, effectiveCollectionId, message, setEvents],
   )
 
   const handleDelete = useCallback(
@@ -473,24 +788,44 @@ export function Calendar() {
   const loadError = collectionsError ?? (effectiveCollectionId !== null ? eventsError : null)
 
   const formInitialValues: EventFormValues = useMemo(() => {
-    if (editing !== null) {
-      const start = editing.dtstart === null ? dayjs() : dayjs(editing.dtstart)
-      const end = editing.dtend === null ? start.add(1, 'hour') : dayjs(editing.dtend)
-      return {
-        summary: editing.summary ?? '',
-        description: editing.description ?? '',
-        location: editing.location ?? '',
-        url: editing.url ?? '',
-        range: [start, end],
-      }
+    // En edición los valores salen del **detalle** cargado (no de la fila ligera
+    // de la lista, que no trae las seis propiedades F25). Mientras el detalle no
+    // ha llegado el `<Form>` ni se monta, así que estos valores siempre son los
+    // definitivos cuando el formulario aparece.
+    if (editing !== null && editDetail !== null) {
+      return formValuesFromDetail(editDetail)
     }
-    return { summary: '', description: '', location: '', url: '', range: defaultRange() }
-  }, [editing])
+    return {
+      summary: '',
+      description: '',
+      location: '',
+      url: '',
+      range: defaultRange(),
+      durationMode: 'end',
+    }
+  }, [editing, editDetail])
 
   // Baseline the URL validator compares against (D2): the value the dialog was
   // opened with, so an unchanged inherited `mailto:`/`ftp:` URL is accepted and
-  // never has to be destroyed to be able to save.
-  const urlBaseline = useMemo(() => (editing?.url ?? '').trim(), [editing])
+  // never has to be destroyed to be able to save. It comes from the detail, not
+  // the light row — the dialog fills from the detail.
+  const urlBaseline = useMemo(() => (editDetail?.url ?? '').trim(), [editDetail])
+
+  // Same idea for the `ATTACH` list: an inherited non-http URI is preserved, so
+  // the per-item validator must accept the values the dialog opened with.
+  const attachBaselines = useMemo(() => editDetail?.attach ?? [], [editDetail])
+
+  // A `DURATION` the form cannot decompose is shown verbatim; while it is
+  // untouched it must not be sent (D2), so the dialog advertises it explicitly.
+  const nonDecomposableDuration = useMemo(() => {
+    const raw = editDetail?.duration ?? null
+    return raw !== null && decomposeDuration(raw) === null ? raw : null
+  }, [editDetail])
+
+  // El formulario de edición no se monta hasta tener el detalle completo; así
+  // `initialValues` son los definitivos y `form.resetFields()` sigue funcionando.
+  const editDetailPending = editing !== null && (editDetailLoading || editDetail === null)
+  const editDetailFailed = editing !== null ? editDetailError : null
 
   // La instancia `form` es única por vista y la comparte el `<Modal>` (su `onOk`
   // llama a `form.submit()`), así que sobrevive al remontaje por `key` del
@@ -726,6 +1061,9 @@ export function Calendar() {
         okText={editing === null ? 'Crear' : 'Guardar'}
         cancelText="Cancelar"
         confirmLoading={saving}
+        // Con el detalle de edición aún cargando el formulario no existe, así que
+        // Guardar no haría nada útil: se bloquea hasta tener los valores.
+        okButtonProps={{ disabled: editDetailPending }}
         maskClosable={!saving}
         keyboard={!saving}
         onCancel={() => {
@@ -733,62 +1071,186 @@ export function Calendar() {
             setModalOpen(false)
           }
         }}
+        // El formulario es largo: el cuerpo hace scroll dentro del modal.
+        width={720}
+        styles={{ body: { maxHeight: '70vh', overflowY: 'auto', paddingRight: 12 } }}
         destroyOnHidden
       >
-        <Form
-          form={form}
-          layout="vertical"
-          onFinish={handleSubmit}
-          initialValues={formInitialValues}
-          // `key` fuerza un montaje limpio al cambiar de evento (o de edición a
-          // alta), para que `initialValues` se apliquen de nuevo y el formulario
-          // no muestre los valores del evento anterior mientras el baseline D2 ya
-          // es el nuevo.
-          key={editing?.uid ?? 'new'}
-        >
-          <Form.Item
-            name="summary"
-            label="Título"
-            rules={[{ required: true, message: 'Introduce un título' }]}
+        {editDetailFailed !== null ? (
+          <Alert
+            type="error"
+            showIcon
+            title="No se pudo cargar el evento para editar"
+            description={editDetailFailed}
+            action={
+              <Button size="small" onClick={reloadEditDetail}>
+                Reintentar
+              </Button>
+            }
+          />
+        ) : editDetailPending ? (
+          <Skeleton active paragraph={{ rows: 8 }} />
+        ) : (
+          <Form
+            form={form}
+            layout="vertical"
+            onFinish={handleSubmit}
+            initialValues={formInitialValues}
+            // `key` fuerza un montaje limpio al cambiar de evento (o de edición a
+            // alta), para que `initialValues` se apliquen de nuevo y el formulario
+            // no muestre los valores del evento anterior mientras el baseline D2 ya
+            // es el nuevo.
+            key={editing?.uid ?? 'new'}
           >
-            <Input placeholder="Título del evento" />
-          </Form.Item>
-          <Form.Item name="description" label="Descripción">
-            <Input.TextArea rows={3} placeholder="Descripción (opcional)" />
-          </Form.Item>
-          <Form.Item name="location" label="Ubicación">
-            <Input placeholder="Ubicación (opcional)" />
-          </Form.Item>
-          <Form.Item
-            name="url"
-            label="URL"
-            rules={[
-              {
-                // The server allowlists the scheme (F24) but lets an inherited,
-                // unchanged value through verbatim; `validateUrlValue` mirrors
-                // both halves so the user gets immediate feedback instead of a
-                // 400 — while a legacy `mailto:`/`ftp:` URL stays editable.
-                validator: (_rule: unknown, value: unknown) => {
-                  const error = validateUrlValue(value, urlBaseline)
-                  return error === null ? Promise.resolve() : Promise.reject(new Error(error))
+            <Form.Item
+              name="summary"
+              label="Título"
+              rules={[{ required: true, message: 'Introduce un título' }]}
+            >
+              <Input placeholder="Título del evento" />
+            </Form.Item>
+            <Form.Item name="description" label="Descripción">
+              <Input.TextArea rows={3} placeholder="Descripción (opcional)" />
+            </Form.Item>
+            <Form.Item name="location" label="Ubicación">
+              <Input placeholder="Ubicación (opcional)" />
+            </Form.Item>
+            <Form.Item
+              name="url"
+              label="URL"
+              rules={[
+                {
+                  // The server allowlists the scheme (F24) but lets an inherited,
+                  // unchanged value through verbatim; `validateUrlValue` mirrors
+                  // both halves so the user gets immediate feedback instead of a
+                  // 400 — while a legacy `mailto:`/`ftp:` URL stays editable.
+                  validator: (_rule: unknown, value: unknown) => {
+                    const error = validateUrlValue(value, urlBaseline)
+                    return error === null ? Promise.resolve() : Promise.reject(new Error(error))
+                  },
                 },
-              },
-            ]}
-          >
-            <Input type="url" placeholder="https://ejemplo.com (opcional)" />
-          </Form.Item>
-          <Form.Item
-            name="range"
-            label="Fecha y hora"
-            rules={[{ required: true, message: 'Selecciona un rango' }]}
-          >
-            <RangePicker
-              showTime
-              format="DD/MM/YYYY HH:mm:ss"
-              style={{ width: '100%' }}
-            />
-          </Form.Item>
-        </Form>
+              ]}
+            >
+              <Input type="url" placeholder="https://ejemplo.com (opcional)" />
+            </Form.Item>
+
+            {/* F25 — estado, visibilidad y transparencia. */}
+            <Space wrap align="start" size="middle">
+              <Form.Item name="status" label="Estado" style={{ minWidth: 160 }}>
+                <Select allowClear placeholder="Sin definir" options={STATUS_OPTIONS} />
+              </Form.Item>
+              <Form.Item name="class" label="Visibilidad" style={{ minWidth: 160 }}>
+                <Select allowClear placeholder="Sin definir" options={CLASS_OPTIONS} />
+              </Form.Item>
+              <Form.Item name="transp" label="Transparencia" style={{ minWidth: 200 }}>
+                <Select allowClear placeholder="Sin definir" options={TRANSP_OPTIONS} />
+              </Form.Item>
+            </Space>
+
+            <Form.Item name="categories" label="Categorías">
+              <Select
+                mode="tags"
+                allowClear
+                tokenSeparators={[',']}
+                placeholder="trabajo, personal…"
+                aria-label="Categorías"
+                suffixIcon={null}
+              />
+            </Form.Item>
+
+            {/* `ATTACH`: lista de URLs con la misma frontera de esquema que `URL`. */}
+            <Form.List name="attach">
+              {(fields, { add, remove }) => (
+                <Flex vertical gap="small" style={{ marginBottom: 16 }}>
+                  <Typography.Text strong>Adjuntos</Typography.Text>
+                  {fields.map((field) => (
+                    <Flex key={field.key} gap="small" align="end">
+                      <Form.Item
+                        name={field.name}
+                        style={{ flex: 1, marginBottom: 0 }}
+                        rules={[
+                          {
+                            validator: (_rule: unknown, value: unknown) => {
+                              const error = validateAttachValue(value, attachBaselines)
+                              return error === null
+                                ? Promise.resolve()
+                                : Promise.reject(new Error(error))
+                            },
+                          },
+                        ]}
+                      >
+                        <Input
+                          type="url"
+                          placeholder="https://ejemplo.com/adjunto"
+                          aria-label={`Adjunto ${field.name + 1}`}
+                        />
+                      </Form.Item>
+                      <Button
+                        danger
+                        type="text"
+                        onClick={() => remove(field.name)}
+                        aria-label={`Quitar adjunto ${field.name + 1}`}
+                      >
+                        Quitar
+                      </Button>
+                    </Flex>
+                  ))}
+                  <Button onClick={() => add('')} aria-label="Añadir adjunto">
+                    Añadir adjunto
+                  </Button>
+                </Flex>
+              )}
+            </Form.List>
+
+            {/* Radio que traduce la exclusión `DURATION`/`DTEND` (RFC 5545). */}
+            <Form.Item name="durationMode" label="Duración">
+              <Radio.Group>
+                <Radio value="end">Termina a las…</Radio>
+                <Radio value="duration">Dura…</Radio>
+              </Radio.Group>
+            </Form.Item>
+            <Form.Item
+              noStyle
+              shouldUpdate={(previous, current) => previous.durationMode !== current.durationMode}
+            >
+              {({ getFieldValue }) =>
+                getFieldValue('durationMode') === 'duration' ? (
+                  <Flex vertical gap="small" style={{ marginBottom: 16 }}>
+                    <Flex gap="small" align="end" wrap>
+                      <Form.Item name="durationValue" label="Cantidad" style={{ marginBottom: 0 }}>
+                        <InputNumber min={1} style={{ width: 120 }} aria-label="Cantidad" />
+                      </Form.Item>
+                      <Form.Item name="durationUnit" label="Unidad" style={{ marginBottom: 0 }}>
+                        <Select
+                          style={{ width: 140 }}
+                          options={DURATION_UNIT_OPTIONS}
+                          aria-label="Unidad"
+                        />
+                      </Form.Item>
+                    </Flex>
+                    {nonDecomposableDuration !== null ? (
+                      <Typography.Text type="secondary">
+                        Duración actual: {nonDecomposableDuration}
+                      </Typography.Text>
+                    ) : null}
+                  </Flex>
+                ) : null
+              }
+            </Form.Item>
+
+            <Form.Item
+              name="range"
+              label="Fecha y hora"
+              rules={[{ required: true, message: 'Selecciona un rango' }]}
+            >
+              <RangePicker
+                showTime
+                format="DD/MM/YYYY HH:mm:ss"
+                style={{ width: '100%' }}
+              />
+            </Form.Item>
+          </Form>
+        )}
       </Modal>
     </>
   )

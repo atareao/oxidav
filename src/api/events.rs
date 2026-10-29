@@ -54,10 +54,11 @@ use serde::Deserialize;
 use crate::auth::SessionUser;
 use crate::dav::common::new_id;
 use crate::dav::ics::{
-    EventFields, build_ics, parse_ics, reconcile_ics, supported_instant_range_ms,
+    EventFields, EventProjection, build_ics, project_event, reconcile_ics,
+    supported_instant_range_ms,
 };
 use crate::dav::vtimezone;
-use crate::db::models::{CalendarObjectUpdate, CollectionKind, NewCalendarObject};
+use crate::db::models::{CalendarObject, CalendarObjectUpdate, CollectionKind, NewCalendarObject};
 use crate::db::{
     Collection, DbError, clamp_collection_limit, clamp_offset, delete_calendar_object,
     get_calendar_object, get_collection, insert_calendar_object, list_calendar_objects_window,
@@ -65,7 +66,7 @@ use crate::db::{
 };
 use crate::router::AppState;
 
-use super::dto::{CreateEventRequest, EventDto, UpdateEventRequest};
+use super::dto::{CreateEventRequest, EventDetailDto, EventDto, UpdateEventRequest};
 use super::error::ApiError;
 use super::{parse_json_body, parse_optional_i64};
 
@@ -86,6 +87,18 @@ const MAX_URL_LEN: usize = 2_048;
 
 /// Maximum accepted length of a client-supplied `uid`, in characters.
 const MAX_UID_LEN: usize = 255;
+
+/// Maximum accepted length of a single `CATEGORIES` item, in characters.
+const MAX_CATEGORY_LEN: usize = 128;
+
+/// Maximum number of `CATEGORIES` items accepted.
+const MAX_CATEGORIES: usize = 64;
+
+/// Maximum number of `ATTACH` URIs accepted.
+const MAX_ATTACH: usize = 64;
+
+/// Maximum accepted length of a `DURATION` value, in characters.
+const MAX_DURATION_LEN: usize = 64;
 
 /// Query parameters for `GET /api/v1/collections/{id}/events`.
 ///
@@ -191,7 +204,24 @@ pub async fn create(
     let url = validate_url(request.url.as_deref())?;
     let rrule = validate_rrule(request.rrule.as_deref())?;
     let tzid = validate_tzid(request.tzid.as_deref())?;
+    let status = validate_status(request.status.as_deref())?;
+    let class_ = validate_class(request.class_.as_deref())?;
+    let transp = validate_transp(request.transp.as_deref())?;
+    let duration = validate_duration(request.duration.as_deref())?;
+    let categories = validate_categories(request.categories.as_deref().unwrap_or_default())?;
+    let attach = validate_attach(request.attach.as_deref().unwrap_or_default())?;
     validate_range(request.dtstart, request.dtend)?;
+
+    // `DURATION` and `DTEND` are mutually exclusive (RFC 5545): supplying both is
+    // rejected, and a `DURATION` supersedes any (already rejected) `DTEND`.
+    if duration.is_some() && request.dtend.is_some() {
+        return Err(duration_dtend_exclusive());
+    }
+    let dtend = if duration.is_some() {
+        None
+    } else {
+        request.dtend
+    };
 
     let collection = calendar_collection(&state, &id, &user.sub).await?;
 
@@ -207,10 +237,16 @@ pub async fn create(
         location: location.clone(),
         url: url.clone(),
         dtstart_ms: request.dtstart,
-        dtend_ms: request.dtend,
+        dtend_ms: dtend,
         dtstart_tzid: tzid.clone(),
         dtend_tzid: tzid.clone(),
         rrule: rrule.clone(),
+        status: status.clone(),
+        class_: class_.clone(),
+        transp: transp.clone(),
+        duration: duration.clone(),
+        categories: categories.clone(),
+        attach: attach.clone(),
         dtstamp_ms: now_millis(),
     };
 
@@ -223,7 +259,7 @@ pub async fn create(
         location,
         url,
         dtstart: Some(request.dtstart),
-        dtend: request.dtend,
+        dtend,
         dtstart_tzid: tzid.clone(),
         dtend_tzid: tzid,
         rrule,
@@ -234,7 +270,11 @@ pub async fn create(
         .await
         .map_err(map_insert_error)?;
 
-    Ok((StatusCode::CREATED, Json(EventDto::from(&stored))))
+    let projection = project_stored(&stored)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(EventDetailDto::new(&stored, projection)),
+    ))
 }
 
 /// `GET /api/v1/collections/{id}/events/{uid}` — fetch one event.
@@ -248,12 +288,13 @@ pub async fn get_one(
     State(state): State<AppState>,
     user: SessionUser,
     Path((id, uid)): Path<(String, String)>,
-) -> Result<Json<EventDto>, ApiError> {
+) -> Result<Json<EventDetailDto>, ApiError> {
     let collection = calendar_collection(&state, &id, &user.sub).await?;
     let object = get_calendar_object(&state.db, &collection.id, &uid)
         .await?
         .ok_or(ApiError::NotFound)?;
-    Ok(Json(EventDto::from(&object)))
+    let projection = project_stored(&object)?;
+    Ok(Json(EventDetailDto::new(&object, projection)))
 }
 
 /// `PATCH /api/v1/collections/{id}/events/{uid}` — partially update an event.
@@ -278,7 +319,7 @@ pub async fn update(
     user: SessionUser,
     Path((id, uid)): Path<(String, String)>,
     body: Bytes,
-) -> Result<Json<EventDto>, ApiError> {
+) -> Result<Json<EventDetailDto>, ApiError> {
     let request: UpdateEventRequest = parse_json_body(&body)?;
     if request.is_empty() {
         return Err(ApiError::Validation(
@@ -304,13 +345,36 @@ pub async fn update(
     // silently mutating something the `PATCH` never mentioned — exactly the silent
     // deletion PLAN-028 exists to remove.
     //
+    // As of F25 the payload is read through `project_event` rather than
+    // `parse_ics`: the projection carries **everything** the payload says — the
+    // column-backed properties *and* the six F25 properties, which have no column
+    // at all — so the merge keeps a single source of truth (`petición → payload →
+    // columna`).
+    //
     // Validation is a frontier for what *enters through the API*: only a value
     // supplied by the request is validated. An inherited value (from the payload or
     // the column) passes through verbatim — revalidating it would `400` *any*
     // `PATCH` on an event imported from a native client with, say, a
-    // `URL:mailto:…`/`ftp://…` (a scheme outside our allowlist) or an over-long
-    // `LOCATION`.
-    let stored = parse_ics(&existing.raw_payload).ok();
+    // `URL:mailto:…`/`ftp://…` (a scheme outside our allowlist), a `STATUS:x-custom`
+    // or an over-long `LOCATION`.
+    // A payload that cannot be projected is tolerated (the merge falls back to
+    // the denormalised columns), but the six F25 properties — which have no
+    // column at all — are silently lost for this `PATCH`: a known residual case
+    // (every row is born from an already-parsed `PUT`/`POST`). Unlike the
+    // response-side `project_stored`, the error is swallowed here, so it is
+    // logged explicitly to keep the loss observable. The control flow is
+    // unchanged: a corrupt row still yields `None` and follows the same path.
+    let stored = match project_event(&existing.raw_payload) {
+        Ok(event) => Some(event),
+        Err(err) => {
+            tracing::warn!(
+                error = ?err,
+                uid = ?existing.uid,
+                "raw_payload no proyectable en PATCH; el merge cae a las columnas y las seis propiedades F25 se pierden"
+            );
+            None
+        }
+    };
 
     let summary = match &request.summary {
         Some(value) => Some(validate_summary(value)?),
@@ -384,6 +448,65 @@ pub async fn update(
         ),
     };
 
+    // The six F25 properties have no column: their effective value is the payload
+    // one (`request.X` when supplied, else the projected payload). Only a supplied
+    // value is validated; an inherited one passes verbatim.
+    let status = match &request.status {
+        Some(value) => validate_status(Some(value))?,
+        None => stored.as_ref().and_then(|event| event.status.clone()),
+    };
+    let class_ = match &request.class_ {
+        Some(value) => validate_class(Some(value))?,
+        None => stored.as_ref().and_then(|event| event.class.clone()),
+    };
+    let transp = match &request.transp {
+        Some(value) => validate_transp(Some(value))?,
+        None => stored.as_ref().and_then(|event| event.transp.clone()),
+    };
+    let categories = match &request.categories {
+        Some(values) => validate_categories(values)?,
+        None => stored
+            .as_ref()
+            .map(|event| event.categories.iter().flatten().cloned().collect())
+            .unwrap_or_default(),
+    };
+    let attach = match &request.attach {
+        Some(values) => validate_attach(values)?,
+        None => stored
+            .as_ref()
+            .map(|event| event.attach.clone())
+            .unwrap_or_default(),
+    };
+
+    // `DURATION`/`DTEND` are mutually exclusive (RFC 5545) and the server enforces
+    // it, not just the UI:
+    //   * a `duration` **with a value** wins and drops `DTEND`;
+    //   * a **blank** `duration` clears `DURATION` and leaves `DTEND` untouched;
+    //   * an explicit `dtend` wins and drops `DURATION`;
+    //   * supplying **both** (a value and an end) is a `400`;
+    //   * mentioning neither keeps both exactly as the payload has them (a valid
+    //     `.ics` never has both).
+    // This is applied **before** `reconcile_ics`.
+    let request_duration = validate_duration(request.duration.as_deref())?;
+    let dtend_in_request = request.dtend.is_some();
+    if request_duration.is_some() && dtend_in_request {
+        return Err(duration_dtend_exclusive());
+    }
+    let inherited_duration = stored.as_ref().and_then(|event| event.duration.clone());
+    // Two distinct reasons collapse to the same `(None, dtend)` branch, and the
+    // distinction must not be lost:
+    //   * `dtend_in_request` — an explicit `dtend` drops `DURATION`;
+    //   * `request.duration.is_some()` — a **blank** `duration` clears `DURATION`
+    //     and leaves `DTEND` untouched (which is why `dtend` is passed through
+    //     unchanged here).
+    let (duration, dtend) = if request_duration.is_some() {
+        (request_duration, None)
+    } else if dtend_in_request || request.duration.is_some() {
+        (None, dtend)
+    } else {
+        (inherited_duration, dtend)
+    };
+
     let fields = EventFields {
         uid: existing.uid.clone(),
         summary: summary.clone(),
@@ -395,12 +518,18 @@ pub async fn update(
         dtstart_tzid: dtstart_tzid.clone(),
         dtend_tzid: dtend_tzid.clone(),
         rrule: rrule.clone(),
+        status,
+        class_,
+        transp,
+        duration,
+        categories,
+        attach,
         dtstamp_ms: now_millis(),
     };
 
     // `reconcile_ics` rewrites only the modelled content lines in place, keeping
-    // every unmodelled property (`VALARM`, other `ATTENDEE`s, `CATEGORIES`, `X-`)
-    // and the original folding byte for byte (F24/PLAN-028).
+    // every unmodelled property (`VALARM`, other `ATTENDEE`s, `X-`) and the
+    // original folding byte for byte (F24/PLAN-028).
     let raw_payload = match reconcile_ics(&existing.raw_payload, &fields) {
         Ok(payload) => payload,
         // Safety net: a degenerate row without a usable `VEVENT` is recomposed
@@ -426,7 +555,8 @@ pub async fn update(
     };
 
     let stored = update_calendar_object(&state.db, &existing.id, &update).await?;
-    Ok(Json(EventDto::from(&stored)))
+    let projection = project_stored(&stored)?;
+    Ok(Json(EventDetailDto::new(&stored, projection)))
 }
 
 /// `DELETE /api/v1/collections/{id}/events/{uid}` — delete an event.
@@ -662,6 +792,249 @@ fn validate_uid(raw: &str) -> Result<String, ApiError> {
     Ok(uid.to_string())
 }
 
+/// Project an event's stored `raw_payload`, mapping a corrupt payload to a `500`.
+///
+/// The projection is fallible (an `.ics` the parser cannot read); a failure is a
+/// server-side integrity problem, so it is logged and surfaced as a generic
+/// [`ApiError::Internal`] — never a `200` with invented data. This mirrors the
+/// contact detail's handling of a corrupt vCard.
+fn project_stored(object: &CalendarObject) -> Result<EventProjection, ApiError> {
+    project_event(&object.raw_payload).map_err(|err| {
+        tracing::error!(
+            error = ?err,
+            uid = ?object.uid,
+            "raw_payload corrupto; no se puede proyectar el VEVENT"
+        );
+        ApiError::Internal
+    })
+}
+
+/// The `400` raised when a request supplies both a `DURATION` and a `DTEND`.
+fn duration_dtend_exclusive() -> ApiError {
+    ApiError::Validation(
+        "`duration` y `dtend` son mutuamente excluyentes; indique solo uno".to_string(),
+    )
+}
+
+/// Validate and normalise an optional `STATUS` (RFC 5545 §3.8.1.11).
+///
+/// A blank value is normalised away (`None`, so `""` clears the field on
+/// `PATCH`). Otherwise the value must be one of `TENTATIVE`, `CONFIRMED` or
+/// `CANCELLED` (ASCII case-insensitive) and is returned in **upper case**.
+fn validate_status(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    validate_token(
+        raw,
+        "status",
+        "STATUS",
+        &["TENTATIVE", "CONFIRMED", "CANCELLED"],
+    )
+}
+
+/// Validate and normalise an optional `CLASS` (RFC 5545 §3.8.1.3).
+///
+/// Only the three standard tokens are accepted through the API; a blank value
+/// clears the field and a supplied value is up-cased. (A non-standard token
+/// *inherited* from a client is preserved verbatim — see [`update`].)
+fn validate_class(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    validate_token(
+        raw,
+        "class",
+        "CLASS",
+        &["PUBLIC", "PRIVATE", "CONFIDENTIAL"],
+    )
+}
+
+/// Validate and normalise an optional `TRANSP` (RFC 5545 §3.8.2.7).
+///
+/// Only `OPAQUE`/`TRANSPARENT` are accepted; blank clears, supplied is up-cased.
+fn validate_transp(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    validate_token(raw, "transp", "TRANSP", &["OPAQUE", "TRANSPARENT"])
+}
+
+/// Validate and normalise an optional, single-token property against an
+/// upper-case allowlist.
+///
+/// A blank value clears the field (`None`). A supplied value is compared ASCII
+/// case-insensitively against `allowed` and returned in upper case; anything else
+/// is a `400`. `field` names the JSON key, `property` the iCalendar property.
+fn validate_token(
+    raw: Option<&str>,
+    field: &str,
+    property: &str,
+    allowed: &[&str],
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if allowed.contains(&upper.as_str()) {
+        Ok(Some(upper))
+    } else {
+        Err(ApiError::Validation(format!(
+            "El campo `{field}` debe ser uno de los valores de `{property}`: {}",
+            allowed.join(", ")
+        )))
+    }
+}
+
+/// Validate and normalise an optional `DURATION` (RFC 5545 §3.3.6 `dur-value`).
+///
+/// A blank value is normalised away (`None`, so `""` clears the field on
+/// `PATCH`). Otherwise the value must be a bounded, well-formed `dur-value`:
+/// `[+/-]P` followed by a number of weeks (`nW`), or a number of days (`nD`)
+/// optionally followed by a `T` time section (`nH`/`nM`/`nS`), or the time
+/// section alone — with **at least one** component (`PT1H`, `P1D`, `P2W`,
+/// `P1DT2H`, `PT15M`). The value is returned verbatim.
+///
+/// This is a security boundary: [`build_ics`]/[`reconcile_ics`] emit `DURATION`
+/// **verbatim** (its designator letters are structural), so a value carrying a
+/// control character or whitespace could otherwise inject a content line.
+fn validate_duration(raw: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_DURATION_LEN {
+        return Err(ApiError::Validation(format!(
+            "El campo `duration` no puede superar {MAX_DURATION_LEN} caracteres"
+        )));
+    }
+    if !is_valid_duration(trimmed) {
+        return Err(ApiError::Validation(
+            "El campo `duration` no es una duración RFC 5545 válida (p. ej. `PT1H`, `P1D`, `P2W`)"
+                .to_string(),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Whether `value` matches the RFC 5545 `dur-value` grammar.
+///
+/// Accepts an optional leading `+`/`-`, then `P`, then one of: `nW`; `nD`
+/// with an optional `T` time section; or a `T` time section (`nH`, `nM`, `nS`,
+/// in that order, at least one). At least one component is required.
+fn is_valid_duration(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    if matches!(bytes.first(), Some(b'+' | b'-')) {
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'P') {
+        return false;
+    }
+    i += 1;
+
+    // Weeks stand alone: `nW` and nothing else.
+    if scan_number_unit(bytes, &mut i, b'W') {
+        return i == bytes.len();
+    }
+
+    let mut has_component = scan_number_unit(bytes, &mut i, b'D');
+
+    if bytes.get(i) == Some(&b'T') {
+        i += 1;
+        let mut last_rank = 0u8;
+        let mut time_has = false;
+        for (unit, rank) in [(b'H', 1u8), (b'M', 2), (b'S', 3)] {
+            if scan_number_unit(bytes, &mut i, unit) {
+                // The time units must be contiguous (`H`, `HM`, `HMS`, `M`, `MS`),
+                // never a gap such as `H…S` without an `M`.
+                if last_rank != 0 && rank != last_rank + 1 {
+                    return false;
+                }
+                last_rank = rank;
+                time_has = true;
+            }
+        }
+        if !time_has {
+            return false;
+        }
+        has_component = true;
+    }
+
+    has_component && i == bytes.len()
+}
+
+/// Consume `1*DIGIT` followed by `unit` from `bytes` at `*i`.
+///
+/// On success advances `*i` past the unit and returns `true`; otherwise restores
+/// `*i` and returns `false`.
+fn scan_number_unit(bytes: &[u8], i: &mut usize, unit: u8) -> bool {
+    let start = *i;
+    while bytes.get(*i).is_some_and(u8::is_ascii_digit) {
+        *i += 1;
+    }
+    if *i == start || bytes.get(*i) != Some(&unit) {
+        *i = start;
+        return false;
+    }
+    *i += 1;
+    true
+}
+
+/// Validate and normalise `CATEGORIES` items.
+///
+/// Each item is trimmed, blank items are dropped, and control characters are
+/// rejected (each item is escaped per RFC 5545 §3.3.11 on emission, so a newline
+/// would be written as `\n` — the control-character ban is defence in depth).
+/// Per-item and item-count bounds are enforced. An empty (or all-blank) input
+/// yields no categories, which clears the property.
+fn validate_categories(items: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut out = Vec::new();
+    for item in items {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.chars().count() > MAX_CATEGORY_LEN {
+            return Err(ApiError::Validation(format!(
+                "Cada categoría no puede superar {MAX_CATEGORY_LEN} caracteres"
+            )));
+        }
+        if trimmed.chars().any(char::is_control) {
+            return Err(ApiError::Validation(
+                "Las categorías no pueden contener caracteres de control".to_string(),
+            ));
+        }
+        if out.len() >= MAX_CATEGORIES {
+            return Err(ApiError::Validation(format!(
+                "No se admiten más de {MAX_CATEGORIES} categorías"
+            )));
+        }
+        out.push(trimmed.to_string());
+    }
+    Ok(out)
+}
+
+/// Validate and normalise `ATTACH` URIs.
+///
+/// Each item is validated with [`validate_url`] — the same `http`/`https`
+/// allowlist and the same ban on spaces/control characters as `URL`, because the
+/// SPA renders each attachment as a link and the value is emitted **verbatim**.
+/// Blank items are dropped; the count is bounded. An empty (or all-blank) input
+/// yields no attachments, which clears the property.
+fn validate_attach(items: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut out = Vec::new();
+    for item in items {
+        if let Some(uri) = validate_url(Some(item.as_str()))? {
+            if out.len() >= MAX_ATTACH {
+                return Err(ApiError::Validation(format!(
+                    "No se admiten más de {MAX_ATTACH} adjuntos"
+                )));
+            }
+            out.push(uri);
+        }
+    }
+    Ok(out)
+}
+
 /// Reject an inverted range and any instant outside the representable calendar
 /// range.
 ///
@@ -872,39 +1245,18 @@ mod tests {
 
     #[test]
     fn empty_patch_is_detected() {
-        let empty = UpdateEventRequest {
-            summary: None,
-            description: None,
-            dtstart: None,
-            dtend: None,
-            rrule: None,
-            tzid: None,
-            location: None,
-            url: None,
-        };
+        let empty = UpdateEventRequest::default();
         assert!(empty.is_empty());
         let non_empty = UpdateEventRequest {
             summary: Some("x".to_string()),
-            description: None,
-            dtstart: None,
-            dtend: None,
-            rrule: None,
-            tzid: None,
-            location: None,
-            url: None,
+            ..UpdateEventRequest::default()
         };
         assert!(!non_empty.is_empty());
         // A patch that only changes the zone is *not* empty (F18): it must be
         // accepted rather than rejected as "no field to update".
         let tzid_only = UpdateEventRequest {
-            summary: None,
-            description: None,
-            dtstart: None,
-            dtend: None,
-            rrule: None,
             tzid: Some("Europe/Madrid".to_string()),
-            location: None,
-            url: None,
+            ..UpdateEventRequest::default()
         };
         assert!(!tzid_only.is_empty());
     }
@@ -915,28 +1267,162 @@ mod tests {
         // must be accepted rather than answered with the "no field to update"
         // `400`.
         let location_only = UpdateEventRequest {
-            summary: None,
-            description: None,
-            dtstart: None,
-            dtend: None,
-            rrule: None,
-            tzid: None,
             location: Some("Sala 3".to_string()),
-            url: None,
+            ..UpdateEventRequest::default()
         };
         assert!(!location_only.is_empty());
 
         let url_only = UpdateEventRequest {
-            summary: None,
-            description: None,
-            dtstart: None,
-            dtend: None,
-            rrule: None,
-            tzid: None,
-            location: None,
             url: Some("https://ejemplo.org/x".to_string()),
+            ..UpdateEventRequest::default()
         };
         assert!(!url_only.is_empty());
+
+        // F25: a patch that only touches `categories` or `attach` is *not* empty
+        // either.
+        let categories_only = UpdateEventRequest {
+            categories: Some(vec!["trabajo".to_string()]),
+            ..UpdateEventRequest::default()
+        };
+        assert!(!categories_only.is_empty());
+
+        let attach_only = UpdateEventRequest {
+            attach: Some(vec!["https://ejemplo.org/a".to_string()]),
+            ..UpdateEventRequest::default()
+        };
+        assert!(!attach_only.is_empty());
+    }
+
+    #[test]
+    fn validate_status_normalises_and_rejects_unknown() {
+        assert_eq!(validate_status(None).ok(), Some(None));
+        assert_eq!(validate_status(Some("  ")).ok(), Some(None));
+        assert_eq!(
+            validate_status(Some("confirmed")).ok(),
+            Some(Some("CONFIRMED".to_string()))
+        );
+        assert_eq!(
+            validate_status(Some(" tentative ")).ok(),
+            Some(Some("TENTATIVE".to_string()))
+        );
+        assert!(matches!(
+            validate_status(Some("MAYBE")),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_class_and_transp_normalise_and_reject_unknown() {
+        assert_eq!(
+            validate_class(Some("private")).ok(),
+            Some(Some("PRIVATE".to_string()))
+        );
+        assert_eq!(
+            validate_class(Some("PUBLIC")).ok(),
+            Some(Some("PUBLIC".to_string()))
+        );
+        assert_eq!(
+            validate_class(Some("confidential")).ok(),
+            Some(Some("CONFIDENTIAL".to_string()))
+        );
+        assert!(matches!(
+            validate_class(Some("x-custom")),
+            Err(ApiError::Validation(_))
+        ));
+
+        assert_eq!(
+            validate_transp(Some("transparent")).ok(),
+            Some(Some("TRANSPARENT".to_string()))
+        );
+        assert_eq!(
+            validate_transp(Some("opaque")).ok(),
+            Some(Some("OPAQUE".to_string()))
+        );
+        assert!(matches!(
+            validate_transp(Some("busy")),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_duration_accepts_the_grammar_and_rejects_junk() {
+        assert_eq!(validate_duration(None).ok(), Some(None));
+        assert_eq!(validate_duration(Some("  ")).ok(), Some(None));
+        for value in ["PT1H", "P1D", "P2W", "P1DT2H", "PT15M", "-PT30M", "+P1D"] {
+            assert_eq!(
+                validate_duration(Some(value)).ok(),
+                Some(Some(value.to_string())),
+                "must accept {value:?}"
+            );
+        }
+        for value in [
+            "1 hora",
+            "P",
+            "PT",
+            "P1",
+            "1H",
+            "PT1H2",
+            "P1W2D",
+            "PT1H\r\nX",
+        ] {
+            assert!(
+                matches!(validate_duration(Some(value)), Err(ApiError::Validation(_))),
+                "must reject {value:?}"
+            );
+        }
+        let long = format!("PT{}H", "9".repeat(MAX_DURATION_LEN));
+        assert!(matches!(
+            validate_duration(Some(&long)),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_categories_trims_drops_blanks_and_bounds() {
+        assert_eq!(
+            validate_categories(&["  trabajo  ".to_string(), String::new()]).ok(),
+            Some(vec!["trabajo".to_string()])
+        );
+        assert_eq!(validate_categories(&[]).ok(), Some(Vec::new()));
+        let long = "x".repeat(MAX_CATEGORY_LEN + 1);
+        assert!(matches!(
+            validate_categories(&[long]),
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            validate_categories(&["a\u{0007}".to_string()]),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_attach_reuses_the_url_allowlist() {
+        assert_eq!(
+            validate_attach(&[
+                "https://a.example/x".to_string(),
+                String::new(),
+                "https://b.example/y".to_string(),
+            ])
+            .ok(),
+            Some(vec![
+                "https://a.example/x".to_string(),
+                "https://b.example/y".to_string(),
+            ])
+        );
+        assert_eq!(validate_attach(&[]).ok(), Some(Vec::new()));
+        for hostile in [
+            "javascript:alert(1)",
+            "mailto:ada@example.org",
+            "https://x y",
+        ] {
+            assert!(
+                matches!(
+                    validate_attach(&[hostile.to_string()]),
+                    Err(ApiError::Validation(_))
+                ),
+                "must reject {hostile:?}"
+            );
+        }
     }
 
     #[test]

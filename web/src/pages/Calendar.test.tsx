@@ -19,8 +19,8 @@ import dayjs from 'dayjs'
 import customParseFormat from 'dayjs/plugin/customParseFormat'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { listCalendarCollections } from '../services/collections'
-import { createEvent, deleteEvent, listEvents, updateEvent } from '../services/events'
-import type { CalendarEvent, Collection } from '../types/api'
+import { createEvent, deleteEvent, getEvent, listEvents, updateEvent } from '../services/events'
+import type { CalendarEvent, Collection, EventDetail } from '../types/api'
 import { Calendar } from './Calendar'
 
 dayjs.extend(customParseFormat)
@@ -34,6 +34,7 @@ vi.mock('../services/events', () => ({
   createEvent: vi.fn(),
   updateEvent: vi.fn(),
   deleteEvent: vi.fn(),
+  getEvent: vi.fn(),
 }))
 
 const collection: Collection = {
@@ -70,6 +71,24 @@ function makeEvent(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
     etag: 'etag-1',
     created_at: 0,
     updated_at: 0,
+    ...overrides,
+  }
+}
+
+/**
+ * Detalle completo mínimo (proyección F25) para mockear `getEvent`. Cada test
+ * lo completa con `overrides`; las seis propiedades F25 van a "vacío" para que
+ * el diálogo no envíe nada que el usuario no haya tocado (regla D2).
+ */
+function makeDetail(overrides: Partial<EventDetail> = {}): EventDetail {
+  return {
+    ...makeEvent(),
+    categories: [],
+    attach: [],
+    status: null,
+    class: null,
+    transp: null,
+    duration: null,
     ...overrides,
   }
 }
@@ -248,16 +267,16 @@ describe('Calendar', () => {
     const dtstart = atToday(10)
     const dtend = dtstart + 3_600_000
 
+    const event = makeDetail({
+      summary: 'Editable',
+      dtstart,
+      dtend,
+      dtstart_tzid: 'Europe/Madrid',
+      dtend_tzid: 'Europe/Madrid',
+    })
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
-    vi.mocked(listEvents).mockResolvedValue([
-      makeEvent({
-        summary: 'Editable',
-        dtstart,
-        dtend,
-        dtstart_tzid: 'Europe/Madrid',
-        dtend_tzid: 'Europe/Madrid',
-      }),
-    ])
+    vi.mocked(listEvents).mockResolvedValue([event])
+    vi.mocked(getEvent).mockResolvedValue(event)
     vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Editable' }))
 
     const user = userEvent.setup()
@@ -281,10 +300,10 @@ describe('Calendar', () => {
     const dtstart = atToday(10)
     const dtend = dtstart + 3_600_000
 
+    const event = makeDetail({ summary: 'Sin zona', dtstart, dtend })
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
-    vi.mocked(listEvents).mockResolvedValue([
-      makeEvent({ summary: 'Sin zona', dtstart, dtend }),
-    ])
+    vi.mocked(listEvents).mockResolvedValue([event])
+    vi.mocked(getEvent).mockResolvedValue(event)
     vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Sin zona' }))
 
     const user = userEvent.setup()
@@ -352,8 +371,8 @@ describe('Calendar', () => {
   })
 
   /** Event carrying every editable metadata field (F24/PLAN-028). */
-  const richEvent = (): CalendarEvent =>
-    makeEvent({
+  const richEvent = (): EventDetail =>
+    makeDetail({
       summary: 'Con metadatos',
       description: 'Notas',
       location: 'Sala 3',
@@ -363,6 +382,7 @@ describe('Calendar', () => {
   it('rellena descripción, ubicación y URL al abrir en edición (F24)', async () => {
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([richEvent()])
+    vi.mocked(getEvent).mockResolvedValue(richEvent())
 
     const user = userEvent.setup()
     renderCalendar()
@@ -379,6 +399,7 @@ describe('Calendar', () => {
   it('vacía la ubicación y la envía como cadena vacía, sin tocar descripción ni URL (F24/O3)', async () => {
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([richEvent()])
+    vi.mocked(getEvent).mockResolvedValue(richEvent())
     vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con metadatos' }))
 
     const user = userEvent.setup()
@@ -399,6 +420,7 @@ describe('Calendar', () => {
   it('vacía la URL y la envía como cadena vacía, sin tocar los demás campos (F24/O3)', async () => {
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([richEvent()])
+    vi.mocked(getEvent).mockResolvedValue(richEvent())
     vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con metadatos' }))
 
     const user = userEvent.setup()
@@ -419,6 +441,7 @@ describe('Calendar', () => {
   it('vacía la descripción y la envía como cadena vacía, sin tocar ubicación ni URL (F24/O3)', async () => {
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([richEvent()])
+    vi.mocked(getEvent).mockResolvedValue(richEvent())
     vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con metadatos' }))
 
     const user = userEvent.setup()
@@ -439,6 +462,7 @@ describe('Calendar', () => {
   it('no envía description/location/url cuando solo cambia el título (D2, F24)', async () => {
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([richEvent()])
+    vi.mocked(getEvent).mockResolvedValue(richEvent())
     vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Otro título' }))
 
     const user = userEvent.setup()
@@ -464,6 +488,7 @@ describe('Calendar', () => {
   it('no permite guardar con una URL que no sea http(s) (F24)', async () => {
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Sin URL' })])
+    vi.mocked(getEvent).mockResolvedValue(makeDetail({ summary: 'Sin URL' }))
 
     const user = userEvent.setup()
     renderCalendar()
@@ -501,13 +526,14 @@ describe('Calendar', () => {
     // A native DAV client stored a `URL:mailto:…` the backend deliberately lets
     // through. Changing only the title MUST still be saveable, and the `PATCH`
     // must not echo the URL back (which would destroy it).
-    const imported = makeEvent({
+    const imported = makeDetail({
       summary: 'Importado',
       location: 'Sala 3',
       url: 'mailto:ana@example.org',
     })
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([imported])
+    vi.mocked(getEvent).mockResolvedValue(imported)
     vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Renombrado' }))
 
     const user = userEvent.setup()
@@ -534,6 +560,7 @@ describe('Calendar', () => {
     // without it instead of round-tripping to a `400`.
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Sin URL' })])
+    vi.mocked(getEvent).mockResolvedValue(makeDetail({ summary: 'Sin URL' }))
     vi.mocked(updateEvent).mockResolvedValue(
       makeEvent({ summary: 'Sin URL', url: 'https://ejemplo.org/x' }),
     )
@@ -559,6 +586,11 @@ describe('Calendar', () => {
     const b = makeEvent({ uid: 'uid-b', summary: 'Evento B', location: 'B' })
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([a, b])
+    // The edit dialog fetches the *full* detail per event: answer by uid so each
+    // opening gets its own row (never the previous event's).
+    vi.mocked(getEvent).mockImplementation((_collectionId, uid) =>
+      Promise.resolve(makeDetail(uid === 'uid-a' ? a : b)),
+    )
     vi.mocked(updateEvent).mockResolvedValue(b)
 
     const user = userEvent.setup()
@@ -600,6 +632,7 @@ describe('Calendar', () => {
     const event = richEvent()
     vi.mocked(listCalendarCollections).mockResolvedValue([collection])
     vi.mocked(listEvents).mockResolvedValue([event])
+    vi.mocked(getEvent).mockResolvedValue(makeDetail({ ...event }))
     // Realistic API reply: the location was cleared, but the untouched URL stays.
     vi.mocked(updateEvent).mockResolvedValue(
       makeEvent({ summary: 'Con metadatos', description: 'Notas', location: null, url: event.url }),
@@ -617,5 +650,223 @@ describe('Calendar', () => {
     expect(
       await screen.findByRole('link', { name: 'https://ejemplo.org/x' }),
     ).toBeInTheDocument()
+  })
+
+  it('carga el detalle al abrir en edición y no reenvía las seis si solo cambia el título (F12)', async () => {
+    const detailed = makeDetail({
+      summary: 'Completo',
+      categories: ['trabajo', 'personal'],
+      attach: ['https://ejemplo.org/a'],
+      status: 'CONFIRMED',
+      class: 'PUBLIC',
+      transp: 'OPAQUE',
+      duration: 'PT2H',
+    })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    // The list row is the light one: it lacks the six F25 properties.
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Completo' })])
+    vi.mocked(getEvent).mockResolvedValue(detailed)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Otro título' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Completo/ }))
+
+    // El diálogo pide el detalle completo con la colección y el uid correctos.
+    await waitFor(() =>
+      expect(getEvent).toHaveBeenCalledWith(collection.id, 'uid-1', expect.anything()),
+    )
+
+    const dialog = await screen.findByRole('dialog')
+    // Las seis propiedades se reflejan en el formulario.
+    expect(within(dialog).getByText('trabajo')).toBeInTheDocument()
+    expect(within(dialog).getByText('personal')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Adjunto 1')).toHaveValue('https://ejemplo.org/a')
+    expect(within(dialog).getByText('Confirmado')).toBeInTheDocument()
+    expect(within(dialog).getByText('Público')).toBeInTheDocument()
+    expect(within(dialog).getByText('Ocupado (opaco)')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Dura…')).toBeChecked()
+    expect(within(dialog).getByLabelText('Cantidad')).toHaveValue('2')
+
+    const title = within(dialog).getByRole('textbox', { name: 'Título' })
+    await user.clear(title)
+    await user.type(title, 'Otro título')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.summary).toBe('Otro título')
+    // Ninguna de las seis viaja: el usuario no las tocó (regla D2).
+    expect('categories' in input).toBe(false)
+    expect('attach' in input).toBe(false)
+    expect('status' in input).toBe(false)
+    expect('class' in input).toBe(false)
+    expect('transp' in input).toBe(false)
+    expect('duration' in input).toBe(false)
+    expect('dtend' in input).toBe(false)
+  })
+
+  it('envía DURATION y omite DTEND cuando el radio está en «Dura…» (F13)', async () => {
+    const dtstart = atToday(10)
+    // `PT2H` decomposes into 2 hours; changing it to 1 hour is an explicit
+    // change, so the composed `PT1H` travels instead of the untouched `DTEND`.
+    const event = makeDetail({
+      summary: 'Duración',
+      dtstart,
+      dtend: null,
+      duration: 'PT2H',
+    })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Duración', dtstart })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Duración' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Duración/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByLabelText('Dura…')).toBeChecked()
+    const value = within(dialog).getByLabelText('Cantidad')
+    await user.clear(value)
+    await user.type(value, '1')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.duration).toBe('PT1H')
+    // DURATION and DTEND are exclusive: the latter is never sent alongside.
+    expect('dtend' in input).toBe(false)
+  })
+
+  it('envía DTEND y omite DURATION cuando el radio está en «Termina a las…» (F13)', async () => {
+    const dtstart = atToday(10)
+    const event = makeDetail({
+      summary: 'Termina',
+      dtstart,
+      dtend: null,
+      duration: 'PT1H',
+    })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Termina', dtstart })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Termina' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Termina/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByLabelText('Dura…')).toBeChecked()
+    await user.click(within(dialog).getByLabelText('Termina a las…'))
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    // The one-hour duration became an explicit end (start + 1 h).
+    expect(input.dtend).toBe(dtstart + 3_600_000)
+    expect('duration' in input).toBe(false)
+  })
+
+  it('pinta solo lo que la lista lleva: ni categorías, ni adjuntos, ni fin derivado (F14)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    // La lista del mes entrega el **DTO ligero**: no incluye `categories`,
+    // `attach` ni `duration`. La tarjeta no debe pintar nada de eso (antes lo
+    // hacía leyendo la copia optimista, y desaparecía al recargar el mes).
+    vi.mocked(listEvents).mockResolvedValue([
+      makeEvent({ summary: 'Ligero', location: 'Sala 3', url: 'javascript:alert(1)' }),
+    ])
+
+    renderCalendar()
+
+    // Lo que la lista sí lleva: hora, resumen y (F24) la ubicación como texto.
+    expect(await screen.findByText(/· Ligero/)).toBeInTheDocument()
+    expect(screen.getByText('Sala 3')).toBeInTheDocument()
+    // La tarjeta ya no deriva un fin a partir de un `DURATION`.
+    expect(screen.queryByText(/hasta /)).not.toBeInTheDocument()
+    // Una URL no http(s) nunca se pinta como enlace (F24, sigue vigente).
+    expect(screen.queryByRole('link', { name: 'javascript:alert(1)' })).not.toBeInTheDocument()
+  })
+
+  it('no reescribe una DURATION no descomponible al cambiar solo el título (D2)', async () => {
+    const event = makeDetail({ summary: 'Larga', dtend: null, duration: 'P1DT2H' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Larga' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Renombrada' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Larga/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    // The non-decomposable value is shown verbatim, not silently rounded.
+    expect(await within(dialog).findByText(/Duración actual: P1DT2H/)).toBeInTheDocument()
+
+    const title = within(dialog).getByRole('textbox', { name: 'Título' })
+    await user.clear(title)
+    await user.type(title, 'Renombrada')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.summary).toBe('Renombrada')
+    // Untouched: the raw `P1DT2H` is preserved by not echoing anything back.
+    expect('duration' in input).toBe(false)
+    expect('dtend' in input).toBe(false)
+  })
+
+  it('indica que el detalle aún está cargando mientras llega (F12)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Lento' })])
+    // El detalle se queda pendiente: mientras no llega, el diálogo debe mostrar
+    // el indicador de carga y **no** montar el formulario.
+    let resolveDetail!: (value: EventDetail) => void
+    vi.mocked(getEvent).mockReturnValue(
+      new Promise<EventDetail>((resolve) => {
+        resolveDetail = resolve
+      }),
+    )
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Lento/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog.querySelector('.ant-skeleton')).not.toBeNull()
+    expect(within(dialog).queryByRole('textbox', { name: 'Título' })).not.toBeInTheDocument()
+
+    await act(async () => {
+      resolveDetail(makeDetail({ summary: 'Lento' }))
+    })
+
+    // Llegado el detalle, el formulario se monta y el indicador desaparece.
+    expect(await within(dialog).findByRole('textbox', { name: 'Título' })).toBeInTheDocument()
+    expect(dialog.querySelector('.ant-skeleton')).toBeNull()
+  })
+
+  it('vuelve a pedir el detalle al reabrir un evento tras guardarlo (F25/A2)', async () => {
+    const event = makeDetail({ summary: 'Reabrible' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Reabrible' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    // El `PATCH` devuelve la fila con un `etag` nuevo, que la lista consolida.
+    vi.mocked(updateEvent).mockResolvedValue(
+      makeEvent({ summary: 'Reabrible', etag: 'etag-2' }),
+    )
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Reabrible/ }))
+    await waitFor(() => expect(getEvent).toHaveBeenCalledTimes(1))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+
+    // Reabrir el **mismo** evento: el `etag` nuevo cambia la *request key*, así
+    // que el detalle se pide otra vez en lugar de mostrar el anterior al guardado.
+    await user.click(await screen.findByRole('button', { name: /· Reabrible/ }))
+    await waitFor(() => expect(getEvent).toHaveBeenCalledTimes(2))
   })
 })
