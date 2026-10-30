@@ -1,4 +1,15 @@
 # Changelog
+## [0.8.0] - 2026-10-30
+
+### Documentation
+
+- Regenerar el changelog para 0.7.0
+
+### Features
+
+- Zona horaria (TZID) y recurrencia (RRULE) en el diálogo de eventos (F26) (#46)
+- EXDATE y RDATE en el diálogo de eventos (F27) (#47)
+- SEQUENCE y CREATED/LAST-MODIFIED en el diálogo de eventos (F28) (#48)
 ## [0.7.0] - 2026-10-29
 
 ### Bug Fixes
