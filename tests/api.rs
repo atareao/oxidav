@@ -1987,6 +1987,96 @@ async fn patch_preserves_unmodelled_properties_of_a_rich_ics() {
     );
 }
 
+/// F7 (PLAN-032) — el `.ics` rico de [`rich_ics`] **más** las tres propiedades
+/// de F28 (`SEQUENCE:2`, `CREATED` y `LAST-MODIFIED`), para comprobar que el
+/// invariante de las dos líneas se sostiene con ellas en juego.
+fn rich_ics_with_marks(uid: &str) -> String {
+    let base = rich_ics(uid);
+    let with_marks = "SEQUENCE:2\r\n\
+                      CREATED:20240101T000000Z\r\n\
+                      LAST-MODIFIED:20240201T120000Z\r\n\
+                      DTSTART:20240315T100000Z\r\n";
+    base.replace("DTSTART:20240315T100000Z\r\n", with_marks)
+}
+
+/// F7 (PLAN-032) — un `PATCH` que cambia **sólo** el título sobre un `.ics` rico
+/// que además lleva `SEQUENCE:2`, `CREATED` y `LAST-MODIFIED`: difieren
+/// **exactamente dos** líneas (`SUMMARY` y `DTSTAMP`), con el mismo número de
+/// líneas, y las tres marcas quedan byte a byte.
+#[tokio::test]
+async fn patch_only_title_keeps_sequence_and_marks_line_for_line() {
+    let env = TestEnv::new("f28-rich-invariant").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "rich-f28@oxidav";
+    let original = rich_ics_with_marks(uid);
+    // Sanity: el fixture lleva las tres marcas.
+    assert!(original.contains("SEQUENCE:2\r\n"), "{original}");
+    assert!(
+        original.contains("CREATED:20240101T000000Z\r\n"),
+        "{original}"
+    );
+    assert!(
+        original.contains("LAST-MODIFIED:20240201T120000Z\r\n"),
+        "{original}"
+    );
+    seed_event(
+        &env,
+        &cid,
+        "evt-rich-f28",
+        uid,
+        Some("Sala 3"),
+        None,
+        &original,
+    )
+    .await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Nuevo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(body["summary"], "Nuevo");
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+
+    // Las tres marcas de F28 siguen presentes byte a byte.
+    for needle in [
+        "SEQUENCE:2\r\n",
+        "CREATED:20240101T000000Z\r\n",
+        "LAST-MODIFIED:20240201T120000Z\r\n",
+    ] {
+        assert!(stored.contains(needle), "missing {needle:?}: {stored}");
+    }
+
+    // Mismo número de líneas, y **exactamente dos** difieren: `SUMMARY` y
+    // `DTSTAMP`. Todo lo demás (VALARM, ambos ATTENDEE, X-, las F25 modeladas y
+    // las tres marcas de F28) es byte a byte.
+    let before: Vec<&str> = original.lines().collect();
+    let after: Vec<&str> = stored.lines().collect();
+    assert_eq!(before.len(), after.len(), "line count changed:\n{stored}");
+    let diffs: Vec<&str> = before
+        .iter()
+        .zip(&after)
+        .filter(|(before, after)| before != after)
+        .map(|(before, _)| *before)
+        .collect();
+    assert_eq!(diffs.len(), 2, "only SUMMARY/DTSTAMP may change:\n{stored}");
+    assert!(
+        diffs.iter().any(|line| line.starts_with("SUMMARY:")),
+        "{diffs:?}"
+    );
+    assert!(
+        diffs.iter().any(|line| line.starts_with("DTSTAMP:")),
+        "{diffs:?}"
+    );
+}
+
 /// E14 — the D1 rule: a legacy row whose `location` column is `NULL` but whose
 /// payload carries `LOCATION:Sala 3` (a row written before migration `0005`)
 /// keeps its location across a `PATCH` that does not mention it, and the DTO
@@ -5048,5 +5138,400 @@ async fn patch_with_empty_exdate_clears_an_opaque_exdate() {
     assert!(
         !stored.contains("EXDATE"),
         "an EXDATE line survived the clear: {stored}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F28 (PLAN-032) — SEQUENCE editable y CREATED / LAST-MODIFIED de solo lectura
+// ---------------------------------------------------------------------------
+
+/// Un `.ics` mínimo cuyo evento lleva `SEQUENCE:x-custom` (no modelable → la
+/// propiedad queda **opaca**, se preserva verbatim y no se edita).
+fn ics_with_opaque_sequence(uid: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//oxidav//test//EN\r\n\
+         BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:Original\r\n\
+         DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\n\
+         SEQUENCE:x-custom\r\n\
+         END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+/// Un `.ics` mínimo con las dos marcas de solo lectura `CREATED` y
+/// `LAST-MODIFIED` (ambas en UTC, RFC 5545 §3.8.7.1/§3.8.7.3).
+fn ics_with_marks(uid: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//oxidav//test//EN\r\n\
+         BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:Original\r\n\
+         DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\n\
+         CREATED:20240101T000000Z\r\nLAST-MODIFIED:20240201T120000Z\r\n\
+         END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+/// `PUT` a DAV resource with a cookie-authenticated session (same-origin, F17).
+async fn put_ics(env: &TestEnv, token: &str, cid: &str, uid: &str, ics: String) {
+    let request = Request::builder()
+        .method(Method::PUT)
+        .uri(format!("/dav/calendars/user-a/{cid}/{uid}.ics"))
+        .header(header::COOKIE, format!("{SESSION_COOKIE_NAME}={token}"))
+        .header(header::CONTENT_TYPE, "text/calendar; charset=utf-8")
+        .header("sec-fetch-site", "same-origin")
+        .body(Body::from(ics))
+        .expect("build PUT");
+    let response = env.app.clone().oneshot(request).await.expect("send PUT");
+    assert_eq!(response.status(), StatusCode::CREATED, "PUT failed");
+}
+
+/// F3 — validación de `SEQUENCE`: `-1` y `2147483648` son un `400`; `0` es un
+/// `200` y el payload almacenado lleva `SEQUENCE:0`.
+#[tokio::test]
+async fn patch_sequence_enforces_the_range() {
+    let env = TestEnv::new("f28-seq-range").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f28-range-1";
+    let (status, created) = create_minimal_event(&env, &token, &cid, uid, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+
+    for bad in [json!(-1), json!(2_147_483_648_i64)] {
+        let (status, body) = env
+            .call(
+                Method::PATCH,
+                &uri,
+                Some(&token),
+                Some(one_key_patch("sequence", bad.clone())),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "sequence={bad}: {body}");
+        assert_eq!(
+            body["error"]["code"], "validation",
+            "sequence={bad}: {body}"
+        );
+    }
+
+    // `0` está en rango y se emite en el payload.
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(one_key_patch("sequence", json!(0))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "sequence=0 rejected: {body}");
+    assert_eq!(body["sequence"], json!(0), "{body}");
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("SEQUENCE:0\r\n"), "{stored}");
+}
+
+/// F4 — escritura y herencia: `PATCH {sequence:5}` fija el valor (payload y
+/// DTO); un `PATCH` que no menciona `sequence` lo deja como estaba.
+#[tokio::test]
+async fn patch_sequence_writes_and_inherits() {
+    let env = TestEnv::new("f28-seq-write").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f28-write-1";
+    let (status, created) =
+        create_minimal_event(&env, &token, &cid, uid, json!({ "sequence": 1 })).await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(created["sequence"], json!(1), "{created}");
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(one_key_patch("sequence", json!(5))),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(body["sequence"], json!(5), "{body}");
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("SEQUENCE:5\r\n"), "{stored}");
+    assert!(!stored.contains("SEQUENCE:1"), "{stored}");
+
+    // Un `PATCH` que no menciona `sequence` lo deja igual (heredado del payload).
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Otro" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(body["sequence"], json!(5), "{body}");
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("SEQUENCE:5\r\n"), "{stored}");
+}
+
+/// F5 — opaco preservado: un `PUT` con `SEQUENCE:x-custom` sobrevive a un
+/// `PATCH` que solo cambia el título; el detalle lo expone como opaco.
+#[tokio::test]
+async fn patch_keeps_an_opaque_sequence_verbatim() {
+    let env = TestEnv::new("f28-seq-opaque").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f28-opaque-1@oxidav";
+    put_ics(&env, &token, &cid, uid, ics_with_opaque_sequence(uid)).await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, detail) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {detail}");
+    assert_eq!(detail["sequence"], Value::Null, "{detail}");
+    assert_eq!(detail["sequence_opaque"], "SEQUENCE:x-custom", "{detail}");
+
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Otro" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        stored.contains("SEQUENCE:x-custom\r\n"),
+        "the opaque SEQUENCE line was lost or rewritten: {stored}"
+    );
+}
+
+/// F6 — `CREATED`/`LAST-MODIFIED` de solo lectura: un `PATCH` que cambia **solo**
+/// el título deja sus dos líneas byte a byte y el detalle devuelve los mismos
+/// instantes.
+#[tokio::test]
+async fn patch_keeps_created_and_last_modified_verbatim() {
+    let env = TestEnv::new("f28-marks").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f28-marks-1@oxidav";
+    seed_event(
+        &env,
+        &cid,
+        "evt-f28-marks",
+        uid,
+        None,
+        None,
+        &ics_with_marks(uid),
+    )
+    .await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, before) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {before}");
+    let created = before["created"].clone();
+    let last_modified = before["last_modified"].clone();
+    assert_ne!(created, Value::Null, "{before}");
+    assert_ne!(last_modified, Value::Null, "{before}");
+
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Solo titulo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(body["created"], created, "{body}");
+    assert_eq!(body["last_modified"], last_modified, "{body}");
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("CREATED:20240101T000000Z\r\n"), "{stored}");
+    assert!(
+        stored.contains("LAST-MODIFIED:20240201T120000Z\r\n"),
+        "{stored}"
+    );
+}
+
+/// F9 — la lista no cambia de forma: cada elemento de la colección sigue
+/// trayendo **solo** los campos de `EventDto` (sin `sequence`, `created` ni
+/// `last_modified`).
+#[tokio::test]
+async fn event_list_still_returns_only_event_dto_fields() {
+    let env = TestEnv::new("f28-list-shape").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f28-list-1@oxidav";
+    seed_event(
+        &env,
+        &cid,
+        "evt-f28-list",
+        uid,
+        None,
+        None,
+        &ics_with_marks(uid),
+    )
+    .await;
+
+    let (status, list) = env
+        .call(
+            Method::GET,
+            &format!("/api/v1/collections/{cid}/events"),
+            Some(&token),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "list failed: {list}");
+    let items = list.as_array().expect("an array");
+    assert_eq!(items.len(), 1, "{list}");
+    let item = &items[0];
+    for absent in ["sequence", "sequence_opaque", "created", "last_modified"] {
+        assert!(
+            item.get(absent).is_none(),
+            "the list leaked `{absent}`: {item}"
+        );
+    }
+    // Los campos del DTO ligero siguen ahí.
+    assert_eq!(item["uid"], uid);
+    assert!(item.get("etag").is_some(), "{item}");
+}
+
+/// Instante Unix en **ms** para una fecha-time iCalendar UTC (`YYYYMMDDTHHMMSSZ`),
+/// calculado con `chrono` en vez de un número mágico (verificación de cierre de
+/// PLAN-032).
+fn utc_ms(value: &str) -> i64 {
+    chrono::NaiveDateTime::parse_from_str(value.trim_end_matches('Z'), "%Y%m%dT%H%M%S")
+        .expect("valid UTC date-time")
+        .and_utc()
+        .timestamp_millis()
+}
+
+/// Un `.ics` mínimo cuyo evento lleva un `SEQUENCE` con un valor textual **no
+/// canónico** (`SEQUENCE:02`), para fijar la normalización al heredarlo.
+fn ics_with_non_canonical_sequence(uid: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//oxidav//test//EN\r\n\
+         BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:Original\r\n\
+         DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\n\
+         SEQUENCE:02\r\n\
+         END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+/// Verificación de cierre de PLAN-032 — un `PUT` de un `.ics` **realista**
+/// (`SEQUENCE`, `CREATED`, `LAST-MODIFIED`, `VALARM`, dos `ATTENDEE` y `X-`) se
+/// proyecta en el `GET` del detalle (las tres con sus valores/instantes) y un
+/// `PATCH` que cambia **solo** el título altera **exactamente dos** líneas
+/// (`SUMMARY`, `DTSTAMP`), con el mismo número de líneas.
+#[tokio::test]
+async fn put_then_get_projects_sequence_and_marks_and_patch_only_title_changes_two_lines() {
+    let env = TestEnv::new("f28-put-projection").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f28-put-1@oxidav";
+    let original = rich_ics_with_marks(uid);
+    put_ics(&env, &token, &cid, uid, original.clone()).await;
+
+    // El detalle proyecta las tres propiedades de F28 con sus valores correctos.
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, detail) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {detail}");
+    assert_eq!(detail["sequence"], json!(2), "{detail}");
+    assert_eq!(detail["sequence_opaque"], Value::Null, "{detail}");
+    assert_eq!(
+        detail["created"],
+        json!(utc_ms("20240101T000000Z")),
+        "{detail}"
+    );
+    assert_eq!(
+        detail["last_modified"],
+        json!(utc_ms("20240201T120000Z")),
+        "{detail}"
+    );
+
+    // Un `PATCH` que solo cambia el título difiere en **exactamente dos** líneas.
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Nuevo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(body["summary"], "Nuevo");
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    for needle in [
+        "SEQUENCE:2\r\n",
+        "CREATED:20240101T000000Z\r\n",
+        "LAST-MODIFIED:20240201T120000Z\r\n",
+    ] {
+        assert!(stored.contains(needle), "missing {needle:?}: {stored}");
+    }
+
+    let before: Vec<&str> = original.lines().collect();
+    let after: Vec<&str> = stored.lines().collect();
+    assert_eq!(before.len(), after.len(), "line count changed:\n{stored}");
+    let diffs: Vec<&str> = before
+        .iter()
+        .zip(&after)
+        .filter(|(before, after)| before != after)
+        .map(|(before, _)| *before)
+        .collect();
+    assert_eq!(diffs.len(), 2, "only SUMMARY/DTSTAMP may change:\n{stored}");
+    assert!(
+        diffs.iter().any(|line| line.starts_with("SUMMARY:")),
+        "{diffs:?}"
+    );
+    assert!(
+        diffs.iter().any(|line| line.starts_with("DTSTAMP:")),
+        "{diffs:?}"
+    );
+}
+
+/// Caracterización (PLAN-032) — un `SEQUENCE` modelable pero **no canónico**
+/// (`SEQUENCE:02`) se hereda en un `PATCH` y se **reescribe** a su forma
+/// canónica `SEQUENCE:2`. Es la herencia normalizando la forma textual: un
+/// comportamiento **intencional**, consistente con la normalización de los
+/// escalares de F25 y de `EXDATE`/`RDATE` de F27 (no es un bug).
+#[tokio::test]
+async fn patch_inherits_and_canonicalizes_a_non_canonical_sequence() {
+    let env = TestEnv::new("f28-seq-canonical").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f28-canon-1@oxidav";
+    put_ics(
+        &env,
+        &token,
+        &cid,
+        uid,
+        ics_with_non_canonical_sequence(uid),
+    )
+    .await;
+
+    // `02` es un entero modelable: la proyección lo lee como `2`.
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, detail) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {detail}");
+    assert_eq!(detail["sequence"], json!(2), "{detail}");
+    assert_eq!(detail["sequence_opaque"], Value::Null, "{detail}");
+
+    // `PATCH` que no menciona `sequence`: se hereda (`2`) y se reescribe canónico.
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Otro" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        stored.contains("SEQUENCE:2\r\n"),
+        "expected canonical SEQUENCE:2: {stored}"
+    );
+    assert!(
+        !stored.contains("SEQUENCE:02"),
+        "the non-canonical form survived: {stored}"
     );
 }
