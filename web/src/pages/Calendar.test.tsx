@@ -11,7 +11,7 @@
  * modo que las aserciones observan las llamadas reales.
  */
 
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { App, ConfigProvider } from 'antd'
 import esES from 'antd/locale/es_ES'
@@ -122,6 +122,21 @@ function renderCalendar() {
       </App>
     </ConfigProvider>,
   )
+}
+
+/**
+ * Ant Design v6 renders the `allowClear` affordance as a `<button
+ * class="ant-select-clear">` that clears on `click` (its `mousedown` only marks
+ * the native event so the root handler does not reopen the dropdown). There is
+ * no stable accessible role, so tests reach it through the combobox's
+ * `.ant-select` ancestor and click it.
+ */
+function clearSelect(combobox: HTMLElement) {
+  const clear = combobox.closest('.ant-select')?.querySelector<HTMLElement>('.ant-select-clear')
+  if (clear === null || clear === undefined) {
+    throw new Error('no se encontró el botón de limpiar del Select')
+  }
+  fireEvent.click(clear)
 }
 
 describe('Calendar', () => {
@@ -868,5 +883,441 @@ describe('Calendar', () => {
     // que el detalle se pide otra vez en lugar de mostrar el anterior al guardado.
     await user.click(await screen.findByRole('button', { name: /· Reabrible/ }))
     await waitFor(() => expect(getEvent).toHaveBeenCalledTimes(2))
+  })
+
+  // -------------------------------------------------------------------------
+  // F26 — zona horaria (TZID) y recurrencia (RRULE) en el diálogo.
+  // -------------------------------------------------------------------------
+
+  /** Opens the "Nuevo evento" dialog, ready for the form. */
+  async function openCreateDialog(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole('button', { name: /nuevo evento/i }))
+    return await screen.findByRole('dialog')
+  }
+
+  /** Selects an option from a `showSearch` Select by filtering and clicking it. */
+  async function pickOption(
+    user: ReturnType<typeof userEvent.setup>,
+    combobox: HTMLElement,
+    name: string,
+  ) {
+    await user.click(combobox)
+    await user.type(combobox, name)
+    await user.click(
+      await screen.findByText(name, { selector: '.ant-select-item-option-content' }),
+    )
+  }
+
+  it('crea un evento sin repetición y con la zona del navegador (F26)', async () => {
+    const expectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([])
+    vi.mocked(createEvent).mockResolvedValue(makeEvent({ uid: 'nuevo', summary: 'Simple' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    const dialog = await openCreateDialog(user)
+
+    await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'Simple')
+    await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+    await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
+    const [, input] = vi.mocked(createEvent).mock.calls[0]
+    expect(input.tzid).toBe(expectedTz)
+    // Sin repetición elegida: la clave ni se envía.
+    expect('rrule' in input).toBe(false)
+  })
+
+  it('compone y envía una RRULE semanal al crear (F26)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([])
+    vi.mocked(createEvent).mockResolvedValue(makeEvent({ uid: 'nuevo', summary: 'Semanal' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    const dialog = await openCreateDialog(user)
+
+    await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'Semanal')
+
+    // Frecuencia: Semanal. Filtramos con `fireEvent.change` (una sola acción,
+    // mucho más barata que teclear) y elegimos la opción ya pintada con `getBy*`.
+    const freq = within(dialog).getByRole('combobox', { name: 'Repetición' })
+    await user.click(freq)
+    fireEvent.change(freq, { target: { value: 'Semanal' } })
+    fireEvent.click(screen.getByText('Semanal', { selector: '.ant-select-item-option-content' }))
+
+    // Intervalo: cada 2.
+    fireEvent.change(within(dialog).getByRole('spinbutton', { name: 'Cada' }), {
+      target: { value: '2' },
+    })
+
+    // Días: lunes y miércoles.
+    const days = within(dialog).getByRole('combobox', { name: 'Días de la semana' })
+    await user.click(days)
+    fireEvent.change(days, { target: { value: 'Lun' } })
+    fireEvent.click(screen.getByText('Lunes', { selector: '.ant-select-item-option-content' }))
+    fireEvent.change(days, { target: { value: 'Mié' } })
+    fireEvent.click(screen.getByText('Miércoles', { selector: '.ant-select-item-option-content' }))
+    // El desplegable múltiple debe cerrarse (Escape no basta en jsdom): al
+    // enfocar otro campo el Select pierde el foco, antd cierra el popup y el
+    // botón «Crear» vuelve a ser clicable (antes queda inerte bajo el overlay).
+    await user.click(within(dialog).getByRole('textbox', { name: 'Título' }))
+
+    // Fin: después de 5 veces.
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Después de N veces' }))
+    fireEvent.change(within(dialog).getByRole('spinbutton', { name: 'Número de veces' }), {
+      target: { value: '5' },
+    })
+
+    // Resumen en vivo derivado de la misma regla que se envía (ya pintado).
+    expect(
+      within(dialog).getByText('Se repite cada 2 semanas los lunes y miércoles, 5 veces'),
+    ).toBeInTheDocument()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+    await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
+    const [, input] = vi.mocked(createEvent).mock.calls[0]
+    expect(input.rrule).toBe('FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;COUNT=5')
+  })
+
+  it('crea un evento sin zona al vaciar el campo (F26)', async () => {
+    const expectedTz = Intl.DateTimeFormat().resolvedOptions().timeZone
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([])
+    let resolveCreate!: (value: CalendarEvent) => void
+    vi.mocked(createEvent).mockReturnValue(
+      new Promise<CalendarEvent>((resolve) => {
+        resolveCreate = resolve
+      }),
+    )
+
+    const user = userEvent.setup()
+    renderCalendar()
+    const dialog = await openCreateDialog(user)
+
+    await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'SinTz')
+    clearSelect(within(dialog).getByRole('combobox', { name: 'Zona horaria' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+    await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
+    const [, input] = vi.mocked(createEvent).mock.calls[0]
+    // Vaciar la zona ⇒ se omite la clave (nunca se envía `''`).
+    expect('tzid' in input).toBe(false)
+
+    // Optimista: la tarjeta del evento nuevo no pinta zona.
+    expect(await screen.findByText(/SinTz/)).toBeInTheDocument()
+    expect(screen.queryByText(expectedTz)).not.toBeInTheDocument()
+
+    await act(async () => {
+      resolveCreate(makeEvent({ uid: 'nuevo', summary: 'SinTz' }))
+    })
+  })
+
+  it('no reenvía una RRULE parseable sin tocarla (D2, F26)', async () => {
+    const event = makeDetail({ summary: 'Recurrente', rrule: 'FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;COUNT=5' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Recurrente' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Recurrente' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Recurrente/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    // El constructor se precarga con la regla.
+    expect(within(dialog).getByText('Semanal')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect('rrule' in input).toBe(false)
+  })
+
+  it('envía la RRULE nueva al cambiar la frecuencia (F26)', async () => {
+    const event = makeDetail({ summary: 'Diario', rrule: 'FREQ=DAILY' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Diario' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Diario' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Diario/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await pickOption(user, within(dialog).getByRole('combobox', { name: 'Repetición' }), 'Semanal')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.rrule).toBe('FREQ=WEEKLY')
+  })
+
+  it('limpia la RRULE al vaciar la frecuencia (F26)', async () => {
+    const event = makeDetail({ summary: 'Diario', rrule: 'FREQ=DAILY' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Diario' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Diario' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Diario/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    clearSelect(within(dialog).getByRole('combobox', { name: 'Repetición' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.rrule).toBe('')
+  })
+
+  it('preserva verbatim una RRULE opaca sin tocarla (D2, F26)', async () => {
+    const opaque = 'FREQ=MONTHLY;BYMONTHDAY=15'
+    const event = makeDetail({ summary: 'Opaca', rrule: opaque })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Opaca' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Opaca' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Opaca/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    // Se muestra en solo lectura, verbatim.
+    expect(within(dialog).getByText(`Recurrencia actual: ${opaque}`)).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect('rrule' in input).toBe(false)
+  })
+
+  it('limpia una RRULE opaca al marcar «Quitar recurrencia» (F26)', async () => {
+    const event = makeDetail({ summary: 'Opaca', rrule: 'FREQ=MONTHLY;BYMONTHDAY=15' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Opaca' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Opaca' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Opaca/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Quitar recurrencia' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.rrule).toBe('')
+  })
+
+  it('muestra la zona del evento, no ofrece limpiarla, y la cambia al guardar (F26)', async () => {
+    const dtstart = atToday(10)
+    const event = makeDetail({
+      summary: 'Con zona',
+      dtstart,
+      dtstart_tzid: 'Europe/Madrid',
+      dtend_tzid: 'Europe/Madrid',
+    })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Con zona' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con zona' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Con zona/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    const tz = within(dialog).getByRole('combobox', { name: 'Zona horaria' })
+    expect(within(dialog).getByText('Europe/Madrid')).toBeInTheDocument()
+    expect(within(dialog).getByText('La zona no se puede quitar desde aquí')).toBeInTheDocument()
+    // Sin botón de limpiar en edición.
+    expect(tz.closest('.ant-select')?.querySelector('.ant-select-clear')).toBeNull()
+
+    // Cambiar a otra zona.
+    await user.click(tz)
+    await user.type(tz, 'Asia/Tokyo')
+    await user.click(
+      await screen.findByText('Asia/Tokyo', { selector: '.ant-select-item-option-content' }),
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.tzid).toBe('Asia/Tokyo')
+  })
+
+  it('conserva el tzid al guardar sin tocar la zona (F26)', async () => {
+    const dtstart = atToday(10)
+    const event = makeDetail({
+      summary: 'Con zona',
+      dtstart,
+      dtstart_tzid: 'Europe/Madrid',
+      dtend_tzid: 'Europe/Madrid',
+    })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Con zona' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con zona' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Con zona/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.tzid).toBe('Europe/Madrid')
+  })
+
+  it('no incluye tzid si el evento no tiene zona y no se toca (F26)', async () => {
+    const dtstart = atToday(10)
+    const event = makeDetail({ summary: 'Sin zona', dtstart })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Sin zona' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Sin zona' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Sin zona/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByRole('combobox', { name: 'Zona horaria' })).toHaveValue('')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect('tzid' in input).toBe(false)
+  })
+
+  it('no compone un fin vacío al borrar «Número de veces» (B1)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([])
+    vi.mocked(createEvent).mockResolvedValue(makeEvent({ uid: 'nuevo', summary: 'Daily' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    const dialog = await openCreateDialog(user)
+
+    await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'Daily')
+    await pickOption(user, within(dialog).getByRole('combobox', { name: 'Repetición' }), 'Diaria')
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Después de N veces' }))
+
+    const count = within(dialog).getByRole('spinbutton', { name: 'Número de veces' })
+    fireEvent.change(count, { target: { value: '5' } })
+    expect(await within(dialog).findByText(/5 veces/)).toBeInTheDocument()
+
+    // Borrar el número: la vista previa no debe lanzar ni emitir `COUNT=null`.
+    fireEvent.change(count, { target: { value: '' } })
+    expect(await within(dialog).findByText('Se repite todos los días')).toBeInTheDocument()
+
+    // El fin elegido exige un número: sin él, no se envía nada.
+    await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+    expect(await screen.findByText('Indica cuántas veces se repite')).toBeInTheDocument()
+    expect(createEvent).not.toHaveBeenCalled()
+  })
+
+  it('no lanza al vaciar «Hasta el día» y exige la fecha al guardar (B1)', async () => {
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([])
+    vi.mocked(createEvent).mockResolvedValue(makeEvent({ uid: 'nuevo', summary: 'Daily' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    const dialog = await openCreateDialog(user)
+
+    await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'Daily')
+    await pickOption(user, within(dialog).getByRole('combobox', { name: 'Repetición' }), 'Diaria')
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Hasta' }))
+
+    const until = within(dialog).getByRole('textbox', { name: 'Hasta el día' })
+    await user.type(until, '2026-12-31{Enter}')
+    expect(await within(dialog).findByText(/hasta el 31\/12\/2026/)).toBeInTheDocument()
+
+    // Vaciar la fecha: antes lanzaba `TypeError` (null.format) en la previa.
+    const clear = until.closest('.ant-picker')?.querySelector<HTMLElement>('.ant-picker-clear')
+    expect(clear).not.toBeNull()
+    if (clear != null) {
+      fireEvent.click(clear)
+    }
+    expect(await within(dialog).findByText('Se repite todos los días')).toBeInTheDocument()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+    expect(await screen.findByText('Indica la fecha de fin')).toBeInTheDocument()
+    expect(createEvent).not.toHaveBeenCalled()
+  })
+
+  it('sustituye una RRULE opaca por una regla compuesta (F26, escenario 16b)', async () => {
+    const event = makeDetail({ summary: 'Opaca', rrule: 'FREQ=MONTHLY;BYMONTHDAY=15' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Opaca' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Opaca' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Opaca/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(
+      within(dialog).getByText('Recurrencia actual: FREQ=MONTHLY;BYMONTHDAY=15'),
+    ).toBeInTheDocument()
+
+    // El usuario compone una regla nueva: sustituye a la opaca.
+    await pickOption(user, within(dialog).getByRole('combobox', { name: 'Repetición' }), 'Semanal')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect(input.rrule).toBe('FREQ=WEEKLY')
+  })
+
+  it('no reenvía una RRULE parseable pero no canónica sin tocarla (M1)', async () => {
+    const event = makeDetail({ summary: 'NoCanon', rrule: 'FREQ=WEEKLY;BYDAY=WE,MO' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'NoCanon' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'NoCanon' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· NoCanon/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    // La forma canónica coincide con lo reconstruido: no se reescribe el `.ics`.
+    expect('rrule' in input).toBe(false)
+  })
+
+  it('preserva una RRULE con UNTIL corto sin reescribirla (M1)', async () => {
+    const event = makeDetail({ summary: 'Until', rrule: 'FREQ=YEARLY;UNTIL=20261231' })
+    vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+    vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Until' })])
+    vi.mocked(getEvent).mockResolvedValue(event)
+    vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Until' }))
+
+    const user = userEvent.setup()
+    renderCalendar()
+    await user.click(await screen.findByRole('button', { name: /· Until/ }))
+
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+    await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+    const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+    expect('rrule' in input).toBe(false)
   })
 })

@@ -32,5 +32,11 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     globals: true,
+    // Los tests de integración con antd (p. ej. el diálogo de eventos de F26)
+    // encadenan muchas interacciones de usuario y en un runner de CI lento
+    // rozan —y superan— el límite por defecto de 5000 ms. Se sube el margen
+    // para absorber esa lentitud sin enmascarar cuelgues reales: un test que se
+    // cuelga de verdad (sin aserciones que resuelvan) sigue fallando.
+    testTimeout: 15_000,
   },
 })
