@@ -4816,3 +4816,237 @@ async fn name_sub_lists_are_comma_separated_and_round_trip() {
     assert_eq!(d["name"]["prefix"], json!(["Dr.", "Prof."]));
     assert_eq!(d["name"]["suffix"], json!(["Jr.", "PhD"]));
 }
+
+// ---------------------------------------------------------------------------
+// F27 (PLAN-031) — EXDATE / RDATE en la API REST
+// ---------------------------------------------------------------------------
+
+/// Un `.ics` mínimo cuyo evento lleva un `EXDATE;VALUE=DATE` (fuera del
+/// subconjunto soportado → propiedad opaca).
+fn ics_with_opaque_exdate(uid: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//oxidav//test//EN\r\n\
+         BEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:Original\r\n\
+         DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\n\
+         EXDATE;VALUE=DATE:20260315\r\n\
+         END:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+/// Escenario 13 — `POST` con `exdate` (dos instantes, desordenados): `201`, el
+/// detalle los devuelve ordenados y el `.ics` almacenado lleva la línea `EXDATE`.
+#[tokio::test]
+async fn create_with_exdate_emits_and_returns_it() {
+    let env = TestEnv::new("f27-create-exdate").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f27-exdate-1";
+    let early = 1_700_000_000_000_i64;
+    let late = 1_700_000_600_000_i64;
+
+    // Desordenados a propósito: el servidor los canoniza.
+    let (status, created) = create_minimal_event(
+        &env,
+        &token,
+        &cid,
+        uid,
+        json!({ "exdate": [late, early], "rdate": [1_700_001_200_000_i64] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    assert_eq!(created["exdate"], json!([early, late]));
+    assert_eq!(created["rdate"], json!([1_700_001_200_000_i64]));
+    assert_eq!(created["exdate_opaque"], Value::Null);
+    assert_eq!(created["rdate_opaque"], Value::Null);
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("EXDATE:"), "missing EXDATE: {stored}");
+    assert!(stored.contains("RDATE:"), "missing RDATE: {stored}");
+}
+
+/// Escenario 14 — `PATCH` de `summary` sobre un evento con `EXDATE` modelable:
+/// la propiedad se conserva (heredada del payload) y el `.ics` sigue llevándola.
+#[tokio::test]
+async fn patch_without_exdate_keeps_it() {
+    let env = TestEnv::new("f27-keep-exdate").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f27-keep-1";
+    let early = 1_700_000_000_000_i64;
+    let late = 1_700_000_600_000_i64;
+
+    let (status, created) =
+        create_minimal_event(&env, &token, &cid, uid, json!({ "exdate": [early, late] })).await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Nuevo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+    assert_eq!(body["exdate"], json!([early, late]));
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(stored.contains("EXDATE:"), "EXDATE lost: {stored}");
+}
+
+/// Escenario 15 — `PATCH` con `exdate: []` limpia la propiedad: el detalle
+/// devuelve `[]` y el payload pierde la línea.
+#[tokio::test]
+async fn patch_with_empty_exdate_clears_it() {
+    let env = TestEnv::new("f27-clear-exdate").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f27-clear-1";
+
+    let (status, created) = create_minimal_event(
+        &env,
+        &token,
+        &cid,
+        uid,
+        json!({ "exdate": [1_700_000_000_000_i64, 1_700_000_600_000_i64] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "exdate": [] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "clear failed: {body}");
+    assert_eq!(body["exdate"], json!([]));
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        !stored.contains("EXDATE"),
+        "an EXDATE line survived: {stored}"
+    );
+}
+
+/// Escenario 16 — `PATCH` de `summary` sobre un evento con `EXDATE;VALUE=DATE`
+/// (opaco): la línea sigue verbatim y el detalle la reporta como opaca.
+#[tokio::test]
+async fn patch_keeps_an_opaque_exdate_verbatim() {
+    let env = TestEnv::new("f27-opaque-exdate").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f27-opaque-1@oxidav";
+    let original = ics_with_opaque_exdate(uid);
+    seed_event(&env, &cid, "evt-f27-opaque", uid, None, None, &original).await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+    let (status, detail) = env.call(Method::GET, &uri, Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "get failed: {detail}");
+    assert_eq!(detail["exdate"], json!([]));
+    assert_eq!(detail["exdate_opaque"], "EXDATE;VALUE=DATE:20260315");
+
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "summary": "Nuevo" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "patch failed: {body}");
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        stored.contains("EXDATE;VALUE=DATE:20260315"),
+        "the opaque EXDATE line was lost or rewritten: {stored}"
+    );
+}
+
+/// F27 (auditoría m-6, 1) — `POST` con un `exdate` fuera del rango de fechas
+/// admitido (`i64::MAX`, que no se puede renderizar como fecha iCalendar) es un
+/// `400` de validación.
+#[tokio::test]
+async fn create_rejects_out_of_range_exdate() {
+    let env = TestEnv::new("f27-exdate-range").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f27-range-1";
+
+    let (status, body) =
+        create_minimal_event(&env, &token, &cid, uid, json!({ "exdate": [i64::MAX] })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "expected 400: {body}");
+    assert_eq!(body["error"]["code"], "validation", "{body}");
+}
+
+/// F27 (auditoría m-6, 2) — `POST` con **65** instantes `exdate` distintos
+/// supera el tope de `MAX_RECUR_DATES` (64) y es un `400`.
+#[tokio::test]
+async fn create_rejects_too_many_distinct_exdates() {
+    let env = TestEnv::new("f27-exdate-many").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f27-many-1";
+
+    // 65 instantes distintos, todos dentro de rango.
+    let base = 1_700_000_000_000_i64;
+    let exdate: Vec<i64> = (0..65).map(|i| base + i * 1_000).collect();
+    let (status, body) =
+        create_minimal_event(&env, &token, &cid, uid, json!({ "exdate": exdate })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "expected 400: {body}");
+    assert_eq!(body["error"]["code"], "validation", "{body}");
+}
+
+/// F27 (auditoría m-6, 3) — «Limpiar opaca» de extremo a extremo (el camino del
+/// botón «Quitar» de la SPA): un evento con una `EXDATE;VALUE=DATE` **opaca**
+/// (payload no modelable) se limpia con `PATCH { "exdate": [] }`; el detalle
+/// queda con `exdate: []` y `exdate_opaque: null`, y el payload servido ya no
+/// contiene `EXDATE`.
+#[tokio::test]
+async fn patch_with_empty_exdate_clears_an_opaque_exdate() {
+    let env = TestEnv::new("f27-clear-opaque").await;
+    let token = env.token("user-a");
+    let cid = calendar_collection_id(&env, &token, "A").await;
+    let uid = "f27-clear-opaque-1@oxidav";
+    let original = ics_with_opaque_exdate(uid);
+    seed_event(
+        &env,
+        &cid,
+        "evt-f27-clear-opaque",
+        uid,
+        None,
+        None,
+        &original,
+    )
+    .await;
+
+    let uri = format!("/api/v1/collections/{cid}/events/{uid}");
+
+    // Antes de limpiar el payload lleva la línea opaca.
+    assert!(
+        stored_event_raw(&env, &cid, uid).await.contains("EXDATE"),
+        "seed missing EXDATE"
+    );
+
+    let (status, body) = env
+        .call(
+            Method::PATCH,
+            &uri,
+            Some(&token),
+            Some(json!({ "exdate": [] })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "clear failed: {body}");
+    assert_eq!(body["exdate"], json!([]));
+    assert_eq!(body["exdate_opaque"], Value::Null, "{body}");
+
+    let stored = stored_event_raw(&env, &cid, uid).await;
+    assert!(
+        !stored.contains("EXDATE"),
+        "an EXDATE line survived the clear: {stored}"
+    );
+}

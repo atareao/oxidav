@@ -78,7 +78,8 @@ function makeEvent(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
 /**
  * Detalle completo mínimo (proyección F25) para mockear `getEvent`. Cada test
  * lo completa con `overrides`; las seis propiedades F25 van a "vacío" para que
- * el diálogo no envíe nada que el usuario no haya tocado (regla D2).
+ * el diálogo no envíe nada que el usuario no haya tocado (regla D2). Lo mismo
+ * para las cuatro propiedades F27 (`EXDATE`/`RDATE`): lista vacía y `null`.
  */
 function makeDetail(overrides: Partial<EventDetail> = {}): EventDetail {
   return {
@@ -89,6 +90,10 @@ function makeDetail(overrides: Partial<EventDetail> = {}): EventDetail {
     class: null,
     transp: null,
     duration: null,
+    exdate: [],
+    exdate_opaque: null,
+    rdate: [],
+    rdate_opaque: null,
     ...overrides,
   }
 }
@@ -1319,5 +1324,366 @@ describe('Calendar', () => {
     await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
     const [, , input] = vi.mocked(updateEvent).mock.calls[0]
     expect('rrule' in input).toBe(false)
+  })
+
+  // -------------------------------------------------------------------------
+  // F27 — EXDATE/RDATE (`EXDATE`/`RDATE`) en el diálogo (PLAN-031, esc. 17-21).
+  // -------------------------------------------------------------------------
+
+  /**
+   * Rellena un `DatePicker` (con hora) tecleando el valor con el `format`
+   * configurado y confirmando con `Enter`. Después cierra el panel enfocando
+   * otro campo (en jsdom `Escape` no basta): si el panel queda abierto su
+   * overlay da `pointer-events: none` al `Modal` y bloquea los clics siguientes.
+   */
+  async function fillPicker(
+    user: ReturnType<typeof userEvent.setup>,
+    dialog: HTMLElement,
+    picker: HTMLElement,
+    text: string,
+  ) {
+    await user.type(picker, `${text}{Enter}`)
+    await user.click(within(dialog).getByRole('textbox', { name: 'Título' }))
+  }
+
+  describe('F27 — EXDATE/RDATE', () => {
+    it('escenario 17: envía EXDATE y RDATE al crear (F27)', async () => {
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([])
+      vi.mocked(createEvent).mockResolvedValue(
+        makeEvent({ uid: 'nuevo', summary: 'Recurrente' }),
+      )
+
+      const user = userEvent.setup()
+      renderCalendar()
+      const dialog = await openCreateDialog(user)
+
+      await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'Recurrente')
+      // EXDATE/RDATE solo aparecen con recurrencia (o si el evento ya las trae).
+      await pickOption(user, within(dialog).getByRole('combobox', { name: 'Repetición' }), 'Diaria')
+
+      await user.click(within(dialog).getByRole('button', { name: 'Añadir fecha excluida' }))
+      await fillPicker(
+        user,
+        dialog,
+        within(dialog).getByRole('textbox', { name: 'Fecha excluida 1' }),
+        '15/03/2026 10:00:00',
+      )
+      await user.click(within(dialog).getByRole('button', { name: 'Añadir fecha extra' }))
+      await fillPicker(
+        user,
+        dialog,
+        within(dialog).getByRole('textbox', { name: 'Fecha extra 1' }),
+        '16/03/2026 12:30:00',
+      )
+
+      await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+      await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
+      const [, input] = vi.mocked(createEvent).mock.calls[0]
+      expect(input.exdate).toEqual([
+        dayjs('15/03/2026 10:00:00', 'DD/MM/YYYY HH:mm:ss').valueOf(),
+      ])
+      expect(input.rdate).toEqual([
+        dayjs('16/03/2026 12:30:00', 'DD/MM/YYYY HH:mm:ss').valueOf(),
+      ])
+    })
+
+    it('escenario 18: no reenvía EXDATE sin tocarla (D2, F27)', async () => {
+      const x = atToday(10)
+      const y = atToday(11)
+      const event = makeDetail({ summary: 'Recurrente', exdate: [x, y] })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Recurrente' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Recurrente' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Recurrente/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect('exdate' in input).toBe(false)
+    })
+
+    it('escenario 19: envía EXDATE canónico al quitar una entrada (D2, F27)', async () => {
+      const x = atToday(10)
+      const y = atToday(11)
+      const event = makeDetail({ summary: 'Recurrente', exdate: [x, y] })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Recurrente' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Recurrente' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Recurrente/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: 'Quitar fecha excluida 1' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect(input.exdate).toEqual([y])
+    })
+
+    it('escenario 20: envía EXDATE vacío al quitar la única entrada (D2, F27)', async () => {
+      const x = atToday(10)
+      const event = makeDetail({ summary: 'Recurrente', exdate: [x] })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Recurrente' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Recurrente' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Recurrente/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: 'Quitar fecha excluida 1' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect(input.exdate).toEqual([])
+    })
+
+    it('escenario 21: muestra EXDATE opaca verbatim y la preserva sin tocar (F27)', async () => {
+      const opaque = 'EXDATE;VALUE=DATE:20260315'
+      const event = makeDetail({ summary: 'Opaca', exdate_opaque: opaque })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Opaca' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Opaca' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Opaca/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      expect(
+        within(dialog).getByText(`Fechas excluidas actuales: ${opaque}`),
+      ).toBeInTheDocument()
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect('exdate' in input).toBe(false)
+    })
+
+    it('escenario 21b: limpia una EXDATE opaca al marcar «Quitar fechas excluidas» (F27)', async () => {
+      const event = makeDetail({
+        summary: 'Opaca',
+        exdate_opaque: 'EXDATE;VALUE=DATE:20260315',
+      })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Opaca' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Opaca' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Opaca/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(
+        within(dialog).getByRole('checkbox', { name: 'Quitar fechas excluidas' }),
+      )
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect(input.exdate).toEqual([])
+    })
+
+    it('escenario 18 (RDATE): no reenvía RDATE sin tocarla (D2, F27)', async () => {
+      const x = atToday(10)
+      const y = atToday(11)
+      const event = makeDetail({ summary: 'RDate', rdate: [x, y] })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'RDate' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'RDate' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· RDate/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect('rdate' in input).toBe(false)
+    })
+
+    it('escenario 19 (RDATE): envía el resto canónico al quitar una entrada (D2, F27)', async () => {
+      const x = atToday(10)
+      const y = atToday(11)
+      const event = makeDetail({ summary: 'RDate', rdate: [x, y] })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'RDate' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'RDate' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· RDate/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: 'Quitar fecha extra 1' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect(input.rdate).toEqual([y])
+    })
+
+    it('escenario 21 (RDATE): muestra RDATE opaca verbatim y la preserva sin tocar (F27)', async () => {
+      const opaque = 'RDATE;VALUE=PERIOD:20260401T100000Z/20260401T110000Z'
+      const event = makeDetail({ summary: 'Opaca', rdate_opaque: opaque })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Opaca' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Opaca' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Opaca/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      expect(within(dialog).getByText(`Fechas extra actuales: ${opaque}`)).toBeInTheDocument()
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect('rdate' in input).toBe(false)
+    })
+
+    it('escenario 21b (RDATE): limpia una RDATE opaca al marcar «Quitar fechas extra» (F27)', async () => {
+      const event = makeDetail({
+        summary: 'Opaca',
+        rdate_opaque: 'RDATE;VALUE=PERIOD:20260401T100000Z/20260401T110000Z',
+      })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Opaca' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Opaca' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Opaca/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('checkbox', { name: 'Quitar fechas extra' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect(input.rdate).toEqual([])
+    })
+
+    it('escenario 20 (RDATE): envía RDATE vacío al quitar todas las entradas (D2, F27)', async () => {
+      const x = atToday(10)
+      const y = atToday(11)
+      const event = makeDetail({ summary: 'RDate', rdate: [x, y] })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'RDate' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'RDate' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· RDate/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      // Al quitar una entrada, `Form.List` reindexa: la segunda pasa a ser la 1.
+      await user.click(within(dialog).getByRole('button', { name: 'Quitar fecha extra 1' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Quitar fecha extra 1' }))
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect(input.rdate).toEqual([])
+    })
+
+    it('deduplica EXDATE con el mismo instante en el formulario (F27)', async () => {
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([])
+      vi.mocked(createEvent).mockResolvedValue(
+        makeEvent({ uid: 'nuevo', summary: 'Recurrente' }),
+      )
+
+      const user = userEvent.setup()
+      renderCalendar()
+      const dialog = await openCreateDialog(user)
+
+      await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'Recurrente')
+      await pickOption(user, within(dialog).getByRole('combobox', { name: 'Repetición' }), 'Diaria')
+
+      // Dos entradas distintas con el *mismo* instante tecleado: el formulario
+      // debe enviar una sola (canonicalización por `sortUniqueInstants`).
+      await user.click(within(dialog).getByRole('button', { name: 'Añadir fecha excluida' }))
+      await fillPicker(
+        user,
+        dialog,
+        within(dialog).getByRole('textbox', { name: 'Fecha excluida 1' }),
+        '15/03/2026 10:00:00',
+      )
+      await user.click(within(dialog).getByRole('button', { name: 'Añadir fecha excluida' }))
+      await fillPicker(
+        user,
+        dialog,
+        within(dialog).getByRole('textbox', { name: 'Fecha excluida 2' }),
+        '15/03/2026 10:00:00',
+      )
+
+      await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+      await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
+      const [, input] = vi.mocked(createEvent).mock.calls[0]
+      expect(input.exdate).toEqual([
+        dayjs('15/03/2026 10:00:00', 'DD/MM/YYYY HH:mm:ss').valueOf(),
+      ])
+    })
+
+    it('descarta las fechas al limpiar «Repetición» en alta (F27)', async () => {
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([])
+      vi.mocked(createEvent).mockResolvedValue(
+        makeEvent({ uid: 'nuevo', summary: 'Recurrente' }),
+      )
+
+      const user = userEvent.setup()
+      renderCalendar()
+      const dialog = await openCreateDialog(user)
+
+      await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'Recurrente')
+      const freq = within(dialog).getByRole('combobox', { name: 'Repetición' })
+      await pickOption(user, freq, 'Diaria')
+
+      await user.click(within(dialog).getByRole('button', { name: 'Añadir fecha excluida' }))
+      await fillPicker(
+        user,
+        dialog,
+        within(dialog).getByRole('textbox', { name: 'Fecha excluida 1' }),
+        '15/03/2026 10:00:00',
+      )
+
+      // Sin `RRULE` las fechas ocultas no deben enviarse: al desmontar el bloque
+      // antd conserva sus valores, pero `handleSubmit` los descarta porque
+      // `rule === null`.
+      clearSelect(freq)
+      await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+      await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
+      const [, input] = vi.mocked(createEvent).mock.calls[0]
+      expect('exdate' in input).toBe(false)
+    })
   })
 })
