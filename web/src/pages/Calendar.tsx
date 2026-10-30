@@ -65,6 +65,7 @@ import {
   buildMonthGrid,
   dateKey,
   endOfMonthMs,
+  formatDateTime,
   formatDayLabel,
   formatMonthLabel,
   isSameMonth,
@@ -287,6 +288,9 @@ function formValuesFromDetail(detail: EventDetail): EventFormValues {
     // la recurrencia, el formulario arranca vacío si el baseline es opaco.
     exdate: detail.exdate_opaque === null ? detail.exdate.map((ms) => dayjs(ms)) : [],
     rdate: detail.rdate_opaque === null ? detail.rdate.map((ms) => dayjs(ms)) : [],
+    // F28 — `SEQUENCE` sigue el mismo criterio: un baseline opaco no se precarga
+    // (se muestra verbatim aparte y no se reescribe); uno modelable se precarga.
+    sequence: detail.sequence_opaque === null ? (detail.sequence ?? undefined) : undefined,
   }
 }
 
@@ -395,6 +399,11 @@ interface EventFormValues {
   /** F27 — «quitar» explícito sobre una propiedad opaca (baseline no modelable). */
   clearExdate?: boolean
   clearRdate?: boolean
+  /**
+   * F28 — `SEQUENCE`. Ausente = «no tocar» (baseline opaco o campo vacío); solo
+   * viaja cuando el usuario fija un valor distinto del baseline (D2).
+   */
+  sequence?: number | null
 }
 
 /** Fields the optimistic layer may rewrite on an existing event. */
@@ -799,6 +808,10 @@ export function Calendar() {
             if (rule !== null && rdateInstants.length > 0) {
               input.rdate = rdateInstants
             }
+            // F28 — en alta solo se envía `SEQUENCE` si el usuario lo rellenó.
+            if (values.sequence != null) {
+              input.sequence = values.sequence
+            }
             const created = await createEvent(collectionId, input)
             setEvents((previous) => [...previous, created])
             setModalOpen(false)
@@ -883,6 +896,18 @@ export function Calendar() {
       } else if (!sameInstantSet(formRdate, baselineRdate)) {
         rdateInput = formRdate
         optimisticRdate = formRdate
+      }
+      // F28 — `SEQUENCE` sigue D2: solo viaja si cambió respecto del baseline y
+      // el baseline es modelable. Un baseline **opaco** se preserva verbatim (no
+      // se reescribe). No hay borrado por `PATCH`: si el usuario vacía un valor
+      // que existía (`next === null`), no se envía — el servidor no sabría
+      // eliminarlo y el baseline se mantiene intacto.
+      let sequenceInput: number | undefined
+      if (original.sequence_opaque === null) {
+        const nextSequence = values.sequence ?? null
+        if (nextSequence !== (original.sequence ?? null) && nextSequence !== null) {
+          sequenceInput = nextSequence
+        }
       }
       // `DURATION` is only sent when the user actually changed it. A value that
       // does not decompose into one number+unit (e.g. `P1DT2H`) is shown verbatim
@@ -978,6 +1003,9 @@ export function Calendar() {
           }
           if (rdateInput !== undefined) {
             input.rdate = rdateInput
+          }
+          if (sequenceInput !== undefined) {
+            input.sequence = sequenceInput
           }
           const updated = await updateEvent(collectionId, target.uid, input)
           setEvents((previous) =>
@@ -1077,6 +1105,9 @@ export function Calendar() {
   // preservan salvo que el usuario los vacíe con el checkbox (D2).
   const exdateOpaque = useMemo(() => editDetail?.exdate_opaque ?? null, [editDetail])
   const rdateOpaque = useMemo(() => editDetail?.rdate_opaque ?? null, [editDetail])
+  // F28 — una `SEQUENCE` opaca (no modelable como entero) se muestra verbatim y
+  // se preserva sin tocar: el diálogo no ofrece editarla.
+  const sequenceOpaque = useMemo(() => editDetail?.sequence_opaque ?? null, [editDetail])
   // ¿El evento (en edición) trae ya fechas de recurrencia? Si es así, el bloque
   // F27 se muestra aunque no haya `recurFreq` (p. ej. una serie definida solo por
   // `RDATE`, o un baseline importado por un cliente DAV).
@@ -1548,6 +1579,45 @@ export function Calendar() {
                 options={timezoneOptions}
               />
             </Form.Item>
+
+            {/* F28 — metadatos de solo lectura (`CREATED`/`LAST-MODIFIED`). Solo
+                en edición y solo si el `.ics` las trae. Nunca se envían. */}
+            {editing !== null &&
+            (editDetail?.created != null || editDetail?.last_modified != null) ? (
+              <Space wrap size="middle" style={{ marginBottom: 16 }}>
+                {editDetail?.created != null ? (
+                  <Typography.Text type="secondary">
+                    Creado: {formatDateTime(editDetail.created)}
+                  </Typography.Text>
+                ) : null}
+                {editDetail?.last_modified != null ? (
+                  <Typography.Text type="secondary">
+                    Modificado: {formatDateTime(editDetail.last_modified)}
+                  </Typography.Text>
+                ) : null}
+              </Space>
+            ) : null}
+
+            {/* F28 — `SEQUENCE`. Editable (tres estados/opaco, como EXDATE); un
+                baseline opaco se muestra verbatim y no se reescribe (D2). */}
+            {sequenceOpaque !== null ? (
+              <Typography.Text
+                type="secondary"
+                style={{ display: 'block', marginBottom: 16 }}
+              >
+                Secuencia actual: {sequenceOpaque}
+              </Typography.Text>
+            ) : (
+              <Form.Item name="sequence" label="Secuencia">
+                <InputNumber
+                  min={0}
+                  max={2147483647}
+                  precision={0}
+                  style={{ width: 160 }}
+                  aria-label="Secuencia"
+                />
+              </Form.Item>
+            )}
 
             {/* F26 — recurrencia (`RRULE`) con constructor estructurado. */}
             {opaqueRrule !== null ? (
