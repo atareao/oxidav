@@ -88,6 +88,55 @@ export interface EventDetail extends CalendarEvent {
   transp: string | null
   /** `DURATION`, verbatim (an opaque RFC 5545 duration), or `null`. */
   duration: string | null
+  /**
+   * `EXDATE` instants (Unix epoch **ms**) excluded from the recurrence, in the
+   * server's canonical form (ascending, no duplicates). Empty when the event
+   * has none **or** when the property is opaque (see {@link exdate_opaque}).
+   */
+  exdate: number[]
+  /**
+   * Verbatim text of the `EXDATE` lines when the stored payload carries a
+   * variant the backend cannot model; `null` when it is modelable or absent.
+   * When non-null, {@link exdate} is empty and the editor must not rewrite it.
+   */
+  exdate_opaque: string | null
+  /**
+   * `RDATE` instants (Unix epoch **ms**) added on top of the recurrence, in the
+   * server's canonical form (ascending, no duplicates). Empty when the event
+   * has none **or** when the property is opaque (see {@link rdate_opaque}).
+   */
+  rdate: number[]
+  /**
+   * Verbatim text of the `RDATE` lines when the stored payload carries a
+   * variant the backend cannot model; `null` when it is modelable or absent.
+   * When non-null, {@link rdate} is empty and the editor must not rewrite it.
+   */
+  rdate_opaque: string | null
+  /**
+   * `SEQUENCE` as the supported integer subset, or `null` (also when the
+   * property is opaque or absent). Editable with a three-state/opaque semantics
+   * mirroring `EXDATE`/`RDATE` (F28).
+   */
+  sequence: number | null
+  /**
+   * Verbatim text of the `SEQUENCE` line when the stored payload carries a
+   * value the backend cannot model as an integer; `null` when modelable or
+   * absent. When non-null, {@link sequence} is `null` and the editor must not
+   * rewrite it (F28).
+   */
+  sequence_opaque: string | null
+  /**
+   * `CREATED` — the ICS property (Unix epoch **ms**, UTC), **not** the row's
+   * {@link CalendarEvent.created_at} column. Read-only: shown, never rewritten
+   * (F28).
+   */
+  created: number | null
+  /**
+   * `LAST-MODIFIED` — the ICS property (Unix epoch **ms**, UTC), **not** the
+   * row's {@link CalendarEvent.updated_at} column. Read-only: shown, never
+   * rewritten (F28).
+   */
+  last_modified: number | null
 }
 
 /** Request body for creating a calendar event (`POST .../events`). */
@@ -119,6 +168,12 @@ export interface CreateEventInput {
   categories?: string[]
   /** `ATTACH` URIs, one line per value; omit/empty for none. */
   attach?: string[]
+  /** `EXDATE` instants (Unix epoch **ms**) to exclude from the recurrence; omit/empty for none. */
+  exdate?: number[]
+  /** `RDATE` instants (Unix epoch **ms**) to add to the recurrence; omit/empty for none. */
+  rdate?: number[]
+  /** `SEQUENCE` (integer ≥ 0, RFC 5545 §3.8.7.4); omit for none (F28). */
+  sequence?: number
 }
 
 /** Request body for a partial update of a calendar event (`PATCH .../events/{uid}`). */
@@ -165,6 +220,27 @@ export interface UpdateEventInput {
   categories?: string[]
   /** `ATTACH` URIs; `[]` *clears* them. Omit to leave them untouched. */
   attach?: string[]
+  /**
+   * `EXDATE` instants (Unix epoch **ms**) that exclude occurrences of the
+   * recurrence (D2 discipline: send it **only when it changed** versus the
+   * baseline). An empty array (`[]`) *clears* the exclusions **and** any opaque
+   * `EXDATE` property; leave it out to keep the current value untouched.
+   */
+  exdate?: number[]
+  /**
+   * `RDATE` instants (Unix epoch **ms**) added to the recurrence (D2 discipline:
+   * send it **only when it changed** versus the baseline). An empty array (`[]`)
+   * *clears* the extras **and** any opaque `RDATE` property; leave it out to
+   * keep the current value untouched.
+   */
+  rdate?: number[]
+  /**
+   * `SEQUENCE` (integer ≥ 0). On a `PATCH`, an absent `sequence` means "keep the
+   * current value" — there is **no** way to delete it (the same MVP limitation
+   * as `tzid`), so the client must send it **only when it changed** versus the
+   * baseline (D2). An opaque `SEQUENCE` is preserved verbatim and never sent.
+   */
+  sequence?: number
 }
 
 /**

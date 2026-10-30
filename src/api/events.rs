@@ -54,7 +54,7 @@ use serde::Deserialize;
 use crate::auth::SessionUser;
 use crate::dav::common::new_id;
 use crate::dav::ics::{
-    EventFields, EventProjection, build_ics, project_event, reconcile_ics,
+    EventFields, EventProjection, MAX_SEQUENCE, build_ics, project_event, reconcile_ics,
     supported_instant_range_ms,
 };
 use crate::dav::vtimezone;
@@ -96,6 +96,10 @@ const MAX_CATEGORIES: usize = 64;
 
 /// Maximum number of `ATTACH` URIs accepted.
 const MAX_ATTACH: usize = 64;
+
+/// Maximum number of instantes aceptados en `EXDATE` o `RDATE` (espejo de
+/// [`MAX_CATEGORIES`]).
+const MAX_RECUR_DATES: usize = 64;
 
 /// Maximum accepted length of a `DURATION` value, in characters.
 const MAX_DURATION_LEN: usize = 64;
@@ -210,6 +214,9 @@ pub async fn create(
     let duration = validate_duration(request.duration.as_deref())?;
     let categories = validate_categories(request.categories.as_deref().unwrap_or_default())?;
     let attach = validate_attach(request.attach.as_deref().unwrap_or_default())?;
+    let exdate = validate_instant_list(request.exdate.as_deref().unwrap_or_default(), "exdate")?;
+    let rdate = validate_instant_list(request.rdate.as_deref().unwrap_or_default(), "rdate")?;
+    let sequence = validate_sequence(request.sequence)?;
     validate_range(request.dtstart, request.dtend)?;
 
     // `DURATION` and `DTEND` are mutually exclusive (RFC 5545): supplying both is
@@ -241,12 +248,15 @@ pub async fn create(
         dtstart_tzid: tzid.clone(),
         dtend_tzid: tzid.clone(),
         rrule: rrule.clone(),
+        exdate: Some(exdate),
+        rdate: Some(rdate),
         status: status.clone(),
         class_: class_.clone(),
         transp: transp.clone(),
         duration: duration.clone(),
         categories: categories.clone(),
         attach: attach.clone(),
+        sequence,
         dtstamp_ms: now_millis(),
     };
 
@@ -477,6 +487,42 @@ pub async fn update(
             .map(|event| event.attach.clone())
             .unwrap_or_default(),
     };
+    // F27 — `EXDATE`/`RDATE` siguen la regla de merge uniforme, con un matiz de
+    // **tres estados** (F24/F25): una propiedad **opaca** en el payload se
+    // preserva verbatim y `None` en `EventFields` la deja intacta; un conjunto
+    // modelable se hereda; sin proyección usable se cae al caso residual
+    // conocido (las seis propiedades F25 se pierden igual). `Some(vec![])` —ya
+    // sea del request o heredado— limpia la propiedad.
+    let exdate = match &request.exdate {
+        Some(values) => Some(validate_instant_list(values, "exdate")?),
+        None => match stored.as_ref() {
+            // Opaca → no tocar (None); modelable → heredar del payload.
+            Some(event) if event.exdate_opaque.is_some() => None,
+            Some(event) => Some(event.exdate.clone()),
+            // Sin proyección usable → caso residual conocido (igual que F25).
+            None => Some(Vec::new()),
+        },
+    };
+    let rdate = match &request.rdate {
+        Some(values) => Some(validate_instant_list(values, "rdate")?),
+        None => match stored.as_ref() {
+            Some(event) if event.rdate_opaque.is_some() => None,
+            Some(event) => Some(event.rdate.clone()),
+            None => Some(Vec::new()),
+        },
+    };
+    // F28 — `SEQUENCE` sigue la regla de merge uniforme con tres estados: una
+    // propiedad **opaca** en el payload se preserva verbatim (`None` en
+    // `EventFields` la deja intacta), una modelable se hereda, y sin proyección
+    // usable se deja sin tocar.
+    let sequence = match request.sequence {
+        Some(value) => validate_sequence(Some(value))?,
+        None => match stored.as_ref() {
+            Some(event) if event.sequence_opaque.is_some() => None,
+            Some(event) => event.sequence,
+            None => None,
+        },
+    };
 
     // `DURATION`/`DTEND` are mutually exclusive (RFC 5545) and the server enforces
     // it, not just the UI:
@@ -518,12 +564,15 @@ pub async fn update(
         dtstart_tzid: dtstart_tzid.clone(),
         dtend_tzid: dtend_tzid.clone(),
         rrule: rrule.clone(),
+        exdate,
+        rdate,
         status,
         class_,
         transp,
         duration,
         categories,
         attach,
+        sequence,
         dtstamp_ms: now_millis(),
     };
 
@@ -1035,6 +1084,53 @@ fn validate_attach(items: &[String]) -> Result<Vec<String>, ApiError> {
     Ok(out)
 }
 
+/// Validate and normalise a list of instants (`EXDATE`/`RDATE`, F27).
+///
+/// Cada instante pasa por [`check_instant`] (el mismo rango `[min, max)` de años
+/// 1..=9999 que `dtstart`/`dtend`), de modo que un valor imposible como
+/// `i64::MAX` —que no se podría ni renderizar como fecha iCalendar ni proyectar
+/// a una zona— es un `400`.
+///
+/// El tope de [`MAX_RECUR_DATES`] aplica al **número de fechas recibidas**, no al
+/// conjunto único: una lista con más de ese total —aunque repita el mismo
+/// instante— se rechaza **al principio**, antes de recorrerla, así que una
+/// entrada desmedida (`[x; miles]`) no consume trabajo proporcional a su tamaño.
+/// La salida se devuelve **ordenada ascendente y sin duplicados** (la forma
+/// canónica que emite `build_ics`/`reconcile_ics`). Una lista vacía es válida y
+/// limpia la propiedad.
+fn validate_instant_list(items: &[i64], field: &str) -> Result<Vec<i64>, ApiError> {
+    if items.len() > MAX_RECUR_DATES {
+        return Err(ApiError::Validation(format!(
+            "No se admiten más de {MAX_RECUR_DATES} fechas en `{field}`"
+        )));
+    }
+    let (min_ms, max_ms) = supported_instant_range_ms();
+    let mut out = Vec::with_capacity(items.len());
+    for &value in items {
+        check_instant(value, field, min_ms, max_ms)?;
+        out.push(value);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// Validate and normalise an optional `SEQUENCE` (RFC 5545 §3.8.7.4).
+///
+/// `None` significa «no tocar las líneas `SEQUENCE` del payload» (una propiedad
+/// opaca o ausente queda intacta; no hay camino de borrado por `PATCH`). Un
+/// valor recibido debe caer en el rango cerrado `0..=2147483647`; fuera de él es
+/// un `400`. El valor se emite verbatim como `SEQUENCE:<n>`.
+fn validate_sequence(raw: Option<i64>) -> Result<Option<i64>, ApiError> {
+    match raw {
+        None => Ok(None),
+        Some(value) if (0..=MAX_SEQUENCE).contains(&value) => Ok(Some(value)),
+        Some(_) => Err(ApiError::Validation(format!(
+            "El campo `sequence` debe ser un entero entre 0 y {MAX_SEQUENCE}"
+        ))),
+    }
+}
+
 /// Reject an inverted range and any instant outside the representable calendar
 /// range.
 ///
@@ -1491,5 +1587,136 @@ mod tests {
             validate_tzid(Some("Mars/Olympus")),
             Err(ApiError::Validation(_))
         ));
+    }
+
+    // -- F27 — `validate_instant_list` (escenario 12) -------------------------
+
+    #[test]
+    fn validate_instant_list_sorts_deduplicates_and_accepts_empty() {
+        let a = 1_700_000_000_000_i64;
+        let b = 1_700_000_600_000_i64;
+        // Desordenados y con un duplicado: sale ordenado ascendente y sin repetir.
+        assert_eq!(
+            validate_instant_list(&[b, a, a], "exdate").ok(),
+            Some(vec![a, b])
+        );
+        // La lista vacía no es un error: limpia la propiedad.
+        assert_eq!(validate_instant_list(&[], "exdate").ok(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn validate_instant_list_rejects_out_of_range_instants() {
+        for ms in [i64::MAX, i64::MIN] {
+            assert!(
+                matches!(
+                    validate_instant_list(&[ms], "exdate"),
+                    Err(ApiError::Validation(_))
+                ),
+                "must reject {ms}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_instant_list_enforces_the_maximum_count() {
+        // `MAX_RECUR_DATES` instantes son aceptables…
+        let base = 1_700_000_000_000_i64;
+        let at_max: Vec<i64> = (0..MAX_RECUR_DATES as i64)
+            .map(|i| base + i * 1_000)
+            .collect();
+        assert_eq!(
+            validate_instant_list(&at_max, "rdate").map(|values| values.len()),
+            Ok(MAX_RECUR_DATES)
+        );
+        // …uno más es un `400`.
+        let over: Vec<i64> = (0..=MAX_RECUR_DATES as i64)
+            .map(|i| base + i * 1_000)
+            .collect();
+        assert!(matches!(
+            validate_instant_list(&over, "rdate"),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn validate_instant_list_counts_duplicates_toward_the_limit() {
+        // El tope se aplica al **número de fechas recibidas**, no al conjunto
+        // único: 65 duplicados del mismo instante también son un `400` (si no,
+        // `[x; 10_000]` pasaría la validación y haría trabajo de más).
+        let base = 1_700_000_000_000_i64;
+        assert_eq!(
+            validate_instant_list(&[base; MAX_RECUR_DATES], "exdate").ok(),
+            Some(vec![base])
+        );
+        assert!(matches!(
+            validate_instant_list(&[base; MAX_RECUR_DATES + 1], "exdate"),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn update_is_empty_considers_exdate_and_rdate() {
+        // F27: un `PATCH` que solo toca `exdate`/`rdate` no es vacío.
+        let exdate_only = UpdateEventRequest {
+            exdate: Some(vec![1_700_000_000_000]),
+            ..UpdateEventRequest::default()
+        };
+        assert!(!exdate_only.is_empty());
+
+        // `Some(vec![])` también cuenta: limpia la propiedad.
+        let clear_exdate = UpdateEventRequest {
+            exdate: Some(Vec::new()),
+            ..UpdateEventRequest::default()
+        };
+        assert!(!clear_exdate.is_empty());
+
+        let rdate_only = UpdateEventRequest {
+            rdate: Some(vec![1_700_000_000_000]),
+            ..UpdateEventRequest::default()
+        };
+        assert!(!rdate_only.is_empty());
+    }
+
+    // -- F28 — `SEQUENCE`: validación y D2 -------------------------------------
+
+    #[test]
+    fn validate_sequence_accepts_the_supported_range() {
+        // `None` = no tocar la propiedad.
+        assert_eq!(validate_sequence(None).ok(), Some(None));
+        // Fronteras del rango cerrado `0..=2147483647` (RFC 5545 §3.8.7.4).
+        assert_eq!(validate_sequence(Some(0)).ok(), Some(Some(0)));
+        assert_eq!(
+            validate_sequence(Some(MAX_SEQUENCE)).ok(),
+            Some(Some(MAX_SEQUENCE))
+        );
+    }
+
+    #[test]
+    fn validate_sequence_rejects_out_of_range_values() {
+        assert!(matches!(
+            validate_sequence(Some(-1)),
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            validate_sequence(Some(MAX_SEQUENCE + 1)),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn update_is_empty_considers_sequence() {
+        // F28: un `PATCH` que solo toca `sequence` no es vacío.
+        let sequence_only = UpdateEventRequest {
+            sequence: Some(4),
+            ..UpdateEventRequest::default()
+        };
+        assert!(!sequence_only.is_empty());
+
+        // `Some(0)` también cuenta (no es `None`).
+        let zero = UpdateEventRequest {
+            sequence: Some(0),
+            ..UpdateEventRequest::default()
+        };
+        assert!(!zero.is_empty());
     }
 }

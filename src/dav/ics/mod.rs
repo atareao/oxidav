@@ -46,6 +46,11 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// Milliseconds in a second.
 const MILLIS_PER_SECOND: i64 = 1_000;
 
+/// Techo del subconjunto de `SEQUENCE` soportado (RFC 5545 §3.8.7.4): un entero
+/// sin signo en `0..=2147483647`. Se comparte entre la proyección (lectura) y la
+/// API (validación) para que la frontera sea única.
+pub(crate) const MAX_SEQUENCE: i64 = 2_147_483_647;
+
 /// Errors produced while parsing an `.ics` payload.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IcsError {
@@ -352,6 +357,19 @@ pub struct EventFields {
     pub dtend_tzid: Option<String>,
     /// Raw `RRULE` text (never expanded).
     pub rrule: Option<String>,
+    /// `EXDATE` — instantes (ms) excluidos de la recurrencia, ordenados y sin
+    /// duplicados. `Some(vec![])` **limpia** la propiedad; `None` significa «no
+    /// tocar las líneas `EXDATE` del payload» (son **opacas**, fuera del
+    /// subconjunto soportado).
+    pub exdate: Option<Vec<i64>>,
+    /// `RDATE` — instantes (ms) añadidos a la recurrencia. Misma semántica de tres
+    /// estados que `exdate`.
+    pub rdate: Option<Vec<i64>>,
+    /// `SEQUENCE` (RFC 5545 §3.8.7.4). `None` significa «no tocar las líneas
+    /// `SEQUENCE` del payload» (una propiedad opaca o ausente queda intacta);
+    /// `Some(n)` fija la propiedad y la emite como `SEQUENCE:<n>`. No hay camino
+    /// de borrado por `PATCH`.
+    pub sequence: Option<i64>,
     /// `DTSTAMP` as Unix milliseconds (the moment of composition).
     pub dtstamp_ms: i64,
 }
@@ -436,6 +454,16 @@ pub fn build_ics(fields: &EventFields) -> String {
     if let Some(rrule) = &fields.rrule {
         body.push(rrule_line(rrule));
     }
+    if let Some(rdate) = &fields.rdate
+        && !rdate.is_empty()
+    {
+        body.push(recur_date_line("RDATE", rdate));
+    }
+    if let Some(exdate) = &fields.exdate
+        && !exdate.is_empty()
+    {
+        body.push(recur_date_line("EXDATE", exdate));
+    }
     if let Some(status) = &fields.status {
         body.push(status_line(status));
     }
@@ -444,6 +472,9 @@ pub fn build_ics(fields: &EventFields) -> String {
     }
     if let Some(transp) = &fields.transp {
         body.push(transp_line(transp));
+    }
+    if let Some(sequence) = fields.sequence {
+        body.push(sequence_line(sequence));
     }
     body.push("END:VEVENT".to_string());
     body.push("END:VCALENDAR".to_string());
@@ -471,11 +502,11 @@ pub fn build_ics(fields: &EventFields) -> String {
 /// Property names [`reconcile_ics`] knows, in canonical emission order.
 ///
 /// `LOCATION` and `URL` are modelled fields as of F24; `CATEGORIES`, `ATTACH`,
-/// `STATUS`, `CLASS`, `TRANSP` and `DURATION` join them in F25. A pre-existing
-/// line of any of them is reconciled in place (or removed when the final value
-/// is empty), and they anchor the canonical insertion position of a neighbouring
-/// modelled property.
-const RECONCILE_ORDER: [&str; 14] = [
+/// `STATUS`, `CLASS`, `TRANSP` and `DURATION` join them in F25, `RDATE`/
+/// `EXDATE` in F27 and `SEQUENCE` in F28. A pre-existing line of any of them is
+/// reconciled in place (or removed when the final value is empty), and they
+/// anchor the canonical insertion position of a neighbouring modelled property.
+const RECONCILE_ORDER: [&str; 17] = [
     "DTSTAMP",
     "SUMMARY",
     "DESCRIPTION",
@@ -487,9 +518,12 @@ const RECONCILE_ORDER: [&str; 14] = [
     "DTEND",
     "DURATION",
     "RRULE",
+    "RDATE",
+    "EXDATE",
     "STATUS",
     "CLASS",
     "TRANSP",
+    "SEQUENCE",
 ];
 
 /// One **logical** iCalendar content line: its unfolded text plus the physical
@@ -555,6 +589,27 @@ fn property_name(text: &str) -> &str {
 /// The property value of a logical line: everything after the first `:`.
 fn property_value(text: &str) -> &str {
     text.split_once(':').map_or("", |(_, value)| value)
+}
+
+/// Extrae un parámetro del *head* de una línea iCalendar (`NAME=value` tras el
+/// primer `;`), insensible a mayúsculas y con las comillas del `value`
+/// despojadas. Devuelve la ÚLTIMA ocurrencia si el parámetro se repite.
+///
+/// El *head* es lo que va antes del primer `:`; el primer trozo es el nombre de
+/// la propiedad y se ignora (sólo se examinan los trozos `;`-separados
+/// siguientes). Una línea sin `:` no tiene *head* con parámetros y devuelve
+/// `None`.
+pub(crate) fn property_param<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let (head, _) = text.split_once(':')?;
+    let mut found = None;
+    for segment in head.split(';').skip(1) {
+        if let Some((key, value)) = segment.split_once('=')
+            && key.eq_ignore_ascii_case(name)
+        {
+            found = Some(value.trim_matches('"'));
+        }
+    }
+    found
 }
 
 /// Whether a logical line is a property (i.e. neither `BEGIN:` nor `END:`).
@@ -709,6 +764,12 @@ fn transp_line(transp: &str) -> String {
     format!("TRANSP:{transp}")
 }
 
+/// Render the `SEQUENCE` content line as a plain non-negative integer
+/// (RFC 5545 §3.8.7.4).
+fn sequence_line(sequence: i64) -> String {
+    format!("SEQUENCE:{sequence}")
+}
+
 /// Render the `DURATION` content line (an opaque value, emitted verbatim, like
 /// `RRULE`).
 fn duration_line(duration: &str) -> String {
@@ -745,6 +806,31 @@ fn rrule_line(rrule: &str) -> String {
     format!("RRULE:{rrule}")
 }
 
+/// Renderiza una línea `EXDATE`/`RDATE` como **una sola** content line,
+/// **siempre en UTC**: `NAME:<v1>Z,<v2>Z,…`.
+///
+/// Los instantes se ordenan ascendente y se **deduplican** antes de emitir, y
+/// cada uno se formatea con [`format_datetime_ms`] (sufijo `Z`). **Nunca** se
+/// emite `;TZID=` ni una hora local en la zona de `DTSTART`, y esto es
+/// deliberado: formatear en la zona (`format_local_datetime_ms`) y re-parsear
+/// ([`parse_datetime_with_tzid`]) sólo es *lossless* fuera de la hora **ambigua**
+/// del cambio de hora de otoño. Un instante que cae en la **segunda** pasada de
+/// la hora repetida se escribiría como hora local y al re-parsearlo
+/// [`local_to_utc_ms`] lo resolvería a la **primera** interpretación, moviéndolo
+/// −1 h en silencio. La forma UTC hace el *round-trip* **exacto** y es RFC 5545
+/// válido: `EXDATE`/`RDATE` admiten valores UTC aunque `DTSTART` lleve `TZID`.
+fn recur_date_line(name: &str, instants: &[i64]) -> String {
+    let mut sorted = instants.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let joined = sorted
+        .iter()
+        .map(|&ms| format_datetime_ms(ms))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{name}:{joined}")
+}
+
 /// Reconcilia las propiedades *modeladas* del primer `VEVENT` de `raw` con
 /// `fields`, dejando intacta —byte a byte— cualquier otra línea del payload.
 ///
@@ -754,12 +840,18 @@ fn rrule_line(rrule: &str) -> String {
 /// (`ATTENDEE`, `X-*`…) se reemiten **verbatim**, con su plegado original. El
 /// conjunto modelado —y por tanto reconciliado— es `SUMMARY`, `DESCRIPTION`,
 /// `LOCATION`, `URL`, `CATEGORIES`, `ATTACH`, `DTSTART`, `DTEND`, `DURATION`,
-/// `RRULE`, `STATUS`, `CLASS`, `TRANSP` y `DTSTAMP`. `ATTACH` es **multi-valor**:
+/// `RRULE`, `RDATE`, `EXDATE`, `STATUS`, `CLASS`, `TRANSP`, `SEQUENCE` y
+/// `DTSTAMP`. `ATTACH`
+/// es **multi-valor**:
 /// la primera ocurrencia se sustituye por el bloque completo de valores (una
-/// línea por cada uno, en orden) y todas las demás se eliminan; `CATEGORIES` es
-/// multi-valor en el payload pero se reconcilia como **una** línea (las
-/// ocurrencias extra se colapsan). Las únicas líneas regeneradas son las
-/// modeladas ausentes o modificadas.
+/// línea por cada uno, en orden) y todas las demás se eliminan; `CATEGORIES`,
+/// `RDATE` y `EXDATE` son multi-valor en el payload pero se reconcilian como
+/// **una** línea (las ocurrencias extra se colapsan). `RDATE`/`EXDATE` sólo se
+/// reconcilian cuando `fields.rdate`/`fields.exdate` es `Some`: con `None` la
+/// propiedad se considera **opaca**, no se toca y sus líneas quedan intactas.
+/// `SEQUENCE` sigue la misma semántica de tres estados: con `None` no se
+/// reconcilia (opaca o ausente) y sus líneas quedan intactas.
+/// Las únicas líneas regeneradas son las modeladas ausentes o modificadas.
 ///
 /// Si la zona final de `DTSTART`/`DTEND` no está definida en el `VCALENDAR`, se
 /// inserta su bloque `VTIMEZONE` justo antes del `BEGIN:VEVENT` objetivo. Un
@@ -816,7 +908,7 @@ pub fn reconcile_ics(raw: &str, fields: &EventFields) -> Result<String, IcsError
         .as_deref()
         .and_then(vtimezone::parse_tzid)
         .or(dtstart_tz);
-    let final_values: [(&'static str, Vec<String>); 14] = [
+    let mut final_values: Vec<(&'static str, Vec<String>)> = vec![
         ("DTSTAMP", vec![dtstamp_line(fields.dtstamp_ms)]),
         (
             "SUMMARY",
@@ -892,6 +984,37 @@ pub fn reconcile_ics(raw: &str, fields: &EventFields) -> Result<String, IcsError
                 .into_iter()
                 .collect(),
         ),
+    ];
+
+    // `RDATE`/`EXDATE` sólo entran cuando el campo es `Some`: con `None` la
+    // propiedad sigue siendo **opaca** y ni se incluye, así que sus líneas del
+    // payload quedan intactas. `Some(_)` no vacío se emite como una sola línea
+    // (que colapsa las ocurrencias extra) y `Some(vec![])` vacía la propiedad.
+    // La emisión es **siempre en UTC** (`…Z`, vía [`recur_date_line`]), nunca en
+    // la zona de `DTSTART`: ver el *doc* de esa función para el porqué (hora
+    // ambigua del fall-back).
+    if let Some(rdate) = &fields.rdate {
+        final_values.push((
+            "RDATE",
+            if rdate.is_empty() {
+                Vec::new()
+            } else {
+                vec![recur_date_line("RDATE", rdate)]
+            },
+        ));
+    }
+    if let Some(exdate) = &fields.exdate {
+        final_values.push((
+            "EXDATE",
+            if exdate.is_empty() {
+                Vec::new()
+            } else {
+                vec![recur_date_line("EXDATE", exdate)]
+            },
+        ));
+    }
+
+    final_values.extend([
         (
             "STATUS",
             fields
@@ -919,7 +1042,14 @@ pub fn reconcile_ics(raw: &str, fields: &EventFields) -> Result<String, IcsError
                 .into_iter()
                 .collect(),
         ),
-    ];
+    ]);
+
+    // `SEQUENCE` entra **sólo** cuando el campo es `Some`: con `None` la
+    // propiedad es **opaca o ausente**, no se incluye y sus líneas del payload
+    // quedan intactas (misma semántica de tres estados que `RDATE`/`EXDATE`).
+    if let Some(sequence) = fields.sequence {
+        final_values.push(("SEQUENCE", vec![sequence_line(sequence)]));
+    }
 
     let mut replace: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     let mut remove: BTreeSet<usize> = BTreeSet::new();
@@ -1516,6 +1646,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -1553,6 +1686,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -1593,6 +1729,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -1630,6 +1769,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -1662,6 +1804,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 0,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -1693,6 +1838,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let expected = concat!(
@@ -1737,6 +1885,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_493_200_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -1790,6 +1941,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_493_200_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -1868,6 +2022,9 @@ mod tests {
             categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         }
     }
 
@@ -1992,6 +2149,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2060,6 +2220,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2103,6 +2266,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2146,6 +2312,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2187,6 +2356,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2231,6 +2403,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2302,6 +2477,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -2332,6 +2510,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -2366,6 +2547,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let expected = concat!(
@@ -2407,6 +2591,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -2450,6 +2637,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2489,6 +2679,9 @@ mod tests {
             categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(RICH_ICS, &fields).expect("reconcile");
@@ -2534,6 +2727,9 @@ mod tests {
             categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(RICH_ICS, &fields).expect("reconcile");
@@ -2578,6 +2774,9 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2619,6 +2818,9 @@ mod tests {
                 "https://b.example/y&z,w".to_string(),
             ],
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -2654,6 +2856,9 @@ mod tests {
             categories: Vec::new(),
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         // The hard contract: with the six new fields empty the output is exactly
@@ -2696,6 +2901,9 @@ mod tests {
             categories: vec!["trabajo".to_string()],
             attach: vec!["https://a.example/x".to_string()],
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let raw = build_ics(&fields);
@@ -2750,6 +2958,9 @@ mod tests {
                 "https://zz.example/w".to_string(),
             ],
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2803,6 +3014,9 @@ mod tests {
             categories: Vec::new(),
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2843,6 +3057,9 @@ mod tests {
             categories: vec!["trabajo".to_string(), "personal".to_string()],
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2892,6 +3109,9 @@ mod tests {
                 "https://b.example/y".to_string(),
             ],
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
         };
 
         let out = reconcile_ics(&raw, &fields).expect("reconcile");
@@ -2941,5 +3161,562 @@ mod tests {
                 "{absent} should be gone:\n{cleared_out}"
             );
         }
+    }
+
+    // -- F27 — `EXDATE`/`RDATE`: `property_param`, emisión y reconciliación ----
+
+    /// `EventFields` mínimo con recurrencia, para los tests de `EXDATE`/`RDATE`.
+    fn recur_fields() -> EventFields {
+        EventFields {
+            uid: "recur@oxidav".to_string(),
+            summary: Some("Recur".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: Some("FREQ=WEEKLY;COUNT=3".to_string()),
+            exdate: None,
+            rdate: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+        }
+    }
+
+    #[test]
+    fn property_param_reads_the_head_case_insensitively() {
+        // Con parámetro, sin distinguir mayúsculas.
+        assert_eq!(
+            property_param("EXDATE;TZID=Europe/Madrid:20260315T100000", "TZID"),
+            Some("Europe/Madrid")
+        );
+        assert_eq!(
+            property_param("EXDATE;tzid=Europe/Madrid:20260315T100000", "TZID"),
+            Some("Europe/Madrid")
+        );
+        // Comillas despojadas del valor.
+        assert_eq!(
+            property_param("EXDATE;TZID=\"Europe/Madrid\":20260315T100000", "TZID"),
+            Some("Europe/Madrid")
+        );
+        // Ausente.
+        assert_eq!(property_param("EXDATE;VALUE=DATE:20260315", "TZID"), None);
+        // Si el parámetro se repite, gana la ÚLTIMA ocurrencia.
+        assert_eq!(
+            property_param("EXDATE;TZID=America/New_York;TZID=Europe/Madrid:x", "TZID"),
+            Some("Europe/Madrid")
+        );
+        // Una línea sin `:` no tiene head con parámetros.
+        assert_eq!(property_param("BEGIN:VEVENT", "TZID"), None);
+    }
+
+    #[test]
+    fn build_ics_omits_recur_dates_when_none_or_empty() {
+        // Escenario 6: `None` y `Some(vec![])` no producen línea alguna y la
+        // salida es byte a byte la esperada (sin `EXDATE:`/`RDATE:`).
+        let fields = recur_fields();
+
+        let expected = concat!(
+            "BEGIN:VCALENDAR\r\n",
+            "VERSION:2.0\r\n",
+            "PRODID:-//oxidav//oxidav//EN\r\n",
+            "BEGIN:VEVENT\r\n",
+            "UID:recur@oxidav\r\n",
+            "DTSTAMP:20240315T100000Z\r\n",
+            "SUMMARY:Recur\r\n",
+            "DTSTART:20240315T100000Z\r\n",
+            "RRULE:FREQ=WEEKLY;COUNT=3\r\n",
+            "END:VEVENT\r\n",
+            "END:VCALENDAR\r\n",
+        );
+        assert_eq!(build_ics(&fields), expected);
+
+        let mut cleared = fields.clone();
+        cleared.exdate = Some(Vec::new());
+        cleared.rdate = Some(Vec::new());
+        let raw = build_ics(&cleared);
+        assert!(!raw.contains("EXDATE:"), "{raw}");
+        assert!(!raw.contains("RDATE:"), "{raw}");
+        assert_eq!(raw, expected, "`Some(vec![])` debe equivaler a `None`");
+    }
+
+    #[test]
+    fn build_ics_emits_recur_dates_always_in_utc() {
+        // Decisión M-2 (F27): aunque `DTSTART` esté anclado a `Europe/Madrid`,
+        // `EXDATE`/`RDATE` se emiten **siempre** en UTC (`…Z`), nunca en la zona
+        // de `DTSTART`. Emitirlos en la zona es lossless sólo fuera de la hora
+        // ambigua del fall-back; el *round-trip* UTC es exacto.
+        let a = parse_datetime_with_tzid("20260315T100000", Some("Europe/Madrid"))
+            .expect("parse")
+            .0;
+        let b = parse_datetime_with_tzid("20260322T100000", Some("Europe/Madrid"))
+            .expect("parse")
+            .0;
+
+        let mut fields = recur_fields();
+        fields.dtstart_tzid = Some("Europe/Madrid".to_string());
+        fields.exdate = Some(vec![b, a]); // desordenados a propósito
+        fields.rdate = Some(vec![a, a]); // con un duplicado a propósito
+
+        let raw = build_ics(&fields);
+
+        // UTC, en una sola línea, ordenada y sin duplicados. Nunca `;TZID=`.
+        assert!(
+            raw.contains("EXDATE:20260315T090000Z,20260322T090000Z\r\n"),
+            "{raw}"
+        );
+        assert!(raw.contains("RDATE:20260315T090000Z\r\n"), "{raw}");
+        assert_eq!(raw.matches("EXDATE").count(), 1, "{raw}");
+        assert_eq!(raw.matches("RDATE").count(), 1, "{raw}");
+        assert!(!raw.contains("EXDATE;TZID="), "{raw}");
+        assert!(!raw.contains("RDATE;TZID="), "{raw}");
+        // `DTSTART` sí conserva su zona y su hora local.
+        assert!(
+            raw.contains("DTSTART;TZID=Europe/Madrid:20240315T110000\r\n"),
+            "{raw}"
+        );
+        // La zona se define antes del evento.
+        assert!(
+            raw.find("BEGIN:VTIMEZONE").expect("a VTIMEZONE") < raw.find("BEGIN:VEVENT").unwrap(),
+            "{raw}"
+        );
+
+        // Round-trip **exacto**: cada token UTC vuelve al mismo instante.
+        let line = raw
+            .lines()
+            .find(|line| line.starts_with("EXDATE"))
+            .expect("an EXDATE line");
+        let round: Vec<i64> = property_value(line)
+            .split(',')
+            .map(|token| parse_datetime_ms(token).expect("parse token"))
+            .collect();
+        assert_eq!(round, vec![a, b]);
+    }
+
+    #[test]
+    fn build_ics_recur_dates_round_trip_exactly_across_the_fall_back_hour() {
+        // Un instante que cae en la **segunda** pasada de la hora repetida del
+        // fall-back de `Europe/Madrid` (2026-10-25: 03:00 CEST → 02:00 CET).
+        // Emitirlo en la zona de `DTSTART` lo escribiría como 02:30 local y al
+        // re-parsear se resolvería a la PRIMERA pasada (00:30 UTC), moviéndolo
+        // −1 h en silencio. La emisión UTC lo conserva exacto.
+        let second_pass = datetime_ms("20261025T013000Z");
+        let first_pass = parse_datetime_with_tzid("20261025T023000", Some("Europe/Madrid"))
+            .expect("parse")
+            .0;
+        // Confirmamos el escenario: 02:30 local resuelve a 00:30 UTC, y el
+        // instante elegido es exactamente una hora después (segunda pasada).
+        assert_eq!(first_pass, datetime_ms("20261025T003000Z"));
+        assert_eq!(second_pass, first_pass + 3_600_000);
+
+        let mut fields = recur_fields();
+        fields.dtstart_tzid = Some("Europe/Madrid".to_string());
+        fields.exdate = Some(vec![second_pass]);
+
+        let raw = build_ics(&fields);
+
+        let line = raw
+            .lines()
+            .find(|line| line.starts_with("EXDATE"))
+            .expect("an EXDATE line");
+        let token = property_value(line);
+        assert_eq!(token, "20261025T013000Z");
+        // Blinda la propiedad: el token vuelve al instante original, NO al de la
+        // primera pasada (que es lo que ocurriría con una emisión en la zona).
+        assert_eq!(parse_datetime_ms(token), Some(second_pass));
+        assert_ne!(parse_datetime_ms(token), Some(first_pass));
+    }
+
+    #[test]
+    fn build_ics_emits_recur_dates_in_utc_without_zone() {
+        // Escenario 7 (sin zona): emisión UTC con sufijo `Z`.
+        let a = datetime_ms("20260315T100000Z");
+        let b = datetime_ms("20260322T100000Z");
+
+        let mut fields = recur_fields();
+        fields.exdate = Some(vec![a, b]);
+
+        let raw = build_ics(&fields);
+
+        assert!(
+            raw.contains("EXDATE:20260315T100000Z,20260322T100000Z\r\n"),
+            "{raw}"
+        );
+        assert!(!raw.contains("EXDATE;TZID="), "{raw}");
+    }
+
+    #[test]
+    fn reconcile_keeps_opaque_exdate_verbatim_when_none() {
+        // Escenario 8: con `fields.exdate = None` la línea opaca del payload no se
+        // toca (ni se reescribe ni se elimina).
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:opaque@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Recur\r\nEXDATE;VALUE=DATE:20260315\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = recur_fields();
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("EXDATE;VALUE=DATE:20260315\r\n"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_clears_all_recur_date_lines_when_empty() {
+        // Escenario 9: `Some(vec![])` elimina TODAS las líneas `EXDATE`.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:clear@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Recur\r\nEXDATE:20260315T100000Z\r\nEXDATE:20260322T100000Z\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let mut fields = recur_fields();
+        fields.exdate = Some(Vec::new());
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(!out.contains("EXDATE"), "{out}");
+        // El resto del payload sigue intacto.
+        assert!(out.contains("SUMMARY:Recur\r\n"), "{out}");
+        assert!(out.contains("DTSTART:20240315T100000Z\r\n"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_collapses_recur_date_lines_into_one() {
+        // Escenario 10: varias líneas `EXDATE` se colapsan en UNA sola con los
+        // valores unidos por comas, ordenados y deduplicados.
+        let a = datetime_ms("20260315T100000Z");
+        let b = datetime_ms("20260322T100000Z");
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:collapse@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Recur\r\nEXDATE:20260315T100000Z\r\nEXDATE:20260322T100000Z\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let mut fields = recur_fields();
+        fields.exdate = Some(vec![a, b]);
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert_eq!(out.matches("EXDATE").count(), 1, "{out}");
+        assert!(
+            out.contains("EXDATE:20260315T100000Z,20260322T100000Z\r\n"),
+            "{out}"
+        );
+        assert!(out.contains("SUMMARY:Recur\r\n"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_inserts_recur_date_after_rrule() {
+        // Escenario 11: sin ninguna línea `EXDATE`, se inserta en su posición
+        // canónica (tras `RRULE`, dentro del `VEVENT`).
+        let a = datetime_ms("20260315T100000Z");
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:insert@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Recur\r\nDTSTART:20240315T100000Z\r\n\
+             RRULE:FREQ=WEEKLY;COUNT=3\r\nEND:VEVENT\r\n",
+        );
+        let mut fields = recur_fields();
+        fields.exdate = Some(vec![a]);
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert_eq!(out.matches("EXDATE").count(), 1, "{out}");
+        assert!(out.contains("EXDATE:20260315T100000Z\r\n"), "{out}");
+        let rrule = out.find("RRULE:").expect("an RRULE line");
+        let exdate = out.find("EXDATE:").expect("an EXDATE line");
+        let end = out.find("END:VEVENT").expect("the VEVENT end");
+        assert!(
+            rrule < exdate && exdate < end,
+            "EXDATE debe quedar entre RRULE y END:VEVENT:\n{out}"
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_opaque_exdate_byte_for_byte_when_none() {
+        // m-3 (F27): con `fields.exdate = None` la línea `EXDATE;VALUE=DATE:…` es
+        // opaca y no se toca. Todos los demás campos modelados ya coinciden con
+        // el payload, así que la única diferencia potencial sería esa `EXDATE`:
+        // la salida debe ser **idéntica**, byte a byte.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:opaque-b@oxidav\r\nDTSTAMP:20240315T100000Z\r\n\
+             SUMMARY:Recur\r\nDESCRIPTION:Una descripcion\r\n\
+             DTSTART:20240315T100000Z\r\nDTEND:20240315T110000Z\r\n\
+             RRULE:FREQ=WEEKLY;COUNT=3\r\n\
+             EXDATE;VALUE=DATE:20260315\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            uid: "opaque-b@oxidav".to_string(),
+            summary: Some("Recur".to_string()),
+            description: Some("Una descripcion".to_string()),
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: Some(1_710_500_400_000),
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: Some("FREQ=WEEKLY;COUNT=3".to_string()),
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
+            exdate: None,
+            rdate: None,
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert_eq!(out, raw, "la EXDATE opaca no debe tocarse");
+    }
+
+    #[test]
+    fn reconcile_collapses_rdate_lines_into_one() {
+        // m-4 (F27): varias líneas `RDATE` se colapsan en UNA sola, ordenadas y
+        // deduplicadas (misma mecánica que `EXDATE`, pero para `RDATE`).
+        let a = datetime_ms("20260401T090000Z");
+        let b = datetime_ms("20260408T090000Z");
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:rdate@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Recur\r\nRDATE:20260401T090000Z\r\nRDATE:20260408T090000Z\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let mut fields = recur_fields();
+        fields.rdate = Some(vec![a, b]);
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert_eq!(out.matches("RDATE").count(), 1, "{out}");
+        assert!(
+            out.contains("RDATE:20260401T090000Z,20260408T090000Z\r\n"),
+            "{out}"
+        );
+        assert!(out.contains("SUMMARY:Recur\r\n"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_inserts_rdate_after_rrule_when_absent() {
+        // m-4 (F27): sin ninguna línea `RDATE`, se inserta en su posición
+        // canónica (tras `RRULE`, dentro del `VEVENT`).
+        let r = datetime_ms("20260401T090000Z");
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:insrdate@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Recur\r\nDTSTART:20240315T100000Z\r\n\
+             RRULE:FREQ=WEEKLY;COUNT=3\r\nEND:VEVENT\r\n",
+        );
+        let mut fields = recur_fields();
+        fields.rdate = Some(vec![r]);
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("RDATE:20260401T090000Z\r\n"), "{out}");
+        assert!(!out.contains("EXDATE"), "{out}");
+        let rrule = out.find("RRULE:").expect("an RRULE line");
+        let rdate = out.find("RDATE:").expect("an RDATE line");
+        let end = out.find("END:VEVENT").expect("the VEVENT end");
+        assert!(
+            rrule < rdate && rdate < end,
+            "RDATE debe quedar entre RRULE y END:VEVENT:\n{out}"
+        );
+    }
+
+    #[test]
+    fn reconcile_clears_rdate_and_exdate_lines_when_empty() {
+        // m-4 (F27): `Some(vec![])` en ambos campos elimina TODAS las líneas
+        // `RDATE` y `EXDATE`.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:clearboth@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Recur\r\nRDATE:20260401T090000Z\r\nEXDATE:20260315T100000Z\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let mut fields = recur_fields();
+        fields.rdate = Some(Vec::new());
+        fields.exdate = Some(Vec::new());
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(!out.contains("RDATE"), "{out}");
+        assert!(!out.contains("EXDATE"), "{out}");
+        assert!(out.contains("SUMMARY:Recur\r\n"), "{out}");
+    }
+
+    #[test]
+    fn reconcile_inserts_rdate_and_exdate_in_canonical_order() {
+        // m-4 (F27): inserción simultánea de `RDATE` y `EXDATE` en un payload
+        // sin ninguna de las dos: el orden canónico es RDATE antes que EXDATE,
+        // ambos tras `RRULE`.
+        let r = datetime_ms("20260401T090000Z");
+        let x = datetime_ms("20260315T100000Z");
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:both@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Recur\r\nDTSTART:20240315T100000Z\r\n\
+             RRULE:FREQ=WEEKLY;COUNT=3\r\nEND:VEVENT\r\n",
+        );
+        let mut fields = recur_fields();
+        fields.rdate = Some(vec![r]);
+        fields.exdate = Some(vec![x]);
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("RDATE:20260401T090000Z\r\n"), "{out}");
+        assert!(out.contains("EXDATE:20260315T100000Z\r\n"), "{out}");
+        let rrule = out.find("RRULE:").expect("an RRULE line");
+        let rdate = out.find("RDATE:").expect("an RDATE line");
+        let exdate = out.find("EXDATE:").expect("an EXDATE line");
+        let end = out.find("END:VEVENT").expect("the VEVENT end");
+        assert!(
+            rrule < rdate && rdate < exdate && exdate < end,
+            "RDATE debe ir antes que EXDATE, ambos tras RRULE:\n{out}"
+        );
+    }
+
+    // -- F28 — `SEQUENCE`: emisión, orden canónico y reconciliación ------------
+
+    /// `EventFields` mínimo para los tests de `SEQUENCE`.
+    fn sequence_fields(sequence: Option<i64>) -> EventFields {
+        EventFields {
+            uid: "seq@oxidav".to_string(),
+            summary: Some("Seq".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            exdate: None,
+            rdate: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            sequence,
+            dtstamp_ms: 1_710_496_800_000,
+        }
+    }
+
+    #[test]
+    fn build_ics_emits_sequence_last_in_canonical_order() {
+        // `SEQUENCE` se emite al final del orden canónico (…TRANSP, SEQUENCE).
+        let mut fields = sequence_fields(Some(5));
+        fields.transp = Some("OPAQUE".to_string());
+
+        let raw = build_ics(&fields);
+
+        assert!(raw.contains("SEQUENCE:5\r\n"), "{raw}");
+        let transp = raw.find("TRANSP:OPAQUE").expect("a TRANSP line");
+        let sequence = raw.find("SEQUENCE:5").expect("a SEQUENCE line");
+        let end = raw.find("END:VEVENT").expect("the VEVENT end");
+        assert!(
+            transp < sequence && sequence < end,
+            "SEQUENCE debe ir tras TRANSP y antes de END:VEVENT:\n{raw}"
+        );
+    }
+
+    #[test]
+    fn build_ics_without_sequence_is_byte_identical() {
+        // F8: con `sequence: None` la salida es byte a byte la pre-F28.
+        let fields = sequence_fields(None);
+
+        let expected = concat!(
+            "BEGIN:VCALENDAR\r\n",
+            "VERSION:2.0\r\n",
+            "PRODID:-//oxidav//oxidav//EN\r\n",
+            "BEGIN:VEVENT\r\n",
+            "UID:seq@oxidav\r\n",
+            "DTSTAMP:20240315T100000Z\r\n",
+            "SUMMARY:Seq\r\n",
+            "DTSTART:20240315T100000Z\r\n",
+            "END:VEVENT\r\n",
+            "END:VCALENDAR\r\n",
+        );
+
+        assert_eq!(build_ics(&fields), expected);
+    }
+
+    #[test]
+    fn reconcile_sets_an_existing_sequence_in_place() {
+        // F4: una línea `SEQUENCE` existente se sustituye por el valor nuevo.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:seq@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Seq\r\nSEQUENCE:1\r\nDTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = sequence_fields(Some(5));
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SEQUENCE:5\r\n"), "{out}");
+        assert!(!out.contains("SEQUENCE:1"), "{out}");
+        assert_eq!(out.matches("SEQUENCE").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn reconcile_inserts_sequence_when_absent() {
+        // F4: sin ninguna línea `SEQUENCE`, se inserta en su posición canónica
+        // (antes de `END:VEVENT`).
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:seq@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Seq\r\nDTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = sequence_fields(Some(5));
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SEQUENCE:5\r\n"), "{out}");
+        let end = out.find("END:VEVENT").expect("the VEVENT end");
+        let sequence = out.find("SEQUENCE:5").expect("a SEQUENCE line");
+        assert!(sequence < end, "{out}");
+    }
+
+    #[test]
+    fn reconcile_keeps_an_opaque_sequence_verbatim_when_none() {
+        // F5: con `fields.sequence = None` la línea `SEQUENCE:x-custom` no se
+        // toca (ni se reescribe ni se elimina).
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:opaque@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Seq\r\nSEQUENCE:x-custom\r\nDTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = sequence_fields(None);
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SEQUENCE:x-custom\r\n"), "{out}");
+        assert_eq!(out.matches("SEQUENCE").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn reconcile_never_touches_created_and_last_modified() {
+        // F6: `CREATED`/`LAST-MODIFIED` no están en `EventFields` ni en
+        // `RECONCILE_ORDER`, así que un `PATCH` ajeno las deja byte a byte.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:marks@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Original\r\n\
+             CREATED:20240101T000000Z\r\nLAST-MODIFIED:20240201T120000Z\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            summary: Some("Cambiado".to_string()),
+            ..sequence_fields(None)
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SUMMARY:Cambiado\r\n"), "{out}");
+        assert!(out.contains("CREATED:20240101T000000Z\r\n"), "{out}");
+        assert!(out.contains("LAST-MODIFIED:20240201T120000Z\r\n"), "{out}");
+        assert_eq!(out.matches("CREATED").count(), 1, "{out}");
+        assert_eq!(out.matches("LAST-MODIFIED").count(), 1, "{out}");
     }
 }
