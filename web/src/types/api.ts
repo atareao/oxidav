@@ -88,6 +88,30 @@ export interface EventDetail extends CalendarEvent {
   transp: string | null
   /** `DURATION`, verbatim (an opaque RFC 5545 duration), or `null`. */
   duration: string | null
+  /**
+   * `EXDATE` instants (Unix epoch **ms**) excluded from the recurrence, in the
+   * server's canonical form (ascending, no duplicates). Empty when the event
+   * has none **or** when the property is opaque (see {@link exdate_opaque}).
+   */
+  exdate: number[]
+  /**
+   * Verbatim text of the `EXDATE` lines when the stored payload carries a
+   * variant the backend cannot model; `null` when it is modelable or absent.
+   * When non-null, {@link exdate} is empty and the editor must not rewrite it.
+   */
+  exdate_opaque: string | null
+  /**
+   * `RDATE` instants (Unix epoch **ms**) added on top of the recurrence, in the
+   * server's canonical form (ascending, no duplicates). Empty when the event
+   * has none **or** when the property is opaque (see {@link rdate_opaque}).
+   */
+  rdate: number[]
+  /**
+   * Verbatim text of the `RDATE` lines when the stored payload carries a
+   * variant the backend cannot model; `null` when it is modelable or absent.
+   * When non-null, {@link rdate} is empty and the editor must not rewrite it.
+   */
+  rdate_opaque: string | null
 }
 
 /** Request body for creating a calendar event (`POST .../events`). */
@@ -119,6 +143,10 @@ export interface CreateEventInput {
   categories?: string[]
   /** `ATTACH` URIs, one line per value; omit/empty for none. */
   attach?: string[]
+  /** `EXDATE` instants (Unix epoch **ms**) to exclude from the recurrence; omit/empty for none. */
+  exdate?: number[]
+  /** `RDATE` instants (Unix epoch **ms**) to add to the recurrence; omit/empty for none. */
+  rdate?: number[]
 }
 
 /** Request body for a partial update of a calendar event (`PATCH .../events/{uid}`). */
@@ -165,6 +193,20 @@ export interface UpdateEventInput {
   categories?: string[]
   /** `ATTACH` URIs; `[]` *clears* them. Omit to leave them untouched. */
   attach?: string[]
+  /**
+   * `EXDATE` instants (Unix epoch **ms**) that exclude occurrences of the
+   * recurrence (D2 discipline: send it **only when it changed** versus the
+   * baseline). An empty array (`[]`) *clears* the exclusions **and** any opaque
+   * `EXDATE` property; leave it out to keep the current value untouched.
+   */
+  exdate?: number[]
+  /**
+   * `RDATE` instants (Unix epoch **ms**) added to the recurrence (D2 discipline:
+   * send it **only when it changed** versus the baseline). An empty array (`[]`)
+   * *clears* the extras **and** any opaque `RDATE` property; leave it out to
+   * keep the current value untouched.
+   */
+  rdate?: number[]
 }
 
 /**

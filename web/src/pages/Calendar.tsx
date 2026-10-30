@@ -81,6 +81,7 @@ import {
   type RecurrenceRule,
   type Weekday,
 } from '../utils/recurrence'
+import { describeRecurDates, sameInstantSet, sortUniqueInstants } from '../utils/recurDates'
 import { availableTimeZones, browserTimeZone } from '../utils/timezone'
 import { tempId } from '../utils/tempId'
 import { PAGE_GAP, fluidControlStyle } from './pageLayout'
@@ -281,6 +282,11 @@ function formValuesFromDetail(detail: EventDetail): EventFormValues {
     recurCount,
     recurUntil,
     recurByDay,
+    // F27 — una propiedad opaca no se precarga en el constructor: se muestra
+    // aparte, verbatim, y solo se reescribe por acción explícita (D2). Igual que
+    // la recurrencia, el formulario arranca vacío si el baseline es opaco.
+    exdate: detail.exdate_opaque === null ? detail.exdate.map((ms) => dayjs(ms)) : [],
+    rdate: detail.rdate_opaque === null ? detail.rdate.map((ms) => dayjs(ms)) : [],
   }
 }
 
@@ -382,6 +388,13 @@ interface EventFormValues {
   recurByDay?: Weekday[]
   /** F26 — explicit "remove recurrence" for an opaque baseline rule. */
   clearRecurrence?: boolean
+  /** F27 — instantes excluidos de la recurrencia (`EXDATE`), ya parseados. */
+  exdate?: Dayjs[]
+  /** F27 — instantes extra de la recurrencia (`RDATE`). */
+  rdate?: Dayjs[]
+  /** F27 — «quitar» explícito sobre una propiedad opaca (baseline no modelable). */
+  clearExdate?: boolean
+  clearRdate?: boolean
 }
 
 /** Fields the optimistic layer may rewrite on an existing event. */
@@ -397,7 +410,12 @@ type EventChanges = Pick<
   | 'dtend_tzid'
   | 'rrule'
 > &
-  Partial<Pick<EventDetail, 'status' | 'class' | 'transp' | 'categories' | 'attach' | 'duration'>>
+  Partial<
+    Pick<
+      EventDetail,
+      'status' | 'class' | 'transp' | 'categories' | 'attach' | 'duration' | 'exdate' | 'rdate'
+    >
+  >
 
 /**
  * Is `value` safe to render as a clickable link? The server already allowlists
@@ -692,6 +710,14 @@ export function Calendar() {
         const tzid = (values.tzid ?? '').trim()
         const rule = ruleFromValues(values)
         const rrule = rule !== null ? composeRrule(rule) : null
+        // F27 — listas en forma **canónica** (orden ascendente, sin duplicados),
+        // igual que las serializa el servidor.
+        const exdateInstants = sortUniqueInstants(
+          (values.exdate ?? []).filter((d): d is Dayjs => d != null).map((d) => d.valueOf()),
+        )
+        const rdateInstants = sortUniqueInstants(
+          (values.rdate ?? []).filter((d): d is Dayjs => d != null).map((d) => d.valueOf()),
+        )
         const optimisticId = tempId()
         // With a duration the optimistic event paints the end derived locally;
         // this instant is display-only and is never sent.
@@ -721,6 +747,8 @@ export function Calendar() {
               categories,
               attach,
               duration: durationMode === 'duration' ? composedDuration : null,
+              exdate: rule !== null ? exdateInstants : [],
+              rdate: rule !== null ? rdateInstants : [],
             },
           })
           try {
@@ -760,6 +788,16 @@ export function Calendar() {
             }
             if (attach.length > 0) {
               input.attach = attach
+            }
+            // F27 — EXDATE/RDATE forman parte de la recurrencia: solo se envían
+            // si hay una regla. Si el usuario limpia la frecuencia en alta, el
+            // bloque se oculta (pero antd conserva sus valores) y estas fechas
+            // NO deben viajar, o el servidor recibiría fechas sin `RRULE`.
+            if (rule !== null && exdateInstants.length > 0) {
+              input.exdate = exdateInstants
+            }
+            if (rule !== null && rdateInstants.length > 0) {
+              input.rdate = rdateInstants
             }
             const created = await createEvent(collectionId, input)
             setEvents((previous) => [...previous, created])
@@ -817,6 +855,35 @@ export function Calendar() {
         rruleInput = ''
         optimisticRrule = null
       }
+      // F27 — `EXDATE`/`RDATE` siguen D2: solo viajan si cambian respecto del
+      // baseline. Un baseline **opaco** se preserva verbatim salvo que el usuario
+      // marque el checkbox; uno modelable compara por conjunto de instantes.
+      const formExdate = sortUniqueInstants(
+        (values.exdate ?? []).filter((d): d is Dayjs => d != null).map((d) => d.valueOf()),
+      )
+      const formRdate = sortUniqueInstants(
+        (values.rdate ?? []).filter((d): d is Dayjs => d != null).map((d) => d.valueOf()),
+      )
+      const baselineExdate = original.exdate
+      const baselineRdate = original.rdate
+      let exdateInput: number[] | undefined
+      let optimisticExdate: number[] = baselineExdate
+      if (values.clearExdate === true) {
+        exdateInput = []
+        optimisticExdate = []
+      } else if (!sameInstantSet(formExdate, baselineExdate)) {
+        exdateInput = formExdate
+        optimisticExdate = formExdate
+      }
+      let rdateInput: number[] | undefined
+      let optimisticRdate: number[] = baselineRdate
+      if (values.clearRdate === true) {
+        rdateInput = []
+        optimisticRdate = []
+      } else if (!sameInstantSet(formRdate, baselineRdate)) {
+        rdateInput = formRdate
+        optimisticRdate = formRdate
+      }
       // `DURATION` is only sent when the user actually changed it. A value that
       // does not decompose into one number+unit (e.g. `P1DT2H`) is shown verbatim
       // and left untouched — sending a recomposed/rounded value would rewrite it
@@ -853,6 +920,8 @@ export function Calendar() {
             categories,
             attach,
             duration: durationMode === 'duration' ? composedDuration : null,
+            exdate: optimisticExdate,
+            rdate: optimisticRdate,
           },
         })
         try {
@@ -903,6 +972,12 @@ export function Calendar() {
           }
           if (rruleInput !== undefined) {
             input.rrule = rruleInput
+          }
+          if (exdateInput !== undefined) {
+            input.exdate = exdateInput
+          }
+          if (rdateInput !== undefined) {
+            input.rdate = rdateInput
           }
           const updated = await updateEvent(collectionId, target.uid, input)
           setEvents((previous) =>
@@ -965,6 +1040,10 @@ export function Calendar() {
       tzid: browserTimeZone(),
       recurInterval: 1,
       recurEndKind: 'never',
+      exdate: [],
+      rdate: [],
+      clearExdate: false,
+      clearRdate: false,
     }
   }, [editing, editDetail])
 
@@ -992,6 +1071,24 @@ export function Calendar() {
   const opaqueRrule = useMemo(() => {
     const raw = editDetail?.rrule ?? null
     return raw !== null && parseRrule(raw) === null ? raw : null
+  }, [editDetail])
+
+  // F27 — `EXDATE`/`RDATE` opacos (no modelables) se muestran verbatim y se
+  // preservan salvo que el usuario los vacíe con el checkbox (D2).
+  const exdateOpaque = useMemo(() => editDetail?.exdate_opaque ?? null, [editDetail])
+  const rdateOpaque = useMemo(() => editDetail?.rdate_opaque ?? null, [editDetail])
+  // ¿El evento (en edición) trae ya fechas de recurrencia? Si es así, el bloque
+  // F27 se muestra aunque no haya `recurFreq` (p. ej. una serie definida solo por
+  // `RDATE`, o un baseline importado por un cliente DAV).
+  const hasRecurDates = useMemo(() => {
+    const d = editDetail
+    if (d === null) return false
+    return (
+      d.exdate.length > 0 ||
+      d.rdate.length > 0 ||
+      d.exdate_opaque !== null ||
+      d.rdate_opaque !== null
+    )
   }, [editDetail])
 
   // A `DURATION` the form cannot decompose is shown verbatim; while it is
@@ -1478,72 +1575,192 @@ export function Calendar() {
             <Form.Item noStyle shouldUpdate>
               {(formInstance) => {
                 const freq = formInstance.getFieldValue('recurFreq') as RecurFreq | undefined
-                if (freq === undefined) {
+                // F27 — el bloque también aparece si el evento trae `exdate`/
+                // `rdate` (p. ej. una serie definida solo por `RDATE`) aunque no
+                // haya `recurFreq`.
+                if (freq === undefined && !hasRecurDates) {
                   return null
                 }
                 const endKind = formInstance.getFieldValue('recurEndKind') as
                   | RecurEndKind
                   | undefined
-                const preview = ruleFromValues(formInstance.getFieldsValue() as EventFormValues)
+                const values = formInstance.getFieldsValue() as EventFormValues
+                const preview = ruleFromValues(values)
                 const previewText = preview !== null ? describeRrule(composeRrule(preview)) : null
+                // F27 — resumen en vivo de las fechas ya seleccionadas.
+                const exdateSummary = describeRecurDates(
+                  (values.exdate ?? []).filter((d): d is Dayjs => d != null).map((d) => d.valueOf()),
+                )
+                const rdateSummary = describeRecurDates(
+                  (values.rdate ?? []).filter((d): d is Dayjs => d != null).map((d) => d.valueOf()),
+                )
                 return (
                   <Flex vertical gap="small" style={{ marginBottom: 16 }}>
-                    <Flex gap="small" align="end" wrap>
-                      <Form.Item name="recurInterval" label="Cada" style={{ marginBottom: 0 }}>
-                        <InputNumber min={1} precision={0} style={{ width: 120 }} aria-label="Cada" />
-                      </Form.Item>
-                      {freq === 'WEEKLY' ? (
-                        <Form.Item
-                          name="recurByDay"
-                          label="Días de la semana"
-                          style={{ minWidth: 260, marginBottom: 0 }}
-                        >
-                          <Select
-                            mode="multiple"
-                            allowClear
-                            placeholder="Lunes, miércoles…"
-                            aria-label="Días de la semana"
-                            optionFilterProp="label"
-                            options={[...WEEKDAY_OPTIONS]}
-                          />
+                    {/* Controles dependientes de la frecuencia. */}
+                    {freq !== undefined ? (
+                      <>
+                        <Flex gap="small" align="end" wrap>
+                          <Form.Item name="recurInterval" label="Cada" style={{ marginBottom: 0 }}>
+                            <InputNumber
+                              min={1}
+                              precision={0}
+                              style={{ width: 120 }}
+                              aria-label="Cada"
+                            />
+                          </Form.Item>
+                          {freq === 'WEEKLY' ? (
+                            <Form.Item
+                              name="recurByDay"
+                              label="Días de la semana"
+                              style={{ minWidth: 260, marginBottom: 0 }}
+                            >
+                              <Select
+                                mode="multiple"
+                                allowClear
+                                placeholder="Lunes, miércoles…"
+                                aria-label="Días de la semana"
+                                optionFilterProp="label"
+                                options={[...WEEKDAY_OPTIONS]}
+                              />
+                            </Form.Item>
+                          ) : null}
+                        </Flex>
+                        <Form.Item name="recurEndKind" label="Fin" style={{ marginBottom: 0 }}>
+                          <Radio.Group aria-label="Fin de la repetición">
+                            <Radio value="never">Nunca</Radio>
+                            <Radio value="count">Después de N veces</Radio>
+                            <Radio value="until">Hasta</Radio>
+                          </Radio.Group>
                         </Form.Item>
-                      ) : null}
-                    </Flex>
-                    <Form.Item name="recurEndKind" label="Fin" style={{ marginBottom: 0 }}>
-                      <Radio.Group aria-label="Fin de la repetición">
-                        <Radio value="never">Nunca</Radio>
-                        <Radio value="count">Después de N veces</Radio>
-                        <Radio value="until">Hasta</Radio>
-                      </Radio.Group>
-                    </Form.Item>
-                    {endKind === 'count' ? (
-                      <Form.Item
-                        name="recurCount"
-                        label="Número de veces"
-                        style={{ marginBottom: 0 }}
-                        rules={[{ required: true, message: 'Indica cuántas veces se repite' }]}
-                      >
-                        <InputNumber
-                          min={1}
-                          precision={0}
-                          style={{ width: 140 }}
-                          aria-label="Número de veces"
-                        />
-                      </Form.Item>
+                        {endKind === 'count' ? (
+                          <Form.Item
+                            name="recurCount"
+                            label="Número de veces"
+                            style={{ marginBottom: 0 }}
+                            rules={[{ required: true, message: 'Indica cuántas veces se repite' }]}
+                          >
+                            <InputNumber
+                              min={1}
+                              precision={0}
+                              style={{ width: 140 }}
+                              aria-label="Número de veces"
+                            />
+                          </Form.Item>
+                        ) : null}
+                        {endKind === 'until' ? (
+                          <Form.Item
+                            name="recurUntil"
+                            label="Hasta el día"
+                            style={{ marginBottom: 0 }}
+                            rules={[{ required: true, message: 'Indica la fecha de fin' }]}
+                          >
+                            <DatePicker aria-label="Hasta el día" />
+                          </Form.Item>
+                        ) : null}
+                        {previewText !== null ? (
+                          <Typography.Text type="secondary">{previewText}</Typography.Text>
+                        ) : null}
+                      </>
                     ) : null}
-                    {endKind === 'until' ? (
-                      <Form.Item
-                        name="recurUntil"
-                        label="Hasta el día"
-                        style={{ marginBottom: 0 }}
-                        rules={[{ required: true, message: 'Indica la fecha de fin' }]}
-                      >
-                        <DatePicker aria-label="Hasta el día" />
-                      </Form.Item>
-                    ) : null}
-                    {previewText !== null ? (
-                      <Typography.Text type="secondary">{previewText}</Typography.Text>
-                    ) : null}
+
+                    {/* F27 — EXDATE. Si el baseline es opaco se muestra verbatim
+                        y solo se puede vaciar con el checkbox (D2). */}
+                    {exdateOpaque !== null ? (
+                      <Flex vertical gap="small" style={{ marginBottom: 16 }}>
+                        <Typography.Text type="secondary">
+                          Fechas excluidas actuales: {exdateOpaque}
+                        </Typography.Text>
+                        <Form.Item name="clearExdate" valuePropName="checked" noStyle>
+                          <Checkbox>Quitar fechas excluidas</Checkbox>
+                        </Form.Item>
+                      </Flex>
+                    ) : (
+                      // F27 — antd conserva los valores del `Form.List` aunque el
+                      // bloque se desmonte (p. ej. al limpiar «Repetición» en alta).
+                      // No se limpian aquí: el filtro vive en `handleSubmit`, que
+                      // solo envía EXDATE si hay una regla (`rule !== null`).
+                      <Form.List name="exdate">
+                        {(fields, { add, remove }) => (
+                          <Flex vertical gap="small" style={{ marginBottom: 16 }}>
+                            <Typography.Text strong>Fechas excluidas</Typography.Text>
+                            {fields.map((field) => (
+                              <Flex key={field.key} gap="small" align="end">
+                                <Form.Item name={field.name} style={{ flex: 1, marginBottom: 0 }}>
+                                  <DatePicker
+                                    showTime
+                                    format="DD/MM/YYYY HH:mm:ss"
+                                    style={{ width: '100%' }}
+                                    aria-label={`Fecha excluida ${field.name + 1}`}
+                                  />
+                                </Form.Item>
+                                <Button
+                                  danger
+                                  type="text"
+                                  onClick={() => remove(field.name)}
+                                  aria-label={`Quitar fecha excluida ${field.name + 1}`}
+                                >
+                                  Quitar
+                                </Button>
+                              </Flex>
+                            ))}
+                            <Button onClick={() => add()} aria-label="Añadir fecha excluida">
+                              Añadir fecha excluida
+                            </Button>
+                            {exdateSummary !== '' ? (
+                              <Typography.Text type="secondary">{exdateSummary}</Typography.Text>
+                            ) : null}
+                          </Flex>
+                        )}
+                      </Form.List>
+                    )}
+
+                    {/* F27 — RDATE. Análogo a EXDATE. */}
+                    {rdateOpaque !== null ? (
+                      <Flex vertical gap="small" style={{ marginBottom: 16 }}>
+                        <Typography.Text type="secondary">
+                          Fechas extra actuales: {rdateOpaque}
+                        </Typography.Text>
+                        <Form.Item name="clearRdate" valuePropName="checked" noStyle>
+                          <Checkbox>Quitar fechas extra</Checkbox>
+                        </Form.Item>
+                      </Flex>
+                    ) : (
+                      // F27 — mismo motivo que en `exdate`: el filtro para no
+                      // enviar RDATE sin `RRULE` está en `handleSubmit`.
+                      <Form.List name="rdate">
+                        {(fields, { add, remove }) => (
+                          <Flex vertical gap="small" style={{ marginBottom: 16 }}>
+                            <Typography.Text strong>Fechas extra</Typography.Text>
+                            {fields.map((field) => (
+                              <Flex key={field.key} gap="small" align="end">
+                                <Form.Item name={field.name} style={{ flex: 1, marginBottom: 0 }}>
+                                  <DatePicker
+                                    showTime
+                                    format="DD/MM/YYYY HH:mm:ss"
+                                    style={{ width: '100%' }}
+                                    aria-label={`Fecha extra ${field.name + 1}`}
+                                  />
+                                </Form.Item>
+                                <Button
+                                  danger
+                                  type="text"
+                                  onClick={() => remove(field.name)}
+                                  aria-label={`Quitar fecha extra ${field.name + 1}`}
+                                >
+                                  Quitar
+                                </Button>
+                              </Flex>
+                            ))}
+                            <Button onClick={() => add()} aria-label="Añadir fecha extra">
+                              Añadir fecha extra
+                            </Button>
+                            {rdateSummary !== '' ? (
+                              <Typography.Text type="secondary">{rdateSummary}</Typography.Text>
+                            ) : null}
+                          </Flex>
+                        )}
+                      </Form.List>
+                    )}
                   </Flex>
                 )
               }}

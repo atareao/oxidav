@@ -16,8 +16,8 @@
 
 use super::{
     IcsError, LogicalLine, component_boundary, component_stacks, is_property_line,
-    is_vcalendar_level, is_vevent_top_level, normalize_ics_text, parse_ics, property_name,
-    property_value, split_logical_lines,
+    is_vcalendar_level, is_vevent_top_level, normalize_ics_text, parse_datetime_with_tzid,
+    parse_ics, property_name, property_param, property_value, split_logical_lines,
 };
 
 /// Proyección de un `.ics` a las propiedades del `VEVENT` que la SPA edita.
@@ -58,6 +58,19 @@ pub struct EventProjection {
     pub dtend_tzid: Option<String>,
     /// `RRULE` como texto opaco (nunca expandida).
     pub rrule: Option<String>,
+    /// Instantes (ms) de todas las líneas `EXDATE` **del subconjunto soportado**,
+    /// ordenados ascendente y sin duplicados. Vacío también cuando la propiedad
+    /// es opaca.
+    pub exdate: Vec<i64>,
+    /// Texto **verbatim** de las líneas `EXDATE` cuando la propiedad **no**
+    /// encaja en el subconjunto soportado (informativo; su preservación la
+    /// garantiza `reconcile_ics` al no tocar las líneas). `None` si es modelable
+    /// o ausente.
+    pub exdate_opaque: Option<String>,
+    /// Igual que `exdate`.
+    pub rdate: Vec<i64>,
+    /// Igual que `exdate_opaque`.
+    pub rdate_opaque: Option<String>,
 }
 
 /// Proyecta el primer `VEVENT` de un payload `.ics` sobre [`EventProjection`].
@@ -113,6 +126,10 @@ pub fn project_event(raw: &str) -> Result<EventProjection, IcsError> {
         .map(str::to_string)
         .collect();
 
+    let (exdate, exdate_opaque) =
+        project_recur_dates(&lines, &stacks, target, target_end, "EXDATE");
+    let (rdate, rdate_opaque) = project_recur_dates(&lines, &stacks, target, target_end, "RDATE");
+
     Ok(EventProjection {
         uid: parsed.uid,
         summary: normalize_ics_text(parsed.summary.as_deref()),
@@ -130,6 +147,10 @@ pub fn project_event(raw: &str) -> Result<EventProjection, IcsError> {
         dtstart_tzid: parsed.dtstart_tzid,
         dtend_tzid: parsed.dtend_tzid,
         rrule: parsed.rrule,
+        exdate,
+        exdate_opaque,
+        rdate,
+        rdate_opaque,
     })
 }
 
@@ -219,6 +240,77 @@ fn unescape_text(value: &str) -> String {
         }
     }
     out
+}
+
+/// Proyecta las líneas de nivel superior `EXDATE`/`RDATE` del `VEVENT` objetivo
+/// al subconjunto soportado (`DATE-TIME` con `TZID` opcional).
+///
+/// Devuelve `(instantes, opaco)`:
+/// - sin líneas, o cuando todas encajan → `(instantes ordenados y deduplicados, None)`;
+/// - si **alguna** línea lleva `VALUE=DATE`/`VALUE=PERIOD` o algún token de su
+///   valor no parsea → `(vec![], Some(texto))`, donde `texto` es la
+///   concatenación de los textos de línea completos unidos con `"; "` (la regla
+///   de conjunto: no se modela a medias).
+///
+/// El filtro de nivel usa el mismo criterio que [`top_level_values`], pero itera
+/// el **texto completo** de cada línea para poder leer sus parámetros.
+fn project_recur_dates(
+    lines: &[LogicalLine],
+    stacks: &[Vec<String>],
+    target: usize,
+    target_end: usize,
+    name: &str,
+) -> (Vec<i64>, Option<String>) {
+    let mut instants: Vec<i64> = Vec::new();
+    let mut texts: Vec<&str> = Vec::new();
+    let mut any_opaque = false;
+
+    for (line, stack) in lines[target + 1..target_end]
+        .iter()
+        .zip(&stacks[target + 1..target_end])
+    {
+        if !is_vevent_top_level(stack) || !is_property_line(&line.text) {
+            continue;
+        }
+        if !property_name(&line.text).eq_ignore_ascii_case(name) {
+            continue;
+        }
+
+        texts.push(&line.text);
+
+        // `VALUE=DATE`/`VALUE=PERIOD` quedan fuera del subconjunto soportado.
+        if let Some(value) = property_param(&line.text, "VALUE")
+            && (value.eq_ignore_ascii_case("DATE") || value.eq_ignore_ascii_case("PERIOD"))
+        {
+            any_opaque = true;
+            continue;
+        }
+
+        let tzid = property_param(&line.text, "TZID");
+        let raw_value = property_value(&line.text);
+        if raw_value.is_empty() {
+            any_opaque = true;
+            continue;
+        }
+
+        for token in raw_value.split(',') {
+            match parse_datetime_with_tzid(token, tzid) {
+                Some((ms, _)) => instants.push(ms),
+                None => {
+                    any_opaque = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if any_opaque {
+        return (Vec::new(), Some(texts.join("; ")));
+    }
+
+    instants.sort_unstable();
+    instants.dedup();
+    (instants, None)
 }
 
 #[cfg(test)]
@@ -357,5 +449,188 @@ mod tests {
             project_event("BEGIN:VCALENDAREND:VCALENDAR"),
             Err(IcsError::NoEvent)
         );
+    }
+
+    // -- F27 — proyección de `EXDATE`/`RDATE` ---------------------------------
+
+    #[test]
+    fn projects_absent_recur_dates_as_empty_and_none() {
+        // Escenario 1: sin `EXDATE`/`RDATE` → listas vacías y opacos `None`.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:none@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+
+        let projection = project_event(&raw).expect("project");
+
+        assert!(projection.exdate.is_empty());
+        assert!(projection.rdate.is_empty());
+        assert_eq!(projection.exdate_opaque, None);
+        assert_eq!(projection.rdate_opaque, None);
+    }
+
+    #[test]
+    fn projects_modelable_exdate_with_tzid() {
+        // Escenario 2: `DATE-TIME` con `TZID`, varios tokens → ordenados.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:exdate@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART;TZID=Europe/Madrid:20260315T100000\r\n\
+             EXDATE;TZID=Europe/Madrid:20260315T100000,20260322T100000\r\n\
+             END:VEVENT\r\n",
+        );
+
+        let a = parse_datetime_with_tzid("20260315T100000", Some("Europe/Madrid"))
+            .expect("parse")
+            .0;
+        let b = parse_datetime_with_tzid("20260322T100000", Some("Europe/Madrid"))
+            .expect("parse")
+            .0;
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.exdate, vec![a, b]);
+        assert_eq!(projection.exdate_opaque, None);
+        assert!(projection.rdate.is_empty());
+    }
+
+    #[test]
+    fn projects_modelable_rdate_in_utc() {
+        // Escenario 3: `RDATE` UTC sin `TZID`.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:rdate@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             RDATE:20260401T090000Z\r\nEND:VEVENT\r\n",
+        );
+
+        let expected = parse_datetime_with_tzid("20260401T090000Z", None)
+            .expect("parse")
+            .0;
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.rdate, vec![expected]);
+        assert_eq!(projection.rdate_opaque, None);
+    }
+
+    #[test]
+    fn projects_opaque_exdate_value_date() {
+        // Escenario 4: `VALUE=DATE` fuera del subconjunto → opaco.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:opaque@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             EXDATE;VALUE=DATE:20260315\r\nEND:VEVENT\r\n",
+        );
+
+        let projection = project_event(&raw).expect("project");
+
+        assert!(projection.exdate.is_empty());
+        assert_eq!(
+            projection.exdate_opaque.as_deref(),
+            Some("EXDATE;VALUE=DATE:20260315")
+        );
+    }
+
+    #[test]
+    fn projects_mixed_exdate_entirely_opaque() {
+        // Escenario 5: una línea modelable y otra `VALUE=DATE` → toda opaca.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:mixed@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             EXDATE:20260315T100000Z\r\nEXDATE;VALUE=DATE:20260322\r\n\
+             END:VEVENT\r\n",
+        );
+
+        let projection = project_event(&raw).expect("project");
+
+        assert!(projection.exdate.is_empty());
+        assert_eq!(
+            projection.exdate_opaque.as_deref(),
+            Some("EXDATE:20260315T100000Z; EXDATE;VALUE=DATE:20260322")
+        );
+    }
+
+    #[test]
+    fn projects_exdate_and_rdate_independently() {
+        // Extra: `EXDATE` modelable y `RDATE` opaco a la vez.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:indep@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             EXDATE:20260315T100000Z\r\n\
+             RDATE;VALUE=PERIOD:20260401T090000Z/PT1H\r\n\
+             RDATE:20260402T090000Z\r\nEND:VEVENT\r\n",
+        );
+
+        let expected = parse_datetime_with_tzid("20260315T100000Z", None)
+            .expect("parse")
+            .0;
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.exdate, vec![expected]);
+        assert_eq!(projection.exdate_opaque, None);
+        assert!(projection.rdate.is_empty());
+        assert_eq!(
+            projection.rdate_opaque.as_deref(),
+            Some("RDATE;VALUE=PERIOD:20260401T090000Z/PT1H; RDATE:20260402T090000Z")
+        );
+    }
+
+    #[test]
+    fn projects_dedups_instants_across_exdate_lines() {
+        // n-7: el mismo instante repetido en dos líneas `EXDATE` distintas debe
+        // colapsar a una sola entrada.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:dedup@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             EXDATE:20260315T100000Z\r\nEXDATE:20260315T100000Z\r\n\
+             END:VEVENT\r\n",
+        );
+        let expected = parse_datetime_with_tzid("20260315T100000Z", None)
+            .expect("parse")
+            .0;
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.exdate, vec![expected]);
+        assert_eq!(projection.exdate_opaque, None);
+    }
+
+    #[test]
+    fn projects_rdate_from_multiple_lines_ordered() {
+        // n-7: un `RDATE` repartido en varias líneas modelables aporta todas sus
+        // entradas, ordenadas ascendente.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:rdate-multi@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             RDATE:20260408T090000Z\r\nRDATE:20260401T090000Z\r\n\
+             END:VEVENT\r\n",
+        );
+        let a = parse_datetime_with_tzid("20260401T090000Z", None)
+            .expect("parse")
+            .0;
+        let b = parse_datetime_with_tzid("20260408T090000Z", None)
+            .expect("parse")
+            .0;
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.rdate, vec![a, b]);
+        assert_eq!(projection.rdate_opaque, None);
+    }
+
+    #[test]
+    fn projects_recur_values_ignoring_nested_components() {
+        // El `EXDATE` de un `VALARM` no es el del evento.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:nested@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             BEGIN:VALARM\r\nACTION:DISPLAY\r\nEXDATE:20260315T100000Z\r\n\
+             END:VALARM\r\nEND:VEVENT\r\n",
+        );
+
+        let projection = project_event(&raw).expect("project");
+
+        assert!(projection.exdate.is_empty());
+        assert_eq!(projection.exdate_opaque, None);
     }
 }

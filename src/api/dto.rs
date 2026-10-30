@@ -237,6 +237,20 @@ pub struct EventDetailDto {
     pub transp: Option<String>,
     /// `DURATION`, verbatim (an opaque RFC 5545 duration).
     pub duration: Option<String>,
+    /// Instantes (ms Unix) de las líneas `EXDATE` del subconjunto soportado,
+    /// ordenados ascendente y sin duplicados (F27). Vacío también cuando la
+    /// propiedad es opaca o ausente.
+    pub exdate: Vec<i64>,
+    /// Texto **verbatim** de las líneas `EXDATE` cuando la propiedad **no**
+    /// encaja en el subconjunto soportado; `null` si es modelable o ausente
+    /// (F27).
+    pub exdate_opaque: Option<String>,
+    /// Instantes (ms Unix) de las líneas `RDATE` del subconjunto soportado,
+    /// ordenados y sin duplicados; vacío también si es opaca o ausente (F27).
+    pub rdate: Vec<i64>,
+    /// Texto **verbatim** de las líneas `RDATE` cuando la propiedad es opaca;
+    /// `null` si es modelable o ausente (F27).
+    pub rdate_opaque: Option<String>,
 }
 
 impl EventDetailDto {
@@ -269,6 +283,10 @@ impl EventDetailDto {
             class_: projection.class,
             transp: projection.transp,
             duration: projection.duration,
+            exdate: projection.exdate,
+            exdate_opaque: projection.exdate_opaque,
+            rdate: projection.rdate,
+            rdate_opaque: projection.rdate_opaque,
         }
     }
 }
@@ -331,6 +349,15 @@ pub struct CreateEventRequest {
     /// `ATTACH` URIs, one content line per value (each an `http`/`https` URI).
     #[serde(default)]
     pub attach: Option<Vec<String>>,
+    /// `EXDATE` instantes (ms Unix) excluidos de la recurrencia (F27). La lista
+    /// vacía significa "sin la propiedad"; se emite como una única línea
+    /// `EXDATE`, ordenada y sin duplicados.
+    #[serde(default)]
+    pub exdate: Option<Vec<i64>>,
+    /// `RDATE` instantes (ms Unix) añadidos a la recurrencia (F27). Misma
+    /// semántica que `exdate`.
+    #[serde(default)]
+    pub rdate: Option<Vec<i64>>,
 }
 
 /// Request body for a partial update of a calendar event.
@@ -393,6 +420,15 @@ pub struct UpdateEventRequest {
     /// New `ATTACH` URIs, if provided (`[]` clears them).
     #[serde(default)]
     pub attach: Option<Vec<String>>,
+    /// New `EXDATE` instantes (ms Unix), if provided (F27). `Some` **reemplaza**
+    /// el conjunto entero; `Some(vec![])` **limpia** la propiedad —también una
+    /// propiedad opaca—; ausente (`None`) = no cambiar.
+    #[serde(default)]
+    pub exdate: Option<Vec<i64>>,
+    /// New `RDATE` instantes (ms Unix), if provided (F27). Misma semántica que
+    /// `exdate`.
+    #[serde(default)]
+    pub rdate: Option<Vec<i64>>,
 }
 
 impl UpdateEventRequest {
@@ -413,6 +449,8 @@ impl UpdateEventRequest {
             && self.duration.is_none()
             && self.categories.is_none()
             && self.attach.is_none()
+            && self.exdate.is_none()
+            && self.rdate.is_none()
     }
 }
 
