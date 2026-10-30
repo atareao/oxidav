@@ -54,7 +54,7 @@ use serde::Deserialize;
 use crate::auth::SessionUser;
 use crate::dav::common::new_id;
 use crate::dav::ics::{
-    EventFields, EventProjection, build_ics, project_event, reconcile_ics,
+    EventFields, EventProjection, MAX_SEQUENCE, build_ics, project_event, reconcile_ics,
     supported_instant_range_ms,
 };
 use crate::dav::vtimezone;
@@ -216,6 +216,7 @@ pub async fn create(
     let attach = validate_attach(request.attach.as_deref().unwrap_or_default())?;
     let exdate = validate_instant_list(request.exdate.as_deref().unwrap_or_default(), "exdate")?;
     let rdate = validate_instant_list(request.rdate.as_deref().unwrap_or_default(), "rdate")?;
+    let sequence = validate_sequence(request.sequence)?;
     validate_range(request.dtstart, request.dtend)?;
 
     // `DURATION` and `DTEND` are mutually exclusive (RFC 5545): supplying both is
@@ -255,6 +256,7 @@ pub async fn create(
         duration: duration.clone(),
         categories: categories.clone(),
         attach: attach.clone(),
+        sequence,
         dtstamp_ms: now_millis(),
     };
 
@@ -509,6 +511,18 @@ pub async fn update(
             None => Some(Vec::new()),
         },
     };
+    // F28 — `SEQUENCE` sigue la regla de merge uniforme con tres estados: una
+    // propiedad **opaca** en el payload se preserva verbatim (`None` en
+    // `EventFields` la deja intacta), una modelable se hereda, y sin proyección
+    // usable se deja sin tocar.
+    let sequence = match request.sequence {
+        Some(value) => validate_sequence(Some(value))?,
+        None => match stored.as_ref() {
+            Some(event) if event.sequence_opaque.is_some() => None,
+            Some(event) => event.sequence,
+            None => None,
+        },
+    };
 
     // `DURATION`/`DTEND` are mutually exclusive (RFC 5545) and the server enforces
     // it, not just the UI:
@@ -558,6 +572,7 @@ pub async fn update(
         duration,
         categories,
         attach,
+        sequence,
         dtstamp_ms: now_millis(),
     };
 
@@ -1098,6 +1113,22 @@ fn validate_instant_list(items: &[i64], field: &str) -> Result<Vec<i64>, ApiErro
     out.sort_unstable();
     out.dedup();
     Ok(out)
+}
+
+/// Validate and normalise an optional `SEQUENCE` (RFC 5545 §3.8.7.4).
+///
+/// `None` significa «no tocar las líneas `SEQUENCE` del payload» (una propiedad
+/// opaca o ausente queda intacta; no hay camino de borrado por `PATCH`). Un
+/// valor recibido debe caer en el rango cerrado `0..=2147483647`; fuera de él es
+/// un `400`. El valor se emite verbatim como `SEQUENCE:<n>`.
+fn validate_sequence(raw: Option<i64>) -> Result<Option<i64>, ApiError> {
+    match raw {
+        None => Ok(None),
+        Some(value) if (0..=MAX_SEQUENCE).contains(&value) => Ok(Some(value)),
+        Some(_) => Err(ApiError::Validation(format!(
+            "El campo `sequence` debe ser un entero entre 0 y {MAX_SEQUENCE}"
+        ))),
+    }
 }
 
 /// Reject an inverted range and any instant outside the representable calendar
@@ -1644,5 +1675,48 @@ mod tests {
             ..UpdateEventRequest::default()
         };
         assert!(!rdate_only.is_empty());
+    }
+
+    // -- F28 — `SEQUENCE`: validación y D2 -------------------------------------
+
+    #[test]
+    fn validate_sequence_accepts_the_supported_range() {
+        // `None` = no tocar la propiedad.
+        assert_eq!(validate_sequence(None).ok(), Some(None));
+        // Fronteras del rango cerrado `0..=2147483647` (RFC 5545 §3.8.7.4).
+        assert_eq!(validate_sequence(Some(0)).ok(), Some(Some(0)));
+        assert_eq!(
+            validate_sequence(Some(MAX_SEQUENCE)).ok(),
+            Some(Some(MAX_SEQUENCE))
+        );
+    }
+
+    #[test]
+    fn validate_sequence_rejects_out_of_range_values() {
+        assert!(matches!(
+            validate_sequence(Some(-1)),
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            validate_sequence(Some(MAX_SEQUENCE + 1)),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn update_is_empty_considers_sequence() {
+        // F28: un `PATCH` que solo toca `sequence` no es vacío.
+        let sequence_only = UpdateEventRequest {
+            sequence: Some(4),
+            ..UpdateEventRequest::default()
+        };
+        assert!(!sequence_only.is_empty());
+
+        // `Some(0)` también cuenta (no es `None`).
+        let zero = UpdateEventRequest {
+            sequence: Some(0),
+            ..UpdateEventRequest::default()
+        };
+        assert!(!zero.is_empty());
     }
 }

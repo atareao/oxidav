@@ -46,6 +46,11 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// Milliseconds in a second.
 const MILLIS_PER_SECOND: i64 = 1_000;
 
+/// Techo del subconjunto de `SEQUENCE` soportado (RFC 5545 §3.8.7.4): un entero
+/// sin signo en `0..=2147483647`. Se comparte entre la proyección (lectura) y la
+/// API (validación) para que la frontera sea única.
+pub(crate) const MAX_SEQUENCE: i64 = 2_147_483_647;
+
 /// Errors produced while parsing an `.ics` payload.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum IcsError {
@@ -360,6 +365,11 @@ pub struct EventFields {
     /// `RDATE` — instantes (ms) añadidos a la recurrencia. Misma semántica de tres
     /// estados que `exdate`.
     pub rdate: Option<Vec<i64>>,
+    /// `SEQUENCE` (RFC 5545 §3.8.7.4). `None` significa «no tocar las líneas
+    /// `SEQUENCE` del payload» (una propiedad opaca o ausente queda intacta);
+    /// `Some(n)` fija la propiedad y la emite como `SEQUENCE:<n>`. No hay camino
+    /// de borrado por `PATCH`.
+    pub sequence: Option<i64>,
     /// `DTSTAMP` as Unix milliseconds (the moment of composition).
     pub dtstamp_ms: i64,
 }
@@ -463,6 +473,9 @@ pub fn build_ics(fields: &EventFields) -> String {
     if let Some(transp) = &fields.transp {
         body.push(transp_line(transp));
     }
+    if let Some(sequence) = fields.sequence {
+        body.push(sequence_line(sequence));
+    }
     body.push("END:VEVENT".to_string());
     body.push("END:VCALENDAR".to_string());
 
@@ -489,11 +502,11 @@ pub fn build_ics(fields: &EventFields) -> String {
 /// Property names [`reconcile_ics`] knows, in canonical emission order.
 ///
 /// `LOCATION` and `URL` are modelled fields as of F24; `CATEGORIES`, `ATTACH`,
-/// `STATUS`, `CLASS`, `TRANSP` and `DURATION` join them in F25, and `RDATE`/
-/// `EXDATE` in F27. A pre-existing line of any of them is reconciled in place (or
-/// removed when the final value is empty), and they anchor the canonical insertion
-/// position of a neighbouring modelled property.
-const RECONCILE_ORDER: [&str; 16] = [
+/// `STATUS`, `CLASS`, `TRANSP` and `DURATION` join them in F25, `RDATE`/
+/// `EXDATE` in F27 and `SEQUENCE` in F28. A pre-existing line of any of them is
+/// reconciled in place (or removed when the final value is empty), and they
+/// anchor the canonical insertion position of a neighbouring modelled property.
+const RECONCILE_ORDER: [&str; 17] = [
     "DTSTAMP",
     "SUMMARY",
     "DESCRIPTION",
@@ -510,6 +523,7 @@ const RECONCILE_ORDER: [&str; 16] = [
     "STATUS",
     "CLASS",
     "TRANSP",
+    "SEQUENCE",
 ];
 
 /// One **logical** iCalendar content line: its unfolded text plus the physical
@@ -750,6 +764,12 @@ fn transp_line(transp: &str) -> String {
     format!("TRANSP:{transp}")
 }
 
+/// Render the `SEQUENCE` content line as a plain non-negative integer
+/// (RFC 5545 §3.8.7.4).
+fn sequence_line(sequence: i64) -> String {
+    format!("SEQUENCE:{sequence}")
+}
+
 /// Render the `DURATION` content line (an opaque value, emitted verbatim, like
 /// `RRULE`).
 fn duration_line(duration: &str) -> String {
@@ -820,7 +840,8 @@ fn recur_date_line(name: &str, instants: &[i64]) -> String {
 /// (`ATTENDEE`, `X-*`…) se reemiten **verbatim**, con su plegado original. El
 /// conjunto modelado —y por tanto reconciliado— es `SUMMARY`, `DESCRIPTION`,
 /// `LOCATION`, `URL`, `CATEGORIES`, `ATTACH`, `DTSTART`, `DTEND`, `DURATION`,
-/// `RRULE`, `RDATE`, `EXDATE`, `STATUS`, `CLASS`, `TRANSP` y `DTSTAMP`. `ATTACH`
+/// `RRULE`, `RDATE`, `EXDATE`, `STATUS`, `CLASS`, `TRANSP`, `SEQUENCE` y
+/// `DTSTAMP`. `ATTACH`
 /// es **multi-valor**:
 /// la primera ocurrencia se sustituye por el bloque completo de valores (una
 /// línea por cada uno, en orden) y todas las demás se eliminan; `CATEGORIES`,
@@ -828,6 +849,8 @@ fn recur_date_line(name: &str, instants: &[i64]) -> String {
 /// **una** línea (las ocurrencias extra se colapsan). `RDATE`/`EXDATE` sólo se
 /// reconcilian cuando `fields.rdate`/`fields.exdate` es `Some`: con `None` la
 /// propiedad se considera **opaca**, no se toca y sus líneas quedan intactas.
+/// `SEQUENCE` sigue la misma semántica de tres estados: con `None` no se
+/// reconcilia (opaca o ausente) y sus líneas quedan intactas.
 /// Las únicas líneas regeneradas son las modeladas ausentes o modificadas.
 ///
 /// Si la zona final de `DTSTART`/`DTEND` no está definida en el `VCALENDAR`, se
@@ -1020,6 +1043,13 @@ pub fn reconcile_ics(raw: &str, fields: &EventFields) -> Result<String, IcsError
                 .collect(),
         ),
     ]);
+
+    // `SEQUENCE` entra **sólo** cuando el campo es `Some`: con `None` la
+    // propiedad es **opaca o ausente**, no se incluye y sus líneas del payload
+    // quedan intactas (misma semántica de tres estados que `RDATE`/`EXDATE`).
+    if let Some(sequence) = fields.sequence {
+        final_values.push(("SEQUENCE", vec![sequence_line(sequence)]));
+    }
 
     let mut replace: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     let mut remove: BTreeSet<usize> = BTreeSet::new();
@@ -1616,6 +1646,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -1655,6 +1686,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -1697,6 +1729,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -1736,6 +1769,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -1770,6 +1804,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 0,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -1803,6 +1838,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -1849,6 +1885,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_493_200_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -1904,6 +1941,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_493_200_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -1984,6 +2022,7 @@ mod tests {
             categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         }
@@ -2110,6 +2149,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2180,6 +2220,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2225,6 +2266,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2270,6 +2312,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2313,6 +2356,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2359,6 +2403,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2432,6 +2477,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2464,6 +2510,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2500,6 +2547,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2543,6 +2591,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2588,6 +2637,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2629,6 +2679,7 @@ mod tests {
             categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2676,6 +2727,7 @@ mod tests {
             categories: vec!["Reunion".to_string(), "Trabajo".to_string()],
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2722,6 +2774,7 @@ mod tests {
             attach: Vec::new(),
             // F25: la tarea de API los cablea.
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2765,6 +2818,7 @@ mod tests {
                 "https://b.example/y&z,w".to_string(),
             ],
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2802,6 +2856,7 @@ mod tests {
             categories: Vec::new(),
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2846,6 +2901,7 @@ mod tests {
             categories: vec!["trabajo".to_string()],
             attach: vec!["https://a.example/x".to_string()],
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2902,6 +2958,7 @@ mod tests {
                 "https://zz.example/w".to_string(),
             ],
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2957,6 +3014,7 @@ mod tests {
             categories: Vec::new(),
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -2999,6 +3057,7 @@ mod tests {
             categories: vec!["trabajo".to_string(), "personal".to_string()],
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -3050,6 +3109,7 @@ mod tests {
                 "https://b.example/y".to_string(),
             ],
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -3127,6 +3187,7 @@ mod tests {
             categories: Vec::new(),
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
         }
     }
 
@@ -3408,6 +3469,7 @@ mod tests {
             categories: Vec::new(),
             attach: Vec::new(),
             dtstamp_ms: 1_710_496_800_000,
+            sequence: None,
             exdate: None,
             rdate: None,
         };
@@ -3515,5 +3577,146 @@ mod tests {
             rrule < rdate && rdate < exdate && exdate < end,
             "RDATE debe ir antes que EXDATE, ambos tras RRULE:\n{out}"
         );
+    }
+
+    // -- F28 — `SEQUENCE`: emisión, orden canónico y reconciliación ------------
+
+    /// `EventFields` mínimo para los tests de `SEQUENCE`.
+    fn sequence_fields(sequence: Option<i64>) -> EventFields {
+        EventFields {
+            uid: "seq@oxidav".to_string(),
+            summary: Some("Seq".to_string()),
+            description: None,
+            location: None,
+            url: None,
+            dtstart_ms: 1_710_496_800_000,
+            dtend_ms: None,
+            dtstart_tzid: None,
+            dtend_tzid: None,
+            rrule: None,
+            exdate: None,
+            rdate: None,
+            status: None,
+            class_: None,
+            transp: None,
+            duration: None,
+            categories: Vec::new(),
+            attach: Vec::new(),
+            sequence,
+            dtstamp_ms: 1_710_496_800_000,
+        }
+    }
+
+    #[test]
+    fn build_ics_emits_sequence_last_in_canonical_order() {
+        // `SEQUENCE` se emite al final del orden canónico (…TRANSP, SEQUENCE).
+        let mut fields = sequence_fields(Some(5));
+        fields.transp = Some("OPAQUE".to_string());
+
+        let raw = build_ics(&fields);
+
+        assert!(raw.contains("SEQUENCE:5\r\n"), "{raw}");
+        let transp = raw.find("TRANSP:OPAQUE").expect("a TRANSP line");
+        let sequence = raw.find("SEQUENCE:5").expect("a SEQUENCE line");
+        let end = raw.find("END:VEVENT").expect("the VEVENT end");
+        assert!(
+            transp < sequence && sequence < end,
+            "SEQUENCE debe ir tras TRANSP y antes de END:VEVENT:\n{raw}"
+        );
+    }
+
+    #[test]
+    fn build_ics_without_sequence_is_byte_identical() {
+        // F8: con `sequence: None` la salida es byte a byte la pre-F28.
+        let fields = sequence_fields(None);
+
+        let expected = concat!(
+            "BEGIN:VCALENDAR\r\n",
+            "VERSION:2.0\r\n",
+            "PRODID:-//oxidav//oxidav//EN\r\n",
+            "BEGIN:VEVENT\r\n",
+            "UID:seq@oxidav\r\n",
+            "DTSTAMP:20240315T100000Z\r\n",
+            "SUMMARY:Seq\r\n",
+            "DTSTART:20240315T100000Z\r\n",
+            "END:VEVENT\r\n",
+            "END:VCALENDAR\r\n",
+        );
+
+        assert_eq!(build_ics(&fields), expected);
+    }
+
+    #[test]
+    fn reconcile_sets_an_existing_sequence_in_place() {
+        // F4: una línea `SEQUENCE` existente se sustituye por el valor nuevo.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:seq@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Seq\r\nSEQUENCE:1\r\nDTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = sequence_fields(Some(5));
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SEQUENCE:5\r\n"), "{out}");
+        assert!(!out.contains("SEQUENCE:1"), "{out}");
+        assert_eq!(out.matches("SEQUENCE").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn reconcile_inserts_sequence_when_absent() {
+        // F4: sin ninguna línea `SEQUENCE`, se inserta en su posición canónica
+        // (antes de `END:VEVENT`).
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:seq@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Seq\r\nDTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = sequence_fields(Some(5));
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SEQUENCE:5\r\n"), "{out}");
+        let end = out.find("END:VEVENT").expect("the VEVENT end");
+        let sequence = out.find("SEQUENCE:5").expect("a SEQUENCE line");
+        assert!(sequence < end, "{out}");
+    }
+
+    #[test]
+    fn reconcile_keeps_an_opaque_sequence_verbatim_when_none() {
+        // F5: con `fields.sequence = None` la línea `SEQUENCE:x-custom` no se
+        // toca (ni se reescribe ni se elimina).
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:opaque@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Seq\r\nSEQUENCE:x-custom\r\nDTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = sequence_fields(None);
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SEQUENCE:x-custom\r\n"), "{out}");
+        assert_eq!(out.matches("SEQUENCE").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn reconcile_never_touches_created_and_last_modified() {
+        // F6: `CREATED`/`LAST-MODIFIED` no están en `EventFields` ni en
+        // `RECONCILE_ORDER`, así que un `PATCH` ajeno las deja byte a byte.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:marks@oxidav\r\nDTSTAMP:20240315T090000Z\r\n\
+             SUMMARY:Original\r\n\
+             CREATED:20240101T000000Z\r\nLAST-MODIFIED:20240201T120000Z\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+        let fields = EventFields {
+            summary: Some("Cambiado".to_string()),
+            ..sequence_fields(None)
+        };
+
+        let out = reconcile_ics(&raw, &fields).expect("reconcile");
+
+        assert!(out.contains("SUMMARY:Cambiado\r\n"), "{out}");
+        assert!(out.contains("CREATED:20240101T000000Z\r\n"), "{out}");
+        assert!(out.contains("LAST-MODIFIED:20240201T120000Z\r\n"), "{out}");
+        assert_eq!(out.matches("CREATED").count(), 1, "{out}");
+        assert_eq!(out.matches("LAST-MODIFIED").count(), 1, "{out}");
     }
 }

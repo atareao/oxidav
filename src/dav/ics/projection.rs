@@ -15,9 +15,10 @@
 //! anidados: el `SUMMARY` de un `VALARM` no es el del evento.
 
 use super::{
-    IcsError, LogicalLine, component_boundary, component_stacks, is_property_line,
-    is_vcalendar_level, is_vevent_top_level, normalize_ics_text, parse_datetime_with_tzid,
-    parse_ics, property_name, property_param, property_value, split_logical_lines,
+    IcsError, LogicalLine, MAX_SEQUENCE, component_boundary, component_stacks, is_property_line,
+    is_vcalendar_level, is_vevent_top_level, normalize_ics_text, parse_datetime_ms,
+    parse_datetime_with_tzid, parse_ics, property_name, property_param, property_value,
+    split_logical_lines,
 };
 
 /// Proyección de un `.ics` a las propiedades del `VEVENT` que la SPA edita.
@@ -71,6 +72,17 @@ pub struct EventProjection {
     pub rdate: Vec<i64>,
     /// Igual que `exdate_opaque`.
     pub rdate_opaque: Option<String>,
+    /// `SEQUENCE` como entero del subconjunto soportado (`0..=2147483647`,
+    /// RFC 5545 §3.8.7.4). `None` también cuando la propiedad es opaca o ausente.
+    pub sequence: Option<i64>,
+    /// Texto **verbatim** de la línea `SEQUENCE` cuando **no** es un entero
+    /// válido (informativo; su preservación la garantiza `reconcile_ics` al no
+    /// tocarla). `None` si es modelable o ausente.
+    pub sequence_opaque: Option<String>,
+    /// `CREATED` como milisegundos Unix (UTC). `None` si ausente o no parseable.
+    pub created_ms: Option<i64>,
+    /// `LAST-MODIFIED` como milisegundos Unix (UTC). `None` si ausente o no parseable.
+    pub last_modified_ms: Option<i64>,
 }
 
 /// Proyecta el primer `VEVENT` de un payload `.ics` sobre [`EventProjection`].
@@ -129,6 +141,7 @@ pub fn project_event(raw: &str) -> Result<EventProjection, IcsError> {
     let (exdate, exdate_opaque) =
         project_recur_dates(&lines, &stacks, target, target_end, "EXDATE");
     let (rdate, rdate_opaque) = project_recur_dates(&lines, &stacks, target, target_end, "RDATE");
+    let (sequence, sequence_opaque) = project_sequence(&lines, &stacks, target, target_end);
 
     Ok(EventProjection {
         uid: parsed.uid,
@@ -151,7 +164,47 @@ pub fn project_event(raw: &str) -> Result<EventProjection, IcsError> {
         exdate_opaque,
         rdate,
         rdate_opaque,
+        sequence,
+        sequence_opaque,
+        created_ms: first_value(&lines, &stacks, target, target_end, "CREATED")
+            .and_then(parse_datetime_ms),
+        last_modified_ms: first_value(&lines, &stacks, target, target_end, "LAST-MODIFIED")
+            .and_then(parse_datetime_ms),
     })
+}
+
+/// Proyecta la línea `SEQUENCE` del `VEVENT` objetivo a `(modelable, opaco)`.
+///
+/// El valor es **modelable** cuando es un entero en `0..=2147483647`
+/// (RFC 5545 §3.8.7.4): entonces `(Some(n), None)`. Si la línea existe pero el
+/// valor no parsea o cae fuera de rango —o si hay varias y la **primera** no es
+/// modelable— la propiedad es **opaca**: `(None, Some(texto de la línea
+/// verbatim))`. Sin ninguna línea `SEQUENCE`: `(None, None)`.
+fn project_sequence(
+    lines: &[LogicalLine],
+    stacks: &[Vec<String>],
+    target: usize,
+    target_end: usize,
+) -> (Option<i64>, Option<String>) {
+    for (line, stack) in lines[target + 1..target_end]
+        .iter()
+        .zip(&stacks[target + 1..target_end])
+    {
+        if !is_vevent_top_level(stack) || !is_property_line(&line.text) {
+            continue;
+        }
+        if !property_name(&line.text).eq_ignore_ascii_case("SEQUENCE") {
+            continue;
+        }
+        let value = property_value(&line.text).trim();
+        if let Ok(number) = value.parse::<i64>()
+            && (0..=MAX_SEQUENCE).contains(&number)
+        {
+            return (Some(number), None);
+        }
+        return (None, Some(line.text.clone()));
+    }
+    (None, None)
 }
 
 /// The values of every top-level `name` property of the target `VEVENT`, in
@@ -632,5 +685,104 @@ mod tests {
 
         assert!(projection.exdate.is_empty());
         assert_eq!(projection.exdate_opaque, None);
+    }
+
+    // -- F28 — proyección de `SEQUENCE`, `CREATED` y `LAST-MODIFIED` ----------
+
+    #[test]
+    fn projects_modelable_sequence() {
+        // `SEQUENCE:3` dentro del subconjunto soportado → modelable.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:seq@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\nSEQUENCE:3\r\nEND:VEVENT\r\n",
+        );
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.sequence, Some(3));
+        assert_eq!(projection.sequence_opaque, None);
+    }
+
+    #[test]
+    fn projects_opaque_sequence_verbatim() {
+        // Un `SEQUENCE` no entero es opaco: se preserva verbatim y no se modela.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:seq-opaque@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\nSEQUENCE:x-custom\r\nEND:VEVENT\r\n",
+        );
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.sequence, None);
+        assert_eq!(
+            projection.sequence_opaque.as_deref(),
+            Some("SEQUENCE:x-custom")
+        );
+    }
+
+    #[test]
+    fn projects_out_of_range_sequence_as_opaque() {
+        // Fuera del rango `0..=2147483647` (RFC 5545 §3.8.7.4) → opaco.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:seq-range@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\nSEQUENCE:2147483648\r\nEND:VEVENT\r\n",
+        );
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.sequence, None);
+        assert_eq!(
+            projection.sequence_opaque.as_deref(),
+            Some("SEQUENCE:2147483648")
+        );
+    }
+
+    #[test]
+    fn projects_absent_sequence_as_none() {
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:seq-absent@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.sequence, None);
+        assert_eq!(projection.sequence_opaque, None);
+    }
+
+    #[test]
+    fn projects_created_and_last_modified_as_utc_ms() {
+        // RFC 5545 §3.8.7.1/§3.8.7.3: ambas van en UTC. El valor esperado se
+        // deriva del propio parser, nunca de un número mágico.
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:marks@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\n\
+             CREATED:20240101T000000Z\r\nLAST-MODIFIED:20240201T120000Z\r\n\
+             END:VEVENT\r\n",
+        );
+        let created = parse_datetime_with_tzid("20240101T000000Z", None)
+            .expect("parse")
+            .0;
+        let last_modified = parse_datetime_with_tzid("20240201T120000Z", None)
+            .expect("parse")
+            .0;
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.created_ms, Some(created));
+        assert_eq!(projection.last_modified_ms, Some(last_modified));
+    }
+
+    #[test]
+    fn projects_absent_marks_as_none() {
+        let raw = calendar(
+            "BEGIN:VEVENT\r\nUID:marks-absent@oxidav\r\nSUMMARY:x\r\n\
+             DTSTART:20240315T100000Z\r\nEND:VEVENT\r\n",
+        );
+
+        let projection = project_event(&raw).expect("project");
+
+        assert_eq!(projection.created_ms, None);
+        assert_eq!(projection.last_modified_ms, None);
     }
 }

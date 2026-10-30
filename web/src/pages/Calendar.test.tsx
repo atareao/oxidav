@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { listCalendarCollections } from '../services/collections'
 import { createEvent, deleteEvent, getEvent, listEvents, updateEvent } from '../services/events'
 import type { CalendarEvent, Collection, EventDetail } from '../types/api'
+import { formatDateTime } from '../utils/date'
 import { Calendar } from './Calendar'
 
 dayjs.extend(customParseFormat)
@@ -79,7 +80,8 @@ function makeEvent(overrides: Partial<CalendarEvent> = {}): CalendarEvent {
  * Detalle completo mínimo (proyección F25) para mockear `getEvent`. Cada test
  * lo completa con `overrides`; las seis propiedades F25 van a "vacío" para que
  * el diálogo no envíe nada que el usuario no haya tocado (regla D2). Lo mismo
- * para las cuatro propiedades F27 (`EXDATE`/`RDATE`): lista vacía y `null`.
+ * para las cuatro propiedades F27 (`EXDATE`/`RDATE`) y las cuatro F28
+ * (`SEQUENCE`/`CREATED`/`LAST-MODIFIED`): vacío/`null` por defecto.
  */
 function makeDetail(overrides: Partial<EventDetail> = {}): EventDetail {
   return {
@@ -94,6 +96,10 @@ function makeDetail(overrides: Partial<EventDetail> = {}): EventDetail {
     exdate_opaque: null,
     rdate: [],
     rdate_opaque: null,
+    sequence: null,
+    sequence_opaque: null,
+    created: null,
+    last_modified: null,
     ...overrides,
   }
 }
@@ -1684,6 +1690,221 @@ describe('Calendar', () => {
       await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
       const [, input] = vi.mocked(createEvent).mock.calls[0]
       expect('exdate' in input).toBe(false)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // F28 — `SEQUENCE` editable y `CREATED`/`LAST-MODIFIED` de solo lectura.
+  // -------------------------------------------------------------------------
+
+  describe('F28 — SEQUENCE / CREATED / LAST-MODIFIED', () => {
+    it('escenario F10: el diálogo muestra la secuencia y las marcas de tiempo (F28)', async () => {
+      const created = Date.UTC(2024, 0, 1, 0, 0, 0)
+      const lastModified = Date.UTC(2024, 1, 1, 12, 0, 0)
+      const event = makeDetail({
+        summary: 'Con secuencia',
+        sequence: 2,
+        created,
+        last_modified: lastModified,
+      })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Con secuencia' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con secuencia' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Con secuencia/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      const sequence = within(dialog).getByRole('spinbutton', { name: 'Secuencia' })
+      expect((sequence as HTMLInputElement).value).toBe('2')
+      expect(within(dialog).getByText(`Creado: ${formatDateTime(created)}`)).toBeInTheDocument()
+      expect(
+        within(dialog).getByText(`Modificado: ${formatDateTime(lastModified)}`),
+      ).toBeInTheDocument()
+    })
+
+    it('escenario F10b: muestra una SEQUENCE opaca verbatim y sin editor (F28)', async () => {
+      const event = makeDetail({ summary: 'Opaca', sequence_opaque: 'SEQUENCE:x-custom' })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Opaca' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Opaca' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Opaca/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      expect(
+        within(dialog).getByText('Secuencia actual: SEQUENCE:x-custom'),
+      ).toBeInTheDocument()
+      // La propiedad opaca no se edita: no hay `InputNumber` de secuencia.
+      expect(within(dialog).queryByRole('spinbutton', { name: 'Secuencia' })).toBeNull()
+    })
+
+    it('escenario F11 (D2): preserva verbatim la SEQUENCE opaca al guardar (F28)', async () => {
+      const event = makeDetail({ summary: 'Opaca', sequence_opaque: 'SEQUENCE:x-custom' })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Opaca' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Otro título' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Opaca/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      // Cambiar **solo** el título no debe tocar la `SEQUENCE` opaca: se preserva
+      // verbatim (no viaja en el `PATCH`).
+      const title = within(dialog).getByRole('textbox', { name: 'Título' })
+      await user.clear(title)
+      await user.type(title, 'Otro título')
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect('sequence' in input).toBe(false)
+    })
+
+    it('escenario F10 (alta): envía la secuencia si el usuario la rellena (F28)', async () => {
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([])
+      vi.mocked(createEvent).mockResolvedValue(
+        makeEvent({ uid: 'nuevo', summary: 'Con secuencia' }),
+      )
+
+      const user = userEvent.setup()
+      renderCalendar()
+      const dialog = await openCreateDialog(user)
+
+      await user.type(
+        within(dialog).getByRole('textbox', { name: 'Título' }),
+        'Con secuencia',
+      )
+      const sequence = within(dialog).getByRole('spinbutton', { name: 'Secuencia' })
+      await user.type(sequence, '7')
+      await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+      await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
+      const [, input] = vi.mocked(createEvent).mock.calls[0]
+      expect(input.sequence).toBe(7)
+    })
+
+    it('escenario F10 (alta): no envía la secuencia si el usuario no la rellena (F28)', async () => {
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([])
+      vi.mocked(createEvent).mockResolvedValue(
+        makeEvent({ uid: 'nuevo', summary: 'Sin secuencia' }),
+      )
+
+      const user = userEvent.setup()
+      renderCalendar()
+      const dialog = await openCreateDialog(user)
+
+      await user.type(within(dialog).getByRole('textbox', { name: 'Título' }), 'Sin secuencia')
+      await user.click(within(dialog).getByRole('button', { name: 'Crear' }))
+
+      await waitFor(() => expect(createEvent).toHaveBeenCalledTimes(1))
+      const [, input] = vi.mocked(createEvent).mock.calls[0]
+      expect('sequence' in input).toBe(false)
+    })
+
+    it('escenario F11 (D2): vaciar una secuencia modelable no la envía (F28)', async () => {
+      const event = makeDetail({ summary: 'Con secuencia', sequence: 2 })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Con secuencia' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Otro título' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Con secuencia/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      const sequence = within(dialog).getByRole('spinbutton', { name: 'Secuencia' })
+      await user.clear(sequence)
+      const title = within(dialog).getByRole('textbox', { name: 'Título' })
+      await user.clear(title)
+      await user.type(title, 'Otro título')
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      // Comportamiento intencional: no hay borrado de `SEQUENCE` por `PATCH` en el
+      // MVP — vaciar un valor existente **no** lo envía (el servidor no sabría
+      // eliminarlo y el baseline se mantiene).
+      expect('sequence' in input).toBe(false)
+    })
+
+    it('escenario F11 (D2): no reenvía la secuencia si no cambia (F28)', async () => {
+      const event = makeDetail({ summary: 'Con secuencia', sequence: 2 })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Con secuencia' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Otro título' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Con secuencia/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      // Cambiar **solo** el título no debe reenviar la secuencia.
+      const title = within(dialog).getByRole('textbox', { name: 'Título' })
+      await user.clear(title)
+      await user.type(title, 'Otro título')
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect('sequence' in input).toBe(false)
+    })
+
+    it('escenario F11 (D2): envía la secuencia al cambiarla (F28)', async () => {
+      const event = makeDetail({ summary: 'Con secuencia', sequence: 2 })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Con secuencia' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con secuencia' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Con secuencia/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      const sequence = within(dialog).getByRole('spinbutton', { name: 'Secuencia' })
+      await user.clear(sequence)
+      await user.type(sequence, '4')
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect(input.sequence).toBe(4)
+    })
+
+    it('escenario F10 (extra): CREATED/LAST-MODIFIED nunca viajan en el PATCH (F28)', async () => {
+      const event = makeDetail({
+        summary: 'Con marcas',
+        created: Date.UTC(2024, 0, 1),
+        last_modified: Date.UTC(2024, 1, 1),
+      })
+      vi.mocked(listCalendarCollections).mockResolvedValue([collection])
+      vi.mocked(listEvents).mockResolvedValue([makeEvent({ summary: 'Con marcas' })])
+      vi.mocked(getEvent).mockResolvedValue(event)
+      vi.mocked(updateEvent).mockResolvedValue(makeEvent({ summary: 'Con marcas' }))
+
+      const user = userEvent.setup()
+      renderCalendar()
+      await user.click(await screen.findByRole('button', { name: /· Con marcas/ }))
+
+      const dialog = await screen.findByRole('dialog')
+      await user.click(within(dialog).getByRole('button', { name: 'Guardar' }))
+
+      await waitFor(() => expect(updateEvent).toHaveBeenCalledTimes(1))
+      const [, , input] = vi.mocked(updateEvent).mock.calls[0]
+      expect('created' in input).toBe(false)
+      expect('last_modified' in input).toBe(false)
     })
   })
 })

@@ -251,6 +251,18 @@ pub struct EventDetailDto {
     /// Texto **verbatim** de las líneas `RDATE` cuando la propiedad es opaca;
     /// `null` si es modelable o ausente (F27).
     pub rdate_opaque: Option<String>,
+    /// `SEQUENCE` como entero del subconjunto soportado; `null` también si la
+    /// propiedad es opaca o ausente (F28).
+    pub sequence: Option<i64>,
+    /// Texto **verbatim** de la línea `SEQUENCE` cuando **no** es un entero
+    /// válido; `null` si es modelable o ausente (F28).
+    pub sequence_opaque: Option<String>,
+    /// `CREATED` como milisegundos Unix (UTC); `null` si ausente o no parseable
+    /// (F28). **No** confundir con `created_at` (la columna de la fila).
+    pub created: Option<i64>,
+    /// `LAST-MODIFIED` como milisegundos Unix (UTC); `null` si ausente o no
+    /// parseable (F28). **No** confundir con `updated_at` (la columna de la fila).
+    pub last_modified: Option<i64>,
 }
 
 impl EventDetailDto {
@@ -287,6 +299,10 @@ impl EventDetailDto {
             exdate_opaque: projection.exdate_opaque,
             rdate: projection.rdate,
             rdate_opaque: projection.rdate_opaque,
+            sequence: projection.sequence,
+            sequence_opaque: projection.sequence_opaque,
+            created: projection.created_ms,
+            last_modified: projection.last_modified_ms,
         }
     }
 }
@@ -358,6 +374,10 @@ pub struct CreateEventRequest {
     /// semántica que `exdate`.
     #[serde(default)]
     pub rdate: Option<Vec<i64>>,
+    /// `SEQUENCE` (RFC 5545 §3.8.7.4), un entero en `0..=2147483647` (F28).
+    /// Ausente significa "sin la propiedad"; se emite como `SEQUENCE:<n>`.
+    #[serde(default)]
+    pub sequence: Option<i64>,
 }
 
 /// Request body for a partial update of a calendar event.
@@ -429,6 +449,11 @@ pub struct UpdateEventRequest {
     /// `exdate`.
     #[serde(default)]
     pub rdate: Option<Vec<i64>>,
+    /// New `SEQUENCE` (F28), if provided, un entero en `0..=2147483647`. Ausente
+    /// (`None`) = no cambiar: se hereda del payload si es modelable, o no se
+    /// toca el opaco/ausente.
+    #[serde(default)]
+    pub sequence: Option<i64>,
 }
 
 impl UpdateEventRequest {
@@ -451,6 +476,7 @@ impl UpdateEventRequest {
             && self.attach.is_none()
             && self.exdate.is_none()
             && self.rdate.is_none()
+            && self.sequence.is_none()
     }
 }
 
