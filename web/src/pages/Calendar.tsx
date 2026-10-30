@@ -22,6 +22,7 @@ import {
   App,
   Button,
   Card,
+  Checkbox,
   DatePicker,
   Empty,
   Flex,
@@ -69,6 +70,18 @@ import {
   isSameMonth,
   startOfMonthMs,
 } from '../utils/date'
+import {
+  FREQ_OPTIONS,
+  WEEKDAY_OPTIONS,
+  composeRrule,
+  describeRrule,
+  parseRrule,
+  type RecurEndKind,
+  type RecurFreq,
+  type RecurrenceRule,
+  type Weekday,
+} from '../utils/recurrence'
+import { availableTimeZones, browserTimeZone } from '../utils/timezone'
 import { tempId } from '../utils/tempId'
 import { PAGE_GAP, fluidControlStyle } from './pageLayout'
 
@@ -220,6 +233,33 @@ function formValuesFromDetail(detail: EventDetail): EventFormValues {
       }
     }
   }
+  // F26 — recurrencia. Solo se precarga el constructor con una regla que el
+  // subconjunto soportado entiende (`parseRrule`); una regla opaca deja el
+  // constructor vacío: se muestra verbatim y solo se reescribe por acción
+  // explícita del usuario (disciplina D2).
+  let recurFreq: RecurFreq | undefined
+  let recurInterval: number | undefined
+  let recurEndKind: RecurEndKind | undefined
+  let recurCount: number | undefined
+  let recurUntil: Dayjs | undefined
+  let recurByDay: Weekday[] | undefined
+  if (detail.rrule !== null) {
+    const rule = parseRrule(detail.rrule)
+    if (rule !== null) {
+      recurFreq = rule.freq
+      recurInterval = rule.interval
+      recurEndKind = rule.endKind
+      if (rule.count !== undefined) {
+        recurCount = rule.count
+      }
+      if (rule.until !== undefined) {
+        recurUntil = untilToDayjs(rule.until)
+      }
+      if (rule.byDay !== undefined) {
+        recurByDay = rule.byDay
+      }
+    }
+  }
   return {
     summary: detail.summary ?? '',
     description: detail.description ?? '',
@@ -234,18 +274,73 @@ function formValuesFromDetail(detail: EventDetail): EventFormValues {
     durationMode,
     durationValue,
     durationUnit,
+    tzid: detail.dtstart_tzid ?? undefined,
+    recurFreq,
+    recurInterval,
+    recurEndKind,
+    recurCount,
+    recurUntil,
+    recurByDay,
   }
 }
 
 /**
- * The browser's IANA time zone, used to anchor created/edited events (F18) so a
- * recurrence repeats in local wall-clock time instead of drifting across a DST
- * change. Returns `undefined` when the runtime cannot resolve it, in which case
- * the field must be **omitted** — the API rejects an empty `tzid` with a 400.
+ * Read a `YYYYMMDD` `UNTIL` into a `Dayjs`. Built from an ISO `YYYY-MM-DD`
+ * string so it does not depend on the `customParseFormat` plugin being loaded.
  */
-function browserTimeZone(): string | undefined {
-  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
-  return zone === undefined || zone === '' ? undefined : zone
+function untilToDayjs(until: string): Dayjs {
+  return dayjs(`${until.slice(0, 4)}-${until.slice(4, 6)}-${until.slice(6, 8)}`)
+}
+
+/**
+ * Coerce an antd numeric control value to a positive integer, or `undefined`.
+ *
+ * `InputNumber` emits `null` when cleared and (without `precision`) accepts
+ * decimals; the server's `RRULE` alphabet rejects `.`, so anything that is not
+ * a finite integer `>= 1` is treated as "absent" (mirrors `composeDuration`).
+ */
+function normalizePositiveInt(value: number | null | undefined): number | undefined {
+  if (value === null || value === undefined) {
+    return undefined
+  }
+  const size = Math.trunc(value)
+  return Number.isFinite(size) && size >= 1 ? size : undefined
+}
+
+/**
+ * Build the structured recurrence from the form values (F26); `null` when no
+ * frequency is chosen. `interval` defaults to 1 and `BYDAY` is only meaningful
+ * for a weekly rule (mirrors `composeRrule`).
+ *
+ * Total: nunca lanza ni compone un fin inválido. Un `count`/`until` ausente o
+ * borrado (antd emite `null`) hace caer el fin a `never`, de modo que jamás se
+ * envía `COUNT=null`/`UNTIL=undefined` al servidor.
+ */
+function ruleFromValues(values: EventFormValues): RecurrenceRule | null {
+  const freq = values.recurFreq
+  if (freq === undefined) {
+    return null
+  }
+  const interval = normalizePositiveInt(values.recurInterval) ?? 1
+  const requestedEnd: RecurEndKind = values.recurEndKind ?? 'never'
+  const rule: RecurrenceRule = { freq, interval, endKind: 'never' }
+  if (requestedEnd === 'count') {
+    const count = normalizePositiveInt(values.recurCount)
+    if (count !== undefined) {
+      rule.endKind = 'count'
+      rule.count = count
+    }
+  } else if (requestedEnd === 'until') {
+    const until = values.recurUntil
+    if (until !== null && until !== undefined) {
+      rule.endKind = 'until'
+      rule.until = until.format('YYYYMMDD')
+    }
+  }
+  if (freq === 'WEEKLY' && values.recurByDay !== undefined && values.recurByDay.length > 0) {
+    rule.byDay = values.recurByDay
+  }
+  return rule
 }
 
 function defaultRange(): [Dayjs, Dayjs] {
@@ -271,12 +366,36 @@ interface EventFormValues {
   durationValue?: number
   /** Unit for the composed `DURATION`. */
   durationUnit?: DurationUnit
+  /** F26 — IANA time zone anchoring the event (`TZID`); empty means none. */
+  tzid?: string
+  /** F26 — recurrence frequency; absent means "no recurrence". */
+  recurFreq?: RecurFreq
+  /** F26 — every how many periods (antd can emit `null`). */
+  recurInterval?: number | null
+  /** F26 — how the recurrence ends (default `never`). */
+  recurEndKind?: RecurEndKind
+  /** F26 — number of occurrences (antd emits `null` when cleared). */
+  recurCount?: number | null
+  /** F26 — last day (antd emits `null` when cleared). */
+  recurUntil?: Dayjs | null
+  /** F26 — weekdays (only for a weekly rule). */
+  recurByDay?: Weekday[]
+  /** F26 — explicit "remove recurrence" for an opaque baseline rule. */
+  clearRecurrence?: boolean
 }
 
 /** Fields the optimistic layer may rewrite on an existing event. */
 type EventChanges = Pick<
   CalendarEvent,
-  'summary' | 'description' | 'location' | 'url' | 'dtstart' | 'dtend' | 'dtstart_tzid' | 'dtend_tzid'
+  | 'summary'
+  | 'description'
+  | 'location'
+  | 'url'
+  | 'dtstart'
+  | 'dtend'
+  | 'dtstart_tzid'
+  | 'dtend_tzid'
+  | 'rrule'
 > &
   Partial<Pick<EventDetail, 'status' | 'class' | 'transp' | 'categories' | 'attach' | 'duration'>>
 
@@ -567,9 +686,12 @@ export function Calendar() {
       }
 
       if (editing === null) {
-        // A newly created event is anchored to the browser's current zone so a
-        // recurrence repeats in local wall-clock time (F18).
-        const tzid = browserTimeZone()
+        // F26 — the zone is a first-class, clearable field now (defaulting to
+        // the browser's zone); an empty value means "no zone" and the key is
+        // omitted (the API rejects an empty `tzid`).
+        const tzid = (values.tzid ?? '').trim()
+        const rule = ruleFromValues(values)
+        const rrule = rule !== null ? composeRrule(rule) : null
         const optimisticId = tempId()
         // With a duration the optimistic event paints the end derived locally;
         // this instant is display-only and is never sent.
@@ -587,9 +709,9 @@ export function Calendar() {
               url: hasUrl ? url : null,
               dtstart,
               dtend: durationMode === 'end' ? dtend : durationMs === null ? null : dtstart + durationMs,
-              dtstart_tzid: tzid ?? null,
-              dtend_tzid: tzid ?? null,
-              rrule: null,
+              dtstart_tzid: tzid === '' ? null : tzid,
+              dtend_tzid: tzid === '' ? null : tzid,
+              rrule,
               etag: '',
               created_at: Date.now(),
               updated_at: Date.now(),
@@ -613,8 +735,11 @@ export function Calendar() {
             if (hasUrl) {
               input.url = url
             }
-            if (tzid !== undefined) {
+            if (tzid !== '') {
               input.tzid = tzid
+            }
+            if (rrule !== null) {
+              input.rrule = rrule
             }
             if (durationMode === 'end') {
               input.dtend = dtend
@@ -658,11 +783,40 @@ export function Calendar() {
         finish()
         return
       }
-      // Editing must NOT re-anchor the event: `dtstart` is a fixed instant, so
-      // re-anchoring (say) a `Europe/Madrid` event to the browser zone would
-      // silently change the local time of its recurrence. Preserve the existing
-      // anchor; when the event has none, omit `tzid` rather than invent one.
-      const anchorTzid = target.dtstart_tzid
+      // F26 — the zone can be changed but not removed (a `PATCH` cannot clear
+      // it): an empty field keeps the current anchor, a non-empty one is sent.
+      const tzid = (values.tzid ?? '').trim()
+      const optimisticTzid = tzid !== '' ? tzid : target.dtstart_tzid
+      // F26 — recurrence follows D2: only send it when it actually changed. An
+      // opaque baseline (`parseRrule` ⇒ `null`) is preserved verbatim unless the
+      // user composes a new rule or ticks «Quitar recurrencia».
+      const composed = ruleFromValues(values)
+      const composedStr = composed !== null ? composeRrule(composed) : null
+      const baselineRrule = original.rrule
+      // M1 — se compara contra la forma **canónica** del baseline, no contra el
+      // texto crudo: una regla parseable pero no canónica (`BYDAY` desordenado,
+      // `UNTIL` corto, `INTERVAL=1` explícito) no debe reescribirse si el
+      // formulario reconstruye exactamente la misma regla. Así el `.ics` conserva
+      // el texto original verbatim.
+      const baselineParsed = baselineRrule !== null ? parseRrule(baselineRrule) : null
+      const baselineCanonical = baselineParsed !== null ? composeRrule(baselineParsed) : null
+      let rruleInput: string | undefined
+      let optimisticRrule: string | null = baselineRrule
+      if (values.clearRecurrence === true) {
+        rruleInput = ''
+        optimisticRrule = null
+      } else if (composedStr !== null && composedStr !== baselineCanonical) {
+        rruleInput = composedStr
+        optimisticRrule = composedStr
+      } else if (
+        composedStr === null &&
+        baselineRrule !== null &&
+        parseRrule(baselineRrule) !== null
+      ) {
+        // The user emptied a rule the form had decomposed: clear it.
+        rruleInput = ''
+        optimisticRrule = null
+      }
       // `DURATION` is only sent when the user actually changed it. A value that
       // does not decompose into one number+unit (e.g. `P1DT2H`) is shown verbatim
       // and left untouched — sending a recomposed/rounded value would rewrite it
@@ -690,8 +844,9 @@ export function Calendar() {
             url: hasUrl ? url : null,
             dtstart,
             dtend: durationMode === 'end' ? dtend : null,
-            dtstart_tzid: anchorTzid,
-            dtend_tzid: target.dtend_tzid,
+            dtstart_tzid: optimisticTzid,
+            dtend_tzid: tzid !== '' ? tzid : target.dtend_tzid,
+            rrule: optimisticRrule,
             status: status === '' ? null : status,
             class: eventClass === '' ? null : eventClass,
             transp: transp === '' ? null : transp,
@@ -743,8 +898,11 @@ export function Calendar() {
           if (!sameStringArray(attach, original.attach)) {
             input.attach = attach
           }
-          if (anchorTzid !== null) {
-            input.tzid = anchorTzid
+          if (tzid !== '') {
+            input.tzid = tzid
+          }
+          if (rruleInput !== undefined) {
+            input.rrule = rruleInput
           }
           const updated = await updateEvent(collectionId, target.uid, input)
           setEvents((previous) =>
@@ -802,6 +960,11 @@ export function Calendar() {
       url: '',
       range: defaultRange(),
       durationMode: 'end',
+      // F26 — a new event defaults to the browser zone; the recurrence stays
+      // off until a frequency is chosen.
+      tzid: browserTimeZone(),
+      recurInterval: 1,
+      recurEndKind: 'never',
     }
   }, [editing, editDetail])
 
@@ -814,6 +977,22 @@ export function Calendar() {
   // Same idea for the `ATTACH` list: an inherited non-http URI is preserved, so
   // the per-item validator must accept the values the dialog opened with.
   const attachBaselines = useMemo(() => editDetail?.attach ?? [], [editDetail])
+
+  // F26 — the zone selector offers every known IANA zone and, defensively, the
+  // event's current zone even when the runtime does not list it.
+  const timezoneOptions = useMemo(() => {
+    const zones = availableTimeZones()
+    const current = editDetail?.dtstart_tzid ?? null
+    const all = current !== null && !zones.includes(current) ? [...zones, current] : zones
+    return all.map((zone) => ({ value: zone, label: zone }))
+  }, [editDetail])
+
+  // F26 — a recurrence the form cannot influence (opaque) is shown verbatim and
+  // preserved unless the user composes a new one or ticks «Quitar recurrencia».
+  const opaqueRrule = useMemo(() => {
+    const raw = editDetail?.rrule ?? null
+    return raw !== null && parseRrule(raw) === null ? raw : null
+  }, [editDetail])
 
   // A `DURATION` the form cannot decompose is shown verbatim; while it is
   // untouched it must not be sent (D2), so the dialog advertises it explicitly.
@@ -1248,6 +1427,126 @@ export function Calendar() {
                 format="DD/MM/YYYY HH:mm:ss"
                 style={{ width: '100%' }}
               />
+            </Form.Item>
+
+            {/* F26 — zona horaria (`TZID`). Limpiable solo en alta: el `PATCH`
+                no puede quitar la zona (un `tzid` vacío es un 400). */}
+            <Form.Item
+              name="tzid"
+              label="Zona horaria"
+              extra={
+                editing !== null ? (
+                  <Typography.Text type="secondary">
+                    La zona no se puede quitar desde aquí
+                  </Typography.Text>
+                ) : undefined
+              }
+            >
+              <Select
+                showSearch
+                allowClear={editing === null}
+                placeholder="UTC / sin zona"
+                aria-label="Zona horaria"
+                optionFilterProp="label"
+                options={timezoneOptions}
+              />
+            </Form.Item>
+
+            {/* F26 — recurrencia (`RRULE`) con constructor estructurado. */}
+            {opaqueRrule !== null ? (
+              <Flex vertical gap="small" style={{ marginBottom: 16 }}>
+                <Typography.Text type="secondary">
+                  Recurrencia actual: {opaqueRrule}
+                </Typography.Text>
+                <Form.Item name="clearRecurrence" valuePropName="checked" noStyle>
+                  <Checkbox>Quitar recurrencia</Checkbox>
+                </Form.Item>
+              </Flex>
+            ) : null}
+
+            <Form.Item name="recurFreq" label="Repetición">
+              <Select
+                showSearch
+                allowClear
+                placeholder="Sin repetición"
+                aria-label="Repetición"
+                optionFilterProp="label"
+                options={[...FREQ_OPTIONS]}
+              />
+            </Form.Item>
+
+            <Form.Item noStyle shouldUpdate>
+              {(formInstance) => {
+                const freq = formInstance.getFieldValue('recurFreq') as RecurFreq | undefined
+                if (freq === undefined) {
+                  return null
+                }
+                const endKind = formInstance.getFieldValue('recurEndKind') as
+                  | RecurEndKind
+                  | undefined
+                const preview = ruleFromValues(formInstance.getFieldsValue() as EventFormValues)
+                const previewText = preview !== null ? describeRrule(composeRrule(preview)) : null
+                return (
+                  <Flex vertical gap="small" style={{ marginBottom: 16 }}>
+                    <Flex gap="small" align="end" wrap>
+                      <Form.Item name="recurInterval" label="Cada" style={{ marginBottom: 0 }}>
+                        <InputNumber min={1} precision={0} style={{ width: 120 }} aria-label="Cada" />
+                      </Form.Item>
+                      {freq === 'WEEKLY' ? (
+                        <Form.Item
+                          name="recurByDay"
+                          label="Días de la semana"
+                          style={{ minWidth: 260, marginBottom: 0 }}
+                        >
+                          <Select
+                            mode="multiple"
+                            allowClear
+                            placeholder="Lunes, miércoles…"
+                            aria-label="Días de la semana"
+                            optionFilterProp="label"
+                            options={[...WEEKDAY_OPTIONS]}
+                          />
+                        </Form.Item>
+                      ) : null}
+                    </Flex>
+                    <Form.Item name="recurEndKind" label="Fin" style={{ marginBottom: 0 }}>
+                      <Radio.Group aria-label="Fin de la repetición">
+                        <Radio value="never">Nunca</Radio>
+                        <Radio value="count">Después de N veces</Radio>
+                        <Radio value="until">Hasta</Radio>
+                      </Radio.Group>
+                    </Form.Item>
+                    {endKind === 'count' ? (
+                      <Form.Item
+                        name="recurCount"
+                        label="Número de veces"
+                        style={{ marginBottom: 0 }}
+                        rules={[{ required: true, message: 'Indica cuántas veces se repite' }]}
+                      >
+                        <InputNumber
+                          min={1}
+                          precision={0}
+                          style={{ width: 140 }}
+                          aria-label="Número de veces"
+                        />
+                      </Form.Item>
+                    ) : null}
+                    {endKind === 'until' ? (
+                      <Form.Item
+                        name="recurUntil"
+                        label="Hasta el día"
+                        style={{ marginBottom: 0 }}
+                        rules={[{ required: true, message: 'Indica la fecha de fin' }]}
+                      >
+                        <DatePicker aria-label="Hasta el día" />
+                      </Form.Item>
+                    ) : null}
+                    {previewText !== null ? (
+                      <Typography.Text type="secondary">{previewText}</Typography.Text>
+                    ) : null}
+                  </Flex>
+                )
+              }}
             </Form.Item>
           </Form>
         )}
